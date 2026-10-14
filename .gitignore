@@ -1,0 +1,14 @@
+# Build artifacts
+minzx
+jase
+*.o
+bin/Win32/
+bin/x64/
+
+# Windows-only vendored binaries from the original Visual Studio project —
+# dead weight, we build on Linux via system SDL2 (pkg-config)
+lib/SDL2/Win32/
+lib/SDL2/x64/
+
+# Copyrighted ROM images — not ours to distribute, keep local only
+*.rom
