@@ -3,6 +3,7 @@
 
 #include <inttypes.h>
 #include <vector>
+#include <SDL.h>
 #include "z80.h"
 
 // Agent/debug port tracing: when set (via --trace-port on the command
@@ -25,6 +26,15 @@ public:
 	void setBorderColor(uint8_t bcol) { border = bcol; }
 	uint8_t getBorderColor() const { return border; }
 	uint32_t getTStates() const { return tstates; }
+
+	// Lets main.cpp pace the loop off the audio device's real queue depth
+	// instead of a fixed SDL_Delay — see the beeper section in project
+	// memory for why: a wall-clock delay alone drifts from the audio
+	// device's fixed 44100 Hz consumption rate and causes underrun
+	// crackle, exactly the "random bits" artifact reported and reproduced.
+	uint32_t getQueuedAudioBytes() const;
+	static const int kAudioSampleRate = 44100;
+	static const int kAudioSamplesPerFrame = kAudioSampleRate / 50;
 	void notifyKey(uint8_t specKey, bool isDown);
 
 	// accessors (for loaders)
@@ -99,6 +109,22 @@ private:
 	std::vector<std::vector<uint8_t>> tapBlocks_;
 	size_t tapPos_ = 0;
 	void checkFastLoad();
+
+	// Beeper (port 0xFE bit 4): a 1-bit speaker signal turned into a real
+	// square wave. One frame's worth of samples (kSamplesPerFrame, fixed
+	// since kSampleRate/50 is exact) is built up as OUT 0xFE edges land
+	// at their real T-state position, then queued to SDL's audio device
+	// once per frame in update(). AY-3-8912 is not emulated yet — only
+	// the beeper.
+	static const int kSampleRate = 44100;
+	static const int kSamplesPerFrame = kSampleRate / 50;
+	SDL_AudioDeviceID audioDev_ = 0;
+	std::vector<uint8_t> audioBuf_;
+	uint32_t audioSampleIndex_ = 0;
+	uint8_t beeperLevel_ = 128;
+	void initAudio();
+	void audioWriteEdge(uint8_t newLevel);
+	void flushAudioFrame();
 };
 
 #endif // _MINZX_H_

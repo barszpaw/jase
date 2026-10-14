@@ -77,6 +77,11 @@ int main(int argc, char *argv[])
 	if (isLittleEndian()) std::cout << "Running on little endian machine" << std::endl;
 	else                  std::cout << "Running on big endian machine"    << std::endl;
 
+	// SDL must be initialized before MinZX::init(), which opens the audio
+	// device for the beeper (SDL_OpenAudioDevice needs SDL_INIT_AUDIO up
+	// front — it silently fails if called before SDL_Init()).
+	SDL_Init(SDL_INIT_EVERYTHING);
+
 	MinZX minZX;
 	minZX.init();
 
@@ -97,8 +102,6 @@ int main(int argc, char *argv[])
 		else
 			fileMgr.loadSNA(path, &minZX);
 	}
-
-	SDL_Init(SDL_INIT_EVERYTHING);
 
 	unsigned vsyncFlag = 0;
 //	unsigned vsyncFlag = SDL_RENDERER_PRESENTVSYNC;
@@ -214,7 +217,16 @@ int main(int argc, char *argv[])
 		SDL_RenderCopy(renderer, texture, NULL, NULL);
 		SDL_RenderPresent(renderer);
 
-		SDL_Delay(17);
+		// Pace the loop off the audio queue's real depth, not a fixed
+		// wall-clock delay — a fixed SDL_Delay(17) drifts from the audio
+		// device's exact 44100 Hz consumption rate (observed ~47-48 FPS in
+		// practice, not 50), so the queue slowly starves and the beeper
+		// crackles. Let ~3 frames build up, then block until it's down to
+		// ~2 — audio becomes the clock, video rides along with it (same
+		// principle pico-spec uses via its blocking I2S/PWM write).
+		const Uint32 samplesPerFrame = (Uint32)MinZX::kAudioSamplesPerFrame;
+		while (minZX.getQueuedAudioBytes() > samplesPerFrame * 3)
+			SDL_Delay(1);
 
 		frames++;
 		const Uint64 end = SDL_GetPerformanceCounter();

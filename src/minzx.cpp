@@ -71,8 +71,58 @@ void MinZX::init()
 
 	//loadDump();
 	createSpectrumColors();
+	initAudio();
 
 	reset();
+}
+
+void MinZX::initAudio()
+{
+	SDL_AudioSpec want, have;
+	SDL_zero(want);
+	want.freq = kSampleRate;
+	want.format = AUDIO_U8;
+	want.channels = 1;
+	want.samples = 1024;
+	audioDev_ = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
+	if (audioDev_ == 0) {
+		ERROR("SDL_OpenAudioDevice failed: %s\n", SDL_GetError());
+		return;
+	}
+	audioBuf_.assign(kSamplesPerFrame, beeperLevel_);
+	SDL_PauseAudioDevice(audioDev_, 0);
+}
+
+// Fills audioBuf_ up to the sample matching the CPU's current tstates with
+// the level that was active until now, then switches to newLevel from that
+// point on — i.e. a real square-wave edge at its correct position in time.
+void MinZX::audioWriteEdge(uint8_t newLevel)
+{
+	if (audioDev_ == 0) return;
+	uint32_t idx = (uint32_t)(((uint64_t)tstates * kSampleRate) / 3500000ULL);
+	if (idx > (uint32_t)kSamplesPerFrame) idx = kSamplesPerFrame;
+	for (uint32_t i = audioSampleIndex_; i < idx; i++)
+		audioBuf_[i] = beeperLevel_;
+	audioSampleIndex_ = idx;
+	beeperLevel_ = newLevel;
+}
+
+uint32_t MinZX::getQueuedAudioBytes() const
+{
+	return audioDev_ ? SDL_GetQueuedAudioSize(audioDev_) : 0;
+}
+
+void MinZX::flushAudioFrame()
+{
+	if (audioDev_ == 0) return;
+	for (uint32_t i = audioSampleIndex_; i < (uint32_t)kSamplesPerFrame; i++)
+		audioBuf_[i] = beeperLevel_;
+	audioSampleIndex_ = 0;
+	// Drop this frame's audio if the device's queue is already backed up
+	// (e.g. the host loop briefly outran real time) rather than let
+	// latency grow unbounded.
+	if (SDL_GetQueuedAudioSize(audioDev_) < (Uint32)(kSamplesPerFrame * 4))
+		SDL_QueueAudio(audioDev_, audioBuf_.data(), audioBuf_.size());
 }
 
 void MinZX::reset()
@@ -118,6 +168,7 @@ void MinZX::update(uint8_t* screen)
 	}
 
 	generateScreen(screen);
+	flushAudioFrame();
 
 	// Only valid when the frame actually completed — an early breakpoint
 	// exit left tstates well under cycleTstates, and subtracting would
@@ -174,6 +225,8 @@ void MinZX::step(int n)
 
 void MinZX::destroy()
 {
+	if (audioDev_ != 0)
+		SDL_CloseAudioDevice(audioDev_);
 	delete z80;
 	delete[] mem;
 }
@@ -407,6 +460,8 @@ void MinZX::processOutputPort(uint16_t port, uint8_t value)
 
 			// border color (no bright colors)
 			border = value & 0x07;
+
+			audioWriteEdge((value & 0x10) ? 148 : 108);
 
 #ifdef SPEAKER_PRESENT
 			digitalWrite(SPEAKER_PIN, bitRead(data, 4)); // speaker
