@@ -44,6 +44,14 @@ public:
 	bool justHitBreakpoint() const { return justHitBreakpoint_; }
 	uint16_t lastBreakpointPC() const { return lastBreakpointPC_; }
 
+	// TAP loading via the standard 48K ROM fast-load hook (LD-BYTES,
+	// 0x0556) — not real tape-pulse emulation. Covers the standard
+	// loader (BASIC LOAD ""); custom/turbo loaders don't call through
+	// this exact address and will just fail, same as real hardware with
+	// no tape signal connected. `blocks` are raw TAP block bytes
+	// (flag + data + checksum each), in file order.
+	void loadTapeBlocks(const std::vector<std::vector<uint8_t>>& blocks);
+
 public:
 	virtual uint8_t  fetchOpcode (uint16_t address);
 	virtual uint8_t  peek8       (uint16_t address);
@@ -87,6 +95,10 @@ private:
 	bool justHitBreakpoint_ = false;
 	uint16_t lastBreakpointPC_ = 0;
 	bool isBreakpoint(uint16_t pc) const;
+
+	std::vector<std::vector<uint8_t>> tapBlocks_;
+	size_t tapPos_ = 0;
+	void checkFastLoad();
 };
 
 #endif // _MINZX_H_

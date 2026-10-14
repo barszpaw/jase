@@ -11,6 +11,7 @@
 #include "debugserver.h"
 #include <cstdlib>
 #include <cstring>
+#include <strings.h>
 
 bool isLittleEndian()
 {
@@ -87,7 +88,15 @@ int main(int argc, char *argv[])
 	FileMgr fileMgr;
 
 	if (argc > 1 && argv[1][0] != '-')
-		fileMgr.loadSNA(argv[1], &minZX);
+	{
+		const char* path = argv[1];
+		size_t len = strlen(path);
+		bool isTap = len > 4 && (0 == strcasecmp(path + len - 4, ".tap"));
+		if (isTap)
+			fileMgr.loadTAP(path, &minZX);
+		else
+			fileMgr.loadSNA(path, &minZX);
+	}
 
 	SDL_Init(SDL_INIT_EVERYTHING);
 

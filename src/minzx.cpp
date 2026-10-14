@@ -92,6 +92,15 @@ void MinZX::update(uint8_t* screen)
 
 	while (tstates < cycleTstates)
 	{
+		// Fast-load hook fires before anything else, regardless of
+		// breakpoints — it's not a debug feature, it's standing in for
+		// a cassette deck. Doesn't cost any tstates (treated as instant,
+		// same simplification every fast-loading emulator makes).
+		if (!tapBlocks_.empty() && z80->getRegPC() == 0x0556)
+		{
+			checkFastLoad();
+			continue;
+		}
 		// Check AFTER executing, not before: if we're resuming from a
 		// breakpoint we're currently sitting on, checking first would
 		// re-trigger immediately without ever advancing — CONT would
@@ -148,6 +157,11 @@ void MinZX::step(int n)
 	justHitBreakpoint_ = false;
 	for (int i = 0; i < n; i++)
 	{
+		if (!tapBlocks_.empty() && z80->getRegPC() == 0x0556)
+		{
+			checkFastLoad();
+			continue;
+		}
 		z80->execute();
 		if (breakpointsEnabled_ && isBreakpoint(z80->getRegPC()))
 		{
@@ -502,3 +516,53 @@ void MinZX::execDone(void)
 {
 }
 #endif
+
+void MinZX::loadTapeBlocks(const std::vector<std::vector<uint8_t>>& blocks)
+{
+	tapBlocks_ = blocks;
+	tapPos_ = 0;
+}
+
+// Standard 48K ROM LD-BYTES contract: A = expected flag byte, DE = length,
+// IX = destination, Carry set on entry = LOAD (vs VERIFY, treated the same
+// here). We skip the bit-banged tape routine entirely and inject the next
+// block directly, then simulate the RET this call would have ended with.
+void MinZX::checkFastLoad()
+{
+	if (tapPos_ >= tapBlocks_.size())
+		return;
+
+	const std::vector<uint8_t>& block = tapBlocks_[tapPos_];
+	tapPos_++;
+
+	if (block.empty())
+		return;
+
+	uint8_t expectedFlag = z80->getRegA();
+	uint8_t actualFlag = block[0];
+
+	if (actualFlag == expectedFlag)
+	{
+		uint16_t de = z80->getRegDE();
+		uint16_t ix = z80->getRegIX();
+		// Payload excludes the leading flag byte (already checked) and
+		// the trailing checksum byte (only needed for the real ROM's
+		// own verification, which we're bypassing).
+		size_t payloadLen = block.size() >= 2 ? block.size() - 2 : 0;
+		size_t copyLen = (size_t)de < payloadLen ? (size_t)de : payloadLen;
+		for (size_t i = 0; i < copyLen; i++)
+			mem[(uint16_t)(ix + i)] = block[1 + i];
+		z80->setRegIX((uint16_t)(ix + copyLen));
+		z80->setRegDE((uint16_t)(de - copyLen));
+		z80->setCarryFlag(true);
+	}
+	else
+	{
+		z80->setCarryFlag(false);
+	}
+
+	uint16_t sp = z80->getRegSP();
+	uint16_t retAddr = peek16(sp);
+	z80->setRegSP((uint16_t)(sp + 2));
+	z80->setRegPC(retAddr);
+}

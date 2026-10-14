@@ -4,6 +4,7 @@
 #define _CRT_SECURE_NO_WARNINGS 1
 
 #include <stdio.h>
+#include <vector>
 
 #define TRACE  printf
 #define DEBUG  printf
@@ -164,4 +165,47 @@ bool FileMgr::loadSNA(const char* filename, MinZX* targetEmulator)
 
 	//_zxCpu.pc = retaddr;
 
+	return true;
+}
+
+bool FileMgr::loadTAP(const char* filename, MinZX* targetEmulator)
+{
+	if (NULL == filename || '\0' == *filename) {
+		WARN("FileMgr::loadTAP: no filename specified\n");
+		return false;
+	}
+	if (NULL == targetEmulator) {
+		WARN("FileMgr::loadTAP: no target emulator\n");
+		return false;
+	}
+
+	FILE* pf = fopen(filename, "rb");
+	if (pf == NULL) {
+		WARN("FileMgr::loadTAP: cannot open file %s\n", filename);
+		return false;
+	}
+
+	std::vector<std::vector<uint8_t>> blocks;
+	for (;;) {
+		int lo = fgetc(pf);
+		if (lo == EOF) break;
+		int hi = fgetc(pf);
+		if (hi == EOF) break;
+		uint16_t len = (uint16_t)(lo | (hi << 8));
+		if (len == 0) continue;
+		std::vector<uint8_t> block(len);
+		size_t n = fread(block.data(), 1, len, pf);
+		if (n != len) break; // truncated file — keep whatever loaded cleanly
+		blocks.push_back(std::move(block));
+	}
+	fclose(pf);
+
+	if (blocks.empty()) {
+		WARN("FileMgr::loadTAP: no blocks found in %s\n", filename);
+		return false;
+	}
+
+	targetEmulator->loadTapeBlocks(blocks);
+	INFO("FileMgr::loadTAP: loaded %zu blocks from %s\n", blocks.size(), filename);
+	return true;
 }
