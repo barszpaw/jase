@@ -208,6 +208,22 @@ void DebugServer::handleLine(const std::string& line, MinZX& minZX)
         }
         reply(resp);
     }
+    else if (cmd == "KEMPSTON") {
+        // Layer 3 extension (per-peripheral, vSpectranext-style): decode
+        // the raw port 0x1F byte into named fields instead of making the
+        // client re-derive the bit layout every time. Uses inPort() —
+        // the exact same codepath a real IN instruction takes — so this
+        // reports what the Z80 would actually see, not a side-channel
+        // guess (reading via inPort also means an active debug client
+        // polling KEMPSTON perturbs tstates slightly, same caveat as the
+        // Layer 1 PORT/OUT commands).
+        uint8_t val = minZX.inPort(0x1F);
+        snprintf(out, sizeof(out), "OK right=%d left=%d down=%d up=%d fire=%d",
+                 (val & 0x01) ? 1 : 0, (val & 0x02) ? 1 : 0,
+                 (val & 0x04) ? 1 : 0, (val & 0x08) ? 1 : 0,
+                 (val & 0x10) ? 1 : 0);
+        reply(out);
+    }
     else {
         reply("ERR unknown command");
     }
