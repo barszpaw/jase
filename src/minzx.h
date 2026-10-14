@@ -22,6 +22,8 @@ public:
 	void reset();
 
 	void setBorderColor(uint8_t bcol) { border = bcol; }
+	uint8_t getBorderColor() const { return border; }
+	uint32_t getTStates() const { return tstates; }
 	void notifyKey(uint8_t specKey, bool isDown);
 
 	// accessors (for loaders)

@@ -8,6 +8,7 @@
 #include "SDL.h"
 #include "minzx.h"
 #include "filemgr.h"
+#include "debugserver.h"
 #include <cstdlib>
 #include <cstring>
 
@@ -31,9 +32,11 @@ bool isLittleEndian()
 // Example: test the Kempston port without a working keyboard matrix —
 //   --poke 8000=DB,1F,18,FC --pc 8000
 // (IN A,(0x1F) ; JR 0x8000 — an infinite loop re-reading the port)
-static void applyDebugArgs(int argc, char* argv[], MinZX& minZX)
+// Returns the --debug-port value, or -1 if not given.
+static int applyDebugArgs(int argc, char* argv[], MinZX& minZX)
 {
 	int pcAddr = -1;
+	int debugPort = -1;
 	for (int i = 1; i < argc; i++)
 	{
 		if (0 == strcmp(argv[i], "--poke") && i + 1 < argc)
@@ -58,9 +61,14 @@ static void applyDebugArgs(int argc, char* argv[], MinZX& minZX)
 		{
 			g_tracePort = (int)strtoul(argv[++i], nullptr, 16);
 		}
+		else if (0 == strcmp(argv[i], "--debug-port") && i + 1 < argc)
+		{
+			debugPort = atoi(argv[++i]);
+		}
 	}
 	if (pcAddr >= 0)
 		minZX.getCPU()->setRegPC((uint16_t)pcAddr);
+	return debugPort;
 }
 
 int main(int argc, char *argv[])
@@ -71,7 +79,10 @@ int main(int argc, char *argv[])
 	MinZX minZX;
 	minZX.init();
 
-	applyDebugArgs(argc, argv, minZX);
+	int debugPort = applyDebugArgs(argc, argv, minZX);
+	DebugServer debugServer;
+	if (debugPort >= 0 && !debugServer.init(debugPort))
+		std::cerr << "DebugServer: failed to listen on port " << debugPort << std::endl;
 
 	FileMgr fileMgr;
 
@@ -163,6 +174,7 @@ int main(int argc, char *argv[])
 		}
 
 		minZX.update(&pixels[0]);
+		debugServer.poll(minZX);
 
 		if (useLocktexture)
 		{
