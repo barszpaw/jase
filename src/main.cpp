@@ -92,7 +92,27 @@ int main(int argc, char *argv[])
 
 	FileMgr fileMgr;
 
-	if (argc > 1 && argv[1][0] != '-')
+	// Explicit, named media flags — preferred over the positional-argument
+	// fallback below (kept for convenience/backward compat with existing
+	// test scripts). --load-tape PATH / --load-sna PATH, space-separated
+	// like the rest of this program's flags (--poke ADDR=..., not
+	// --poke=ADDR=...), not "freedom to pick interactively" (that's a
+	// separate, bigger feature — see project memory).
+	const char* tapePath = nullptr;
+	const char* snaPath = nullptr;
+	for (int i = 1; i < argc; i++)
+	{
+		if (0 == strcmp(argv[i], "--load-tape") && i + 1 < argc)
+			tapePath = argv[++i];
+		else if (0 == strcmp(argv[i], "--load-sna") && i + 1 < argc)
+			snaPath = argv[++i];
+	}
+
+	if (tapePath)
+		fileMgr.loadTAP(tapePath, &minZX);
+	else if (snaPath)
+		fileMgr.loadSNA(snaPath, &minZX);
+	else if (argc > 1 && argv[1][0] != '-')
 	{
 		const char* path = argv[1];
 		size_t len = strlen(path);
