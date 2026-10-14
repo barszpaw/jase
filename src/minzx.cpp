@@ -306,15 +306,69 @@ uint8_t MinZX::processInputPort(uint16_t port)
 #endif
 		}
 
-		// Keyboard
-		//if (~(portHigh | 0xFE) & 0xFF) result &= (Ports::base[0] & Ports::wii[0]);
-		//if (~(portHigh | 0xFD) & 0xFF) result &= (Ports::base[1] & Ports::wii[1]);
-		//if (~(portHigh | 0xFB) & 0xFF) result &= (Ports::base[2] & Ports::wii[2]);
-		//if (~(portHigh | 0xF7) & 0xFF) result &= (Ports::base[3] & Ports::wii[3]);
-		//if (~(portHigh | 0xEF) & 0xFF) result &= (Ports::base[4] & Ports::wii[4]);
-		//if (~(portHigh | 0xDF) & 0xFF) result &= (Ports::base[5] & Ports::wii[5]);
-		//if (~(portHigh | 0xBF) & 0xFF) result &= (Ports::base[6] & Ports::wii[6]);
-		//if (~(portHigh | 0x7F) & 0xFF) result &= (Ports::base[7] & Ports::wii[7]);
+		// Keyboard: 8 half-rows selected by clear bits of the port's high
+		// byte (standard ZX Spectrum ULA convention — real hardware ANDs
+		// together any rows whose select line is low, so multiple rows can
+		// be read at once; we only ever need one at a time here). Each row
+		// returns 5 keys in bits 0-4, active low (0 = pressed).
+		const Uint8* ks = SDL_GetKeyboardState(NULL);
+
+		if (!(hiport & 0x01)) { // 0xFEFE: SHIFT, Z, X, C, V
+			if (ks[SDL_SCANCODE_LSHIFT] || ks[SDL_SCANCODE_RSHIFT]) result &= ~0x01;
+			if (ks[SDL_SCANCODE_Z]) result &= ~0x02;
+			if (ks[SDL_SCANCODE_X]) result &= ~0x04;
+			if (ks[SDL_SCANCODE_C]) result &= ~0x08;
+			if (ks[SDL_SCANCODE_V]) result &= ~0x10;
+		}
+		if (!(hiport & 0x02)) { // 0xFDFE: A, S, D, F, G
+			if (ks[SDL_SCANCODE_A]) result &= ~0x01;
+			if (ks[SDL_SCANCODE_S]) result &= ~0x02;
+			if (ks[SDL_SCANCODE_D]) result &= ~0x04;
+			if (ks[SDL_SCANCODE_F]) result &= ~0x08;
+			if (ks[SDL_SCANCODE_G]) result &= ~0x10;
+		}
+		if (!(hiport & 0x04)) { // 0xFBFE: Q, W, E, R, T
+			if (ks[SDL_SCANCODE_Q]) result &= ~0x01;
+			if (ks[SDL_SCANCODE_W]) result &= ~0x02;
+			if (ks[SDL_SCANCODE_E]) result &= ~0x04;
+			if (ks[SDL_SCANCODE_R]) result &= ~0x08;
+			if (ks[SDL_SCANCODE_T]) result &= ~0x10;
+		}
+		if (!(hiport & 0x08)) { // 0xF7FE: 1, 2, 3, 4, 5
+			if (ks[SDL_SCANCODE_1]) result &= ~0x01;
+			if (ks[SDL_SCANCODE_2]) result &= ~0x02;
+			if (ks[SDL_SCANCODE_3]) result &= ~0x04;
+			if (ks[SDL_SCANCODE_4]) result &= ~0x08;
+			if (ks[SDL_SCANCODE_5]) result &= ~0x10;
+		}
+		if (!(hiport & 0x10)) { // 0xEFFE: 0, 9, 8, 7, 6
+			if (ks[SDL_SCANCODE_0]) result &= ~0x01;
+			if (ks[SDL_SCANCODE_9]) result &= ~0x02;
+			if (ks[SDL_SCANCODE_8]) result &= ~0x04;
+			if (ks[SDL_SCANCODE_7]) result &= ~0x08;
+			if (ks[SDL_SCANCODE_6]) result &= ~0x10;
+		}
+		if (!(hiport & 0x20)) { // 0xDFFE: P, O, I, U, Y
+			if (ks[SDL_SCANCODE_P]) result &= ~0x01;
+			if (ks[SDL_SCANCODE_O]) result &= ~0x02;
+			if (ks[SDL_SCANCODE_I]) result &= ~0x04;
+			if (ks[SDL_SCANCODE_U]) result &= ~0x08;
+			if (ks[SDL_SCANCODE_Y]) result &= ~0x10;
+		}
+		if (!(hiport & 0x40)) { // 0xBFFE: ENTER, L, K, J, H
+			if (ks[SDL_SCANCODE_RETURN]) result &= ~0x01;
+			if (ks[SDL_SCANCODE_L]) result &= ~0x02;
+			if (ks[SDL_SCANCODE_K]) result &= ~0x04;
+			if (ks[SDL_SCANCODE_J]) result &= ~0x08;
+			if (ks[SDL_SCANCODE_H]) result &= ~0x10;
+		}
+		if (!(hiport & 0x80)) { // 0x7FFE: SPACE, SYM SHIFT, M, N, B
+			if (ks[SDL_SCANCODE_SPACE]) result &= ~0x01;
+			if (ks[SDL_SCANCODE_LALT] || ks[SDL_SCANCODE_RALT]) result &= ~0x02;
+			if (ks[SDL_SCANCODE_M]) result &= ~0x04;
+			if (ks[SDL_SCANCODE_N]) result &= ~0x08;
+			if (ks[SDL_SCANCODE_B]) result &= ~0x10;
+		}
 
 		return result;
 	}
@@ -498,8 +552,12 @@ void MinZX::interruptHandlingTime(int32_t wstates)
 /* Callback to know when the INT signal is active */
 bool MinZX::isActiveINT(void)
 {
-	// Put here the needed logic to trigger an INT
-	return false;
+	// The ULA holds /INT low for 32 T-states at the start of each 50Hz
+	// frame. Z80::execute() polls this every instruction boundary and
+	// fires the interrupt itself when it's true — without it, nothing
+	// timed off the ROM's interrupt handler (keyboard scan via LAST-K,
+	// FRAMES counter, etc.) ever runs, even though raw port reads work.
+	return tstates < 32;
 }
 
 #ifdef WITH_BREAKPOINT_SUPPORT
