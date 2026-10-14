@@ -2,6 +2,7 @@
 #define _MINZX_H_
 
 #include <inttypes.h>
+#include <vector>
 #include "z80.h"
 
 // Agent/debug port tracing: when set (via --trace-port on the command
@@ -29,6 +30,19 @@ public:
 	// accessors (for loaders)
 	Z80*     getCPU()    { return z80; }
 	uint8_t* getMemory() { return mem; }
+
+	// Debug protocol Layer 2 (see project memory for the contract): a
+	// single step runs exactly n instructions, bypassing update()'s
+	// frame/tstate pacing entirely. Breakpoints are checked in both
+	// step() and update()'s instruction loop via a cheap "any active?"
+	// guard (ZEsarUX's cpu_core_loop_debug_check_breakpoints pattern) —
+	// near-zero cost when no breakpoints are set.
+	void step(int n);
+	void addBreakpoint(uint16_t pc);
+	void removeBreakpoint(uint16_t pc);
+	std::vector<uint16_t> listBreakpoints() const { return breakpoints_; }
+	bool justHitBreakpoint() const { return justHitBreakpoint_; }
+	uint16_t lastBreakpointPC() const { return lastBreakpointPC_; }
 
 public:
 	virtual uint8_t  fetchOpcode (uint16_t address);
@@ -67,6 +81,12 @@ private:
 	void processOutputPort(uint16_t port, uint8_t value);
 
 	uint8_t border;
+
+	std::vector<uint16_t> breakpoints_;
+	bool breakpointsEnabled_ = false;
+	bool justHitBreakpoint_ = false;
+	uint16_t lastBreakpointPC_ = 0;
+	bool isBreakpoint(uint16_t pc) const;
 };
 
 #endif // _MINZX_H_

@@ -173,7 +173,8 @@ int main(int argc, char *argv[])
 			pixels[offset + 3] = SDL_ALPHA_OPAQUE;    // a
 		}
 
-		minZX.update(&pixels[0]);
+		if (debugServer.isRunning())
+			minZX.update(&pixels[0]);
 		debugServer.poll(minZX);
 
 		if (useLocktexture)

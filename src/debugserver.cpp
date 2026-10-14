@@ -62,6 +62,14 @@ void DebugServer::poll(MinZX& minZX)
 {
     if (listenFd_ < 0) return;
 
+    // A breakpoint hit during the update() just run (by main.cpp, before
+    // this poll() call) always stops free-run — same contract as a real
+    // debugger. The client discovers this via STATE, no push needed.
+    if (minZX.justHitBreakpoint()) {
+        running_ = false;
+        printf("DebugServer: breakpoint hit at 0x%04x\n", minZX.lastBreakpointPC());
+    }
+
     // Accept a new client if we don't have one — one at a time is enough
     // for agent-driven debugging.
     if (clientFd_ < 0) {
@@ -156,9 +164,49 @@ void DebugServer::handleLine(const std::string& line, MinZX& minZX)
         reply("OK");
     }
     else if (cmd == "STATE") {
-        snprintf(out, sizeof(out), "OK border=%u tstates=%u",
-                 (unsigned)minZX.getBorderColor(), (unsigned)minZX.getTStates());
+        if (!running_)
+            snprintf(out, sizeof(out), "OK border=%u tstates=%u running=0 pc=%04x",
+                     (unsigned)minZX.getBorderColor(), (unsigned)minZX.getTStates(),
+                     minZX.getCPU()->getRegPC());
+        else
+            snprintf(out, sizeof(out), "OK border=%u tstates=%u running=1",
+                     (unsigned)minZX.getBorderColor(), (unsigned)minZX.getTStates());
         reply(out);
+    }
+    else if (cmd == "STEP") {
+        int n = toks.size() >= 2 ? atoi(toks[1].c_str()) : 1;
+        if (n < 1) n = 1;
+        minZX.step(n);
+        running_ = false; // stepping always leaves you stopped, like a real debugger
+        reply("OK");
+    }
+    else if (cmd == "CONT") {
+        running_ = true;
+        reply("OK");
+    }
+    else if (cmd == "STOP") {
+        running_ = false;
+        reply("OK");
+    }
+    else if (cmd == "BREAK" && toks.size() >= 2) {
+        uint16_t addr = (uint16_t)strtoul(toks[1].c_str(), nullptr, 16);
+        minZX.addBreakpoint(addr);
+        reply("OK");
+    }
+    else if (cmd == "UNBREAK" && toks.size() >= 2) {
+        uint16_t addr = (uint16_t)strtoul(toks[1].c_str(), nullptr, 16);
+        minZX.removeBreakpoint(addr);
+        reply("OK");
+    }
+    else if (cmd == "BREAKS") {
+        std::vector<uint16_t> bps = minZX.listBreakpoints();
+        std::string resp = "OK";
+        char addr[8];
+        for (uint16_t bp : bps) {
+            snprintf(addr, sizeof(addr), " %04x", bp);
+            resp += addr;
+        }
+        reply(resp);
     }
     else {
         reply("ERR unknown command");

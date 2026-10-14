@@ -88,16 +88,74 @@ void MinZX::update(uint8_t* screen)
 {
 	tstates = 0;
 	uint32_t prevTstates = 0;
+	justHitBreakpoint_ = false;
 
 	while (tstates < cycleTstates)
 	{
+		// Check AFTER executing, not before: if we're resuming from a
+		// breakpoint we're currently sitting on, checking first would
+		// re-trigger immediately without ever advancing — CONT would
+		// look like it does nothing. Executing first means a breakpoint
+		// always stops you at the NEXT instruction, same as a real
+		// debugger's "continue".
 		z80->execute();
 		prevTstates = tstates;
+		if (breakpointsEnabled_ && isBreakpoint(z80->getRegPC()))
+		{
+			justHitBreakpoint_ = true;
+			lastBreakpointPC_ = z80->getRegPC();
+			break;
+		}
 	}
 
 	generateScreen(screen);
 
-	tstates -= cycleTstates;
+	// Only valid when the frame actually completed — an early breakpoint
+	// exit left tstates well under cycleTstates, and subtracting would
+	// underflow this unsigned counter into a huge garbage value.
+	if (!justHitBreakpoint_)
+		tstates -= cycleTstates;
+}
+
+bool MinZX::isBreakpoint(uint16_t pc) const
+{
+	for (uint16_t bp : breakpoints_)
+		if (bp == pc) return true;
+	return false;
+}
+
+void MinZX::addBreakpoint(uint16_t pc)
+{
+	if (!isBreakpoint(pc)) breakpoints_.push_back(pc);
+	breakpointsEnabled_ = !breakpoints_.empty();
+}
+
+void MinZX::removeBreakpoint(uint16_t pc)
+{
+	for (size_t i = 0; i < breakpoints_.size(); i++)
+	{
+		if (breakpoints_[i] == pc) { breakpoints_.erase(breakpoints_.begin() + i); break; }
+	}
+	breakpointsEnabled_ = !breakpoints_.empty();
+}
+
+void MinZX::step(int n)
+{
+	// Same execute-then-check order as update(), and for the same
+	// reason: STEP is almost always issued while sitting exactly on a
+	// breakpoint (that's how you got stopped), so checking first would
+	// never actually advance.
+	justHitBreakpoint_ = false;
+	for (int i = 0; i < n; i++)
+	{
+		z80->execute();
+		if (breakpointsEnabled_ && isBreakpoint(z80->getRegPC()))
+		{
+			justHitBreakpoint_ = true;
+			lastBreakpointPC_ = z80->getRegPC();
+			break;
+		}
+	}
 }
 
 void MinZX::destroy()

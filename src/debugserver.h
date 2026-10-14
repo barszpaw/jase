@@ -19,8 +19,18 @@ public:
     bool init(int port);
 
     // Call once per frame: accept a pending connection if none is active,
-    // drain available bytes, dispatch any complete lines, reply.
+    // drain available bytes, dispatch any complete lines, reply. Also
+    // notices if minZX just hit a breakpoint during the frame that was
+    // run before this call and auto-pauses (matches real debuggers: a
+    // breakpoint always stops free-run, the client doesn't have to poll
+    // for it separately).
     void poll(MinZX& minZX);
+
+    // Layer 2 run control: when false, main.cpp should skip calling
+    // minZX.update() for that frame (keep rendering/polling only).
+    // Defaults to true — with no debug client ever connecting, JASE
+    // behaves exactly as if this server didn't exist.
+    bool isRunning() const { return running_; }
 
     void shutdown();
 
@@ -28,6 +38,7 @@ private:
     int listenFd_ = -1;
     int clientFd_ = -1;
     std::string rxBuf_;
+    bool running_ = true;
 
     void handleLine(const std::string& line, MinZX& minZX);
     void reply(const std::string& msg); // appends '\n', writes to clientFd_
