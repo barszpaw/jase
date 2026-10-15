@@ -1,6 +1,7 @@
 #include "minzx.h"
 #include "z80.h"
 #include "Kempston.h"
+#include "AyPsg.h"
 #include <SDL.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -102,6 +103,8 @@ void MinZX::init()
 	initAudio();
 
 	peripherals_.push_back(new Kempston());
+	ay_ = new AyPsg();
+	peripherals_.push_back(ay_);
 
 	reset();
 }
@@ -148,6 +151,8 @@ void MinZX::flushAudioFrame()
 	for (uint32_t i = audioSampleIndex_; i < (uint32_t)kSamplesPerFrame; i++)
 		audioBuf_[i] = beeperLevel_;
 	audioSampleIndex_ = 0;
+	if (ay_)
+		ay_->generate(audioBuf_.data(), kSamplesPerFrame, kSampleRate);
 	// Drop this frame's audio if the device's queue is already backed up
 	// (e.g. the host loop briefly outran real time) rather than let
 	// latency grow unbounded.

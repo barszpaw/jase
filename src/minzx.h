@@ -148,9 +148,9 @@ private:
 	// Beeper (port 0xFE bit 4): a 1-bit speaker signal turned into a real
 	// square wave. One frame's worth of samples (kSamplesPerFrame, fixed
 	// since kSampleRate/50 is exact) is built up as OUT 0xFE edges land
-	// at their real T-state position, then queued to SDL's audio device
-	// once per frame in update(). AY-3-8912 is not emulated yet — only
-	// the beeper.
+	// at their real T-state position, then the AY (if present, see
+	// AyPsg) is mixed in on top, then it's all queued to SDL's audio
+	// device once per frame in update().
 	static const int kSampleRate = 44100;
 	static const int kSamplesPerFrame = kSampleRate / 50;
 	SDL_AudioDeviceID audioDev_ = 0;
@@ -160,6 +160,14 @@ private:
 	void initAudio();
 	void audioWriteEdge(uint8_t newLevel);
 	void flushAudioFrame();
+
+	// Set once in init() if an AyPsg peripheral is present — flushAudioFrame()
+	// mixes its output into audioBuf_ alongside the beeper. Not part of the
+	// generic Peripheral interface since most devices (Kempston, future
+	// ZiFi/DivSD) don't generate audio; this is a direct pointer specifically
+	// for the audio pipeline, separate from the generic peripherals_ list
+	// (which AyPsg is ALSO in, for port IN/OUT and its debug command).
+	class AyPsg* ay_ = nullptr;
 };
 
 #endif // _MINZX_H_
