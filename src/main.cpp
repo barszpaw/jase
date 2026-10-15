@@ -103,8 +103,54 @@ static int applyDebugArgs(int argc, char* argv[], MinZX& minZX)
 	return debugPort;
 }
 
+static void printUsage(const char* argv0)
+{
+	std::cout <<
+		"Usage: " << argv0 << " [options]\n"
+		"\n"
+		"Machine selection:\n"
+		"  --machine NAME         48k (default), tc2048, or 128k\n"
+		"  --rom PATH             override the ROM --machine picked (e.g. a\n"
+		"                         standalone diagnostic ROM that replaces it\n"
+		"                         outright)\n"
+		"\n"
+		"Media:\n"
+		"  --tape PATH            stage a .tap; LOAD \"\" loads it normally\n"
+		"  --load-tape PATH       stage a .tap AND resume instantly via the\n"
+		"                         bundled mid-LOAD snapshot (48K ROM only --\n"
+		"                         doesn't work on tc2048/128k, use --tape there)\n"
+		"  --load-sna PATH        load a .sna snapshot directly\n"
+		"  --dock-cartridge PATH  load a TS2068 .dck cartridge into the DOCK\n"
+		"                         bank pool (tc2048 only; doesn't page it in --\n"
+		"                         pair with --out F4=MASK and --pc)\n"
+		"\n"
+		"Debugging:\n"
+		"  --debug-port PORT      listen for the line-based debug protocol\n"
+		"                         (REGS/MEM/POKE/STEP/BREAK/PRESSKEYS/TYPE/\n"
+		"                         SCREENSHOT/STATE/... -- see debugserver.cpp)\n"
+		"  --poke ADDR=B1,B2,...  write bytes to memory before execution starts\n"
+		"                         (hex address, comma-separated hex bytes)\n"
+		"  --pc ADDR              set the initial PC (hex; applied after all\n"
+		"                         --poke args)\n"
+		"  --out PORT=VALUE       write a port before execution starts (hex)\n"
+		"  --trace-port PORT      log every IN from this port when it changes\n"
+		"\n"
+		"Networking (ZiFi peripheral):\n"
+		"  --zifi HOST:PORT       connect to a real ESP-01/Wemos D1 bridged\n"
+		"                         over TCP, or tools/virtual_esp01's daemon\n"
+		"\n"
+		"  --help, -h             show this message and exit\n";
+}
+
 int main(int argc, char *argv[])
 {
+	for (int i = 1; i < argc; i++)
+		if (0 == strcmp(argv[i], "--help") || 0 == strcmp(argv[i], "-h"))
+		{
+			printUsage(argv[0]);
+			return 0;
+		}
+
 	if (isLittleEndian()) std::cout << "Running on little endian machine" << std::endl;
 	else                  std::cout << "Running on big endian machine"    << std::endl;
 

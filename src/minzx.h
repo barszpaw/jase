@@ -197,6 +197,15 @@ private:
 	bool spectrum128Locked_ = false;
 	uint8_t spectrum128ScreenBank_ = 5; // 5 or 7, bit3 of the port
 
+public:
+	// For debug/inspection (see debugserver.cpp's STATE command): the raw
+	// last value written to port 0x7FFD, plus the RAM bank it currently
+	// selects at $C000 (bits 2:0) -- 0 outside Spectrum128K.
+	uint8_t get7FFDRaw() const { return spectrum128Paging_; }
+	int get7FFDRamBank() const { return spectrum128Paging_ & 0x07; }
+	bool get7FFDLocked() const { return spectrum128Locked_; }
+private:
+
 	uint8_t* lastScreenBuf_ = nullptr;
 	uint32_t tstates;
 

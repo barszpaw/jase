@@ -251,12 +251,14 @@ void DebugServer::handleLine(const std::string& line, MinZX& minZX)
     }
     else if (cmd == "STATE") {
         if (!running_)
-            snprintf(out, sizeof(out), "OK border=%u tstates=%u running=0 pc=%04x",
+            snprintf(out, sizeof(out), "OK border=%u tstates=%u running=0 pc=%04x 7ffd=%02x rambank=%d locked=%d",
                      (unsigned)minZX.getBorderColor(), (unsigned)minZX.getTStates(),
-                     minZX.getCPU()->getRegPC());
+                     minZX.getCPU()->getRegPC(), (unsigned)minZX.get7FFDRaw(),
+                     minZX.get7FFDRamBank(), minZX.get7FFDLocked() ? 1 : 0);
         else
-            snprintf(out, sizeof(out), "OK border=%u tstates=%u running=1",
-                     (unsigned)minZX.getBorderColor(), (unsigned)minZX.getTStates());
+            snprintf(out, sizeof(out), "OK border=%u tstates=%u running=1 7ffd=%02x rambank=%d locked=%d",
+                     (unsigned)minZX.getBorderColor(), (unsigned)minZX.getTStates(),
+                     (unsigned)minZX.get7FFDRaw(), minZX.get7FFDRamBank(), minZX.get7FFDLocked() ? 1 : 0);
         reply(out);
     }
     else if (cmd == "STEP") {
