@@ -687,6 +687,13 @@ void MinZX::processOutputPort(uint16_t port, uint8_t value)
 	// hardware only checks bit15=0, bit1=0, bit0=1 (ZX Next ports.txt),
 	// so it can't be a case in the switch(loport) below.
 	if (machine_ == MachineType::Spectrum128K && (port & 0x8003) == 0x0001) {
+		// Once locked, a write has NO effect at all on real hardware --
+		// including on what the port "reads back as" (get7FFDRaw() is for
+		// debug/STATE reporting, and must reflect the configuration that's
+		// actually active, not the last attempted write; it had been
+		// updated unconditionally, which made a post-lock OUT look like it
+		// changed the RAM bank in STATE's output when the real page table
+		// -- confirmed unchanged via MEM -- hadn't moved at all).
 		if (!spectrum128Locked_) {
 			memory_.mapPage(0, value & 0x10 ? &memory_.romBank(2) : &memory_.romBank(0));
 			memory_.mapPage(1, value & 0x10 ? &memory_.romBank(3) : &memory_.romBank(1));
@@ -694,9 +701,9 @@ void MinZX::processOutputPort(uint16_t port, uint8_t value)
 			memory_.mapPage(6, &memory_.ramBank(2 * ramBankSel));
 			memory_.mapPage(7, &memory_.ramBank(2 * ramBankSel + 1));
 			spectrum128ScreenBank_ = (value & 0x08) ? 7 : 5;
+			spectrum128Paging_ = value;
 			if (value & 0x20) spectrum128Locked_ = true;
 		}
-		spectrum128Paging_ = value;
 		return;
 	}
 
