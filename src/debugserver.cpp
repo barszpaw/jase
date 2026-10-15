@@ -53,6 +53,62 @@ static SDL_Scancode scancodeFromName(std::string name)
     return SDL_SCANCODE_UNKNOWN;
 }
 
+// Char -> chord for the TYPE command: lets a caller send plain text ("AT
+// cmds" as printed on a PC keyboard) instead of manually working out
+// which real Spectrum key combo produces each character — Pawel's point
+// after watching a 33-key PRESSKEYS sequence get hand-assembled for one
+// AT+CIPSTART line: "wygodnie naciskać klawisze tak jak są opisane na
+// klawiaturze PC... a translacja zrobi sobie mapowanie na klawisze
+// spectrum" (comfortable to press keys as labeled on a PC keyboard, let
+// translation handle the Spectrum mapping).
+//
+// Two real Spectrum facts this depends on, both confirmed by testing in
+// this same session before adding this, not guessed: unshifted letters
+// give LOWERCASE by default (CAPS SHIFT needed for uppercase — matches
+// both the BASIC ROM editor and espat-zx's own z88dk-based key reading,
+// since both ultimately go through the same ROM-level keyboard-to-ASCII
+// convention), and the standard SYMBOL SHIFT table printed on every real
+// Spectrum keycap (+ on K, = on L, , on N, . on M, " on P, etc.).
+static bool charToChord(char ch, std::vector<SDL_Scancode>& chord)
+{
+    chord.clear();
+    if (ch >= 'a' && ch <= 'z') {
+        chord.push_back((SDL_Scancode)(SDL_SCANCODE_A + (ch - 'a')));
+        return true;
+    }
+    if (ch >= 'A' && ch <= 'Z') {
+        chord.push_back(SDL_SCANCODE_LSHIFT);
+        chord.push_back((SDL_Scancode)(SDL_SCANCODE_A + (ch - 'A')));
+        return true;
+    }
+    if (ch == '0') { chord.push_back(SDL_SCANCODE_0); return true; }
+    if (ch >= '1' && ch <= '9') { chord.push_back((SDL_Scancode)(SDL_SCANCODE_1 + (ch - '1'))); return true; }
+    if (ch == ' ') { chord.push_back(SDL_SCANCODE_SPACE); return true; }
+    if (ch == '\r' || ch == '\n') { chord.push_back(SDL_SCANCODE_RETURN); return true; }
+
+    // Symbol-shift (real Spectrum keycap legends, not an invented table).
+    struct SymEntry { char ch; SDL_Scancode sc; };
+    static const SymEntry kSymbols[] = {
+        {'!', SDL_SCANCODE_1}, {'@', SDL_SCANCODE_2}, {'#', SDL_SCANCODE_3},
+        {'$', SDL_SCANCODE_4}, {'%', SDL_SCANCODE_5}, {'&', SDL_SCANCODE_6},
+        {'\'', SDL_SCANCODE_7}, {'(', SDL_SCANCODE_8}, {')', SDL_SCANCODE_9},
+        {'_', SDL_SCANCODE_0},
+        {'<', SDL_SCANCODE_Q}, {'>', SDL_SCANCODE_W},
+        {':', SDL_SCANCODE_Z}, {'?', SDL_SCANCODE_C}, {'/', SDL_SCANCODE_V},
+        {'*', SDL_SCANCODE_B}, {',', SDL_SCANCODE_N}, {'.', SDL_SCANCODE_M},
+        {'-', SDL_SCANCODE_J}, {'+', SDL_SCANCODE_K}, {'=', SDL_SCANCODE_L},
+        {'"', SDL_SCANCODE_P}, {';', SDL_SCANCODE_O},
+    };
+    for (const auto& e : kSymbols) {
+        if (e.ch == ch) {
+            chord.push_back(SDL_SCANCODE_LALT);
+            chord.push_back(e.sc);
+            return true;
+        }
+    }
+    return false;
+}
+
 bool DebugServer::init(int port)
 {
     listenFd_ = socket(AF_INET, SOCK_STREAM, 0);
@@ -144,7 +200,6 @@ void DebugServer::handleLine(const std::string& line, MinZX& minZX)
     const std::string& cmd = toks[0];
 
     Z80* z80 = minZX.getCPU();
-    uint8_t* mem = minZX.getMemory();
     char out[512];
 
     if (cmd == "REGS") {
@@ -166,7 +221,7 @@ void DebugServer::handleLine(const std::string& line, MinZX& minZX)
         std::string resp = "OK ";
         char hex[3];
         for (long i = 0; i < len; i++) {
-            snprintf(hex, sizeof(hex), "%02x", mem[(uint16_t)(addr + i)]);
+            snprintf(hex, sizeof(hex), "%02x", minZX.peek8((uint16_t)(addr + i)));
             resp += hex;
         }
         reply(resp);
@@ -177,7 +232,7 @@ void DebugServer::handleLine(const std::string& line, MinZX& minZX)
         std::string b;
         int count = 0;
         while (std::getline(bs, b, ',')) {
-            mem[(uint16_t)(addr + count)] = (uint8_t)strtoul(b.c_str(), nullptr, 16);
+            minZX.poke8((uint16_t)(addr + count), (uint8_t)strtoul(b.c_str(), nullptr, 16));
             count++;
         }
         reply("OK");
@@ -266,6 +321,26 @@ void DebugServer::handleLine(const std::string& line, MinZX& minZX)
             reply("OK");
         }
     }
+    else if (cmd == "TYPE" && line.size() > 5) {
+        // Plain text, auto-translated to the real Spectrum key combos —
+        // see charToChord. Takes everything after "TYPE " verbatim from
+        // the raw line (not space-split tokens), so literal spaces in
+        // the text survive. "\n"/"\r\n" in the text become RETURN.
+        std::string text = line.substr(5);
+        std::vector<std::vector<SDL_Scancode>> chords;
+        bool bad = false;
+        for (char ch : text) {
+            std::vector<SDL_Scancode> chord;
+            if (!charToChord(ch, chord)) { bad = true; break; }
+            chords.push_back(chord);
+        }
+        if (bad || chords.empty())
+            reply("ERR unmappable character");
+        else {
+            minZX.pressKeys(chords);
+            reply("OK");
+        }
+    }
     else if (cmd == "SAVESNA" && toks.size() >= 2) {
         // Captures the FULL machine state (registers + stack + memory),
         // not just registers — see project memory for why that distinction
@@ -277,6 +352,15 @@ void DebugServer::handleLine(const std::string& line, MinZX& minZX)
             reply("OK");
         else
             reply("ERR saveSNA failed");
+    }
+    else if (cmd == "SCREENSHOT" && toks.size() >= 2) {
+        // Dumps the exact buffer generateScreen() wrote this frame -- unlike
+        // reading $4000 over MEM and re-rendering host-side (dump_screen.py),
+        // this verifies the actual renderer, including Timex modes.
+        if (minZX.saveScreenshotBMP(toks[1].c_str()))
+            reply("OK");
+        else
+            reply("ERR saveScreenshotBMP failed");
     }
     else {
         // Layer 3 extensions: each expansion device (Kempston now, AY-PSG/

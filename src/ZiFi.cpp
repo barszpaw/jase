@@ -56,24 +56,25 @@ bool ZiFi::connectTo(const char* host, int port)
 
 bool ZiFi::in(uint16_t port, uint8_t& value)
 {
-	// PicoZX/espat-zx convention (low byte only — real Z80 "IN A,(n)"
-	// puts whatever's currently in A on the high byte, which is
-	// unpredictable from the guest's C code, so real simple port decode
-	// logic — this project's own ZxSpectrumEspUart included — ignores it
-	// entirely; matching that exactly, not guessing, is what makes
-	// espat-zx's picozx-uart branch (0xEF data/0xE7 status) work unmodified):
-	if ((port & 0xFF) == 0xEF) { // data: pull next RX byte, 0xFF if empty
-		if (rxRing_.empty()) {
-			value = 0xFF;
-		} else {
-			value = rxRing_.front();
-			rxRing_.erase(rxRing_.begin());
+	if ((port & 0xFF) == 0xEF) {
+		uint8_t hi = port >> 8;
+		if (hi == 0xC0) { // ZIFR: RX fill count
+			value = (uint8_t)(rxRing_.size() > 255 ? 255 : rxRing_.size());
+			return true;
 		}
-		return true;
-	}
-	if ((port & 0xFF) == 0xE7) { // status: bit0 RX ready, bit1 TX ready
-		value = (uint8_t)((rxRing_.empty() ? 0 : 1) | (txRing_.size() < kRingCap ? 2 : 0));
-		return true;
+		if (hi == 0xC1) { // ZOFR: TX fill count
+			value = (uint8_t)(txRing_.size() > 255 ? 255 : txRing_.size());
+			return true;
+		}
+		if (hi <= 0xBF) { // DR: pull next RX byte, 0xFF if empty
+			if (rxRing_.empty()) {
+				value = 0xFF;
+			} else {
+				value = rxRing_.front();
+				rxRing_.erase(rxRing_.begin());
+			}
+			return true;
+		}
 	}
 
 	if ((port & 0xFEFF) == 0xFC3B) {
@@ -102,12 +103,14 @@ bool ZiFi::in(uint16_t port, uint8_t& value)
 
 bool ZiFi::out(uint16_t port, uint8_t value)
 {
-	if ((port & 0xFF) == 0xEF) { // data: push a TX byte, dropped if the ring is full
-		if (txRing_.size() < kRingCap)
-			txRing_.push_back(value);
-		return true;
-	}
-	if ((port & 0xFF) == 0xE7) { // status is read-only; writes accepted and ignored
+	if ((port & 0xFF) == 0xEF) {
+		uint8_t hi = port >> 8;
+		if (hi <= 0xBF) { // DR: push a TX byte, dropped if the ring is full
+			if (txRing_.size() < kRingCap)
+				txRing_.push_back(value);
+			return true;
+		}
+		// ZIFR/ZOFR are read-only; writes to them are accepted and ignored.
 		return true;
 	}
 

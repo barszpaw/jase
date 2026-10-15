@@ -7,6 +7,7 @@
 #include <SDL.h>
 #include "z80.h"
 #include "Peripheral.h"
+#include "MemoryMap.h"
 
 // Agent/debug port tracing: when set (via --trace-port on the command
 // line, see main.cpp), every IN from this port that changes value gets
@@ -17,9 +18,27 @@ extern int g_tracePort;
 class MinZX : public Z80operations
 {
 public:
+	// Shared by main.cpp (SDL texture size) and generateScreen() so the two
+	// can't drift apart like the old hardcoded 320/240 in each file did.
+	// Width covers the Timex hi-res case (32 border + 512 content + 32
+	// border) -- in standard 256px-content modes generateScreen() pixel-
+	// doubles to fill the same width, so geometry never changes at runtime.
+	static const int SCREEN_W = 576;
+	static const int SCREEN_H = 240;
+
 	void init();
 
+	// Must be called before init() -- loadROM()/the port-0xFF SCLD handler
+	// both read these at init time.
+	void setRomPath(const char* path) { romPath_ = path; }
+	void setTimexVideo(bool on) { timexVideoEnabled_ = on; }
+
 	void update(uint8_t* screen);
+
+	// Dumps the exact buffer generateScreen() last wrote into (ARGB8888, the
+	// same bytes handed to SDL_UpdateTexture) as a 32bpp BMP -- for
+	// debug-protocol verification of the actual renderer output.
+	bool saveScreenshotBMP(const char* path) const;
 
 	void destroy();
 
@@ -41,7 +60,6 @@ public:
 
 	// accessors (for loaders)
 	Z80*     getCPU()    { return z80; }
-	uint8_t* getMemory() { return mem; }
 
 	// Expansion devices (Kempston now, AY-PSG/ZiFi/DivSD/Spectranext
 	// later) — each owns its own port decoding and Layer 3 debug command.
@@ -110,8 +128,32 @@ public:
 
 private:
 	Z80* z80;
-	uint8_t* mem;
+	MemoryMap memory_;
 	uint8_t* ports;
+
+	const char* romPath_ = "zx48.rom";
+
+	// Timex SCLD video mode register (port 0xFF, bits 0-2 mode / 3-5 ink) --
+	// ported from pico-spec-drewpo's Video.cpp/Ports.cpp (confirmed on real
+	// hardware there, matches Fuse). Modes 0/1/2/6 read from the standard
+	// $4000-$7FFF 16K (screen0 = RAM bank 0, screen1 = RAM bank 1 -- the
+	// renderer reads these two banks directly, bypassing whatever the CPU
+	// currently has paged there, same as real SCLD/ULA hardware). Modes
+	// 3/4/5/7 need a second physical bank ("bank 7") and aren't implemented;
+	// they fall back to mode 0, matching pico-spec's own "undefined ->
+	// standard" convention.
+	bool timexVideoEnabled_ = false;
+	uint8_t timexMode_ = 0;
+	uint8_t timexInk_ = 0;
+
+	// Timex DOCK/MMU paging (port 0xF4, one bit per 8K page 0-7): bit=0 ->
+	// HOME (standard ROM/RAM for that page), bit=1 -> DOCK bank `page` from
+	// the pool past the standard 6 RAM banks (see init()). Real SCLD decodes
+	// this on the low byte regardless of the high byte, like port 0xFF.
+	uint8_t timexPagedMask_ = 0;
+	static const int kDockBankCount = 8; // full 8x8K = 64K DOCK population
+
+	uint8_t* lastScreenBuf_ = nullptr;
 	uint32_t tstates;
 
 	uint32_t cycleTstates;
@@ -119,7 +161,6 @@ private:
 	std::vector<Peripheral*> peripherals_;
 
 	void loadROM();
-	void loadDump();
 
 	void generateScreen(uint8_t* screen);
 

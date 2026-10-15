@@ -89,6 +89,16 @@ Not implemented: IMR/CR on the FIFO window, the 16550 UART window, UART2
 on the ZX-UNO window. Add them if a concrete piece of software needs
 them — don't pre-build.
 
+**Not the same thing as `ZxSpectrumEspUart`** (this project's own
+earlier, pre-pico-spec direct UART-passthrough ports, `0xEF`
+data/`0xE7` status, low byte only, e.g. `repos/espat-zx`'s
+`picozx-uart` branch) — that's a different, separate real peripheral
+that happens to share the low byte `0xEF` with the FIFO window above
+under a different interpretation. It collides with the FIFO window and
+is deliberately NOT implemented here; don't re-add it without resolving
+that collision first (an earlier version of this file briefly did, by
+mistake — see project memory 2026-10-15 for the correction).
+
 ## Debugging
 
 `ZIFI` debug-protocol command (see the rest of JASE's debug protocol in

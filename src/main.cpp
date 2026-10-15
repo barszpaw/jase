@@ -47,11 +47,10 @@ static int applyDebugArgs(int argc, char* argv[], MinZX& minZX)
 			if (!eq) { std::cerr << "--poke expects ADDR=B1,B2,..." << std::endl; continue; }
 			*eq = '\0';
 			uint16_t addr = (uint16_t)strtoul(argv[i], nullptr, 16);
-			uint8_t* mem = minZX.getMemory();
 			char* tok = strtok(eq + 1, ",");
 			while (tok)
 			{
-				mem[addr++] = (uint8_t)strtoul(tok, nullptr, 16);
+				minZX.poke8(addr++, (uint8_t)strtoul(tok, nullptr, 16));
 				tok = strtok(nullptr, ",");
 			}
 		}
@@ -97,6 +96,26 @@ int main(int argc, char *argv[])
 	SDL_Init(SDL_INIT_EVERYTHING);
 
 	MinZX minZX;
+
+	// --machine must be applied before init() -- it picks the ROM that
+	// loadROM() reads during init().
+	for (int i = 1; i < argc; i++)
+	{
+		if (0 == strcmp(argv[i], "--machine") && i + 1 < argc)
+		{
+			const char* m = argv[++i];
+			if (0 == strcasecmp(m, "tc2048"))
+			{
+				minZX.setRomPath("/usr/share/fusex/tc2048.rom");
+				minZX.setTimexVideo(true);
+			}
+			else
+			{
+				std::cerr << "--machine: unknown value '" << m << "' (expected tc2048)" << std::endl;
+			}
+		}
+	}
+
 	minZX.init();
 
 	int debugPort = applyDebugArgs(argc, argv, minZX);
@@ -193,8 +212,8 @@ int main(int argc, char *argv[])
 		std::cout << SDL_GetPixelFormatName(info.texture_formats[i]) << std::endl;
 	}
 
-	const unsigned int texWidth = 320;
-	const unsigned int texHeight = 240;
+	const unsigned int texWidth = MinZX::SCREEN_W;
+	const unsigned int texHeight = MinZX::SCREEN_H;
 	SDL_Texture* texture = SDL_CreateTexture
 		(
 		renderer,

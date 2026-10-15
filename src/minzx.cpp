@@ -90,16 +90,18 @@ static uint32_t zxColor(int c, bool b)
 void MinZX::init()
 {
 	z80   = new Z80(this);
-	mem   = new uint8_t[0x10000];
+	// 2 ROM banks (8K each = standard 16K ROM) always; RAM banks: the
+	// standard 6 (48K) plus, on Timex machines, a full 8-bank DOCK pool so
+	// real DOCK-paging software has something to page in.
+	int numRamBanks = 6 + (timexVideoEnabled_ ? kDockBankCount : 0);
+	memory_.init(2, numRamBanks);
 	ports = new uint8_t[0x10000];
 
-	memset(mem, 0x00, 0x10000);
 	memset(ports, 0xFF, 0x10000);
 
 	cycleTstates = 69888;
 	loadROM();
 
-	//loadDump();
 	createSpectrumColors();
 	initAudio();
 
@@ -163,6 +165,37 @@ void MinZX::flushAudioFrame()
 		SDL_QueueAudio(audioDev_, audioBuf_.data(), audioBuf_.size());
 }
 
+bool MinZX::saveScreenshotBMP(const char* path) const
+{
+	if (!lastScreenBuf_) return false;
+
+	const int w = SCREEN_W, h = SCREEN_H;
+	const uint32_t pixelBytes = (uint32_t)w * h * 4;
+	const uint32_t fileSize = 54 + pixelBytes;
+
+	FILE* f = fopen(path, "wb");
+	if (!f) return false;
+
+	uint8_t header[54] = {0};
+	header[0] = 'B'; header[1] = 'M';
+	*(uint32_t*)(header + 2)  = fileSize;
+	*(uint32_t*)(header + 10) = 54; // pixel data offset
+	*(uint32_t*)(header + 14) = 40; // DIB header size
+	*(int32_t*)(header + 18)  = w;
+	*(int32_t*)(header + 22)  = -h; // negative = top-down, matches generateScreen's row order
+	*(uint16_t*)(header + 26) = 1;  // planes
+	*(uint16_t*)(header + 28) = 32; // bpp
+	*(uint32_t*)(header + 34) = pixelBytes;
+
+	fwrite(header, 1, 54, f);
+	// Our ARGB8888 uint32s are already stored in memory as B,G,R,A bytes
+	// (little-endian), which is exactly BMP's 32bpp pixel layout -- no
+	// conversion needed.
+	fwrite(lastScreenBuf_, 1, pixelBytes, f);
+	fclose(f);
+	return true;
+}
+
 void MinZX::reset()
 {
 	border = 7;
@@ -174,6 +207,7 @@ void MinZX::reset()
 
 void MinZX::update(uint8_t* screen)
 {
+	lastScreenBuf_ = screen;
 	tstates = 0;
 	uint32_t prevTstates = 0;
 	justHitBreakpoint_ = false;
@@ -271,34 +305,28 @@ void MinZX::destroy()
 		delete p;
 	peripherals_.clear();
 	delete z80;
-	delete[] mem;
+	memory_.destroy();
 }
 
 void MinZX::loadROM()
 {
-	FILE* pf = fopen("zx48.rom", "rb");
+	FILE* pf = fopen(romPath_, "rb");
 	if (pf == NULL) {
 		ERROR("Cannot load ROM from file\n");
 		return;
 	}
 
-	size_t elemsRead = fread(mem, 0x4000, 1, pf);
+	// Read into a scratch buffer first, not directly into the ROM banks:
+	// MemoryMap::Bank's two banks aren't guaranteed contiguous (struct
+	// padding after the data[] array), so a single fread spanning both
+	// would be relying on layout that isn't part of the class's contract.
+	uint8_t romBuf[0x4000];
+	size_t elemsRead = fread(romBuf, 1, 0x4000, pf);
+	fclose(pf);
+	memcpy(memory_.romBank(0).data, romBuf, 0x2000);
+	memcpy(memory_.romBank(1).data, romBuf + 0x2000, 0x2000);
 }
 
-void MinZX::loadDump()
-{
-	FILE* pf = fopen("mm_mem_dump", "rb");
-	if (pf == NULL) {
-		ERROR("Cannot load dump from file\n");
-		return;
-	}
-
-	size_t elemsRead = fread(mem, 0x10000, 1, pf);
-}
-
-#define WSCR 320
-#define HSCR 240
-#define WBMP 256
 #define HBMP 192
 #define WBOR 32
 #define HBOR 24
@@ -307,83 +335,131 @@ void MinZX::loadDump()
 
 #define ULA_SWAP(y) ((y & 0xC0) | ((y & 0x38) >> 3) | ((y & 0x07) << 3))
 
+// Timex SCLD video modes 0/1/2/6, ported from pico-spec-drewpo's
+// Video.cpp/Ports.cpp (hardware-confirmed there, matches Fuse). Real SCLD
+// hardware decodes all four from the SAME standard $4000-$7FFF 16K already
+// present on a 64K machine: "screen 1" is just that area +0x2000, so no
+// extra memory/banking is needed for any of these. Modes 3/4/5/7 need a
+// second physical bank ("bank 7") only reachable via DOCK/MMU paging (port
+// 0xF4) and aren't implemented yet -- see minzx.h.
+//
+// The content area is always rendered at full 512px width (SCREEN_W = 32
+// border + 512 + 32 border). Mode 6 (true hi-res) draws 16 genuinely
+// distinct samples per byte-pair (8 from screen 0, 8 from screen 1,
+// "columns taken alternately" per Timex's own docs -- confirmed against
+// pico-spec's packed-pair driver code, which processes a whole source byte
+// at a time the same way). Modes 0/1/2 stay at native 256px resolution and
+// pixel-double each sample to fill the same 512px span, so geometry never
+// has to change at runtime when a guest flips hi-res on/off mid-frame.
 void MinZX::generateScreen(uint8_t* screen)
 {
-	uint8_t* bptr = screen;
-	uint32_t* dptr = (uint32_t*)bptr;
-
-	//               AARRGGBB
-	uint32_t blk = 0xFF000000;
-	uint32_t whi = 0xFFFFFFFF;
+	uint32_t* dptr = (uint32_t*)screen;
 
 	uint32_t borderColor = zxColor(border, 0);
 
-	for (int scrY = 0; scrY < HSCR; scrY++)
+	uint8_t mode = timexVideoEnabled_ ? timexMode_ : 0;
+	bool hiRes = (mode == 6);
+
+	uint32_t hrInkColor = 0, hrPapColor = 0;
+	if (hiRes) {
+		hrInkColor = zxColor(timexInk_ & 7, true);
+		hrPapColor = zxColor((~timexInk_) & 7, true);
+		// Real SCLD/Fuse behaviour: border = the bright PAPER colour in
+		// mode 6, not the independent ULA border register -- ported from
+		// pico-spec-drewpo's updateBorderBrd() (caught there the same way:
+		// a black/grey border where the reference showed yellow).
+		borderColor = hrPapColor;
+	}
+
+	for (int scrY = 0; scrY < SCREEN_H; scrY++)
 	{
-		if (scrY < HBOR)
+		if (scrY < HBOR || scrY >= HBOR + HBMP)
 		{
-			for (int scrX = 0; scrX < WSCR; scrX++)
-			{
+			for (int scrX = 0; scrX < SCREEN_W; scrX++)
 				*dptr++ = borderColor;
-			}
+			continue;
 		}
-		else if (scrY < HBOR + HBMP)
+
+		int speY = scrY - HBOR;
+		int ulaY = ULA_SWAP(speY);
+		int bmpRowOff = ulaY << 5;
+		int attRowOff = ((speY >> 3) << 5) + 0x1800;
+
+		// RAM bank 0/1 are screen0/screen1 -- read directly, bypassing
+		// whatever the CPU currently has paged at $4000/$6000 (same as real
+		// SCLD/ULA hardware, which has its own fixed physical connection to
+		// these banks regardless of the Z80's MMU view). bmpOff/bmp2Off are
+		// always a within-bank offset (0-0x1FFF) now that each screen is
+		// its own 8K Bank rather than +0x2000 into one flat 16K region.
+		//
+		// bmp2: mode 0/1 -> that bitmap's own attributes; mode 2 -> 8x1
+		// hi-colour attributes (reuses the bitmap addressing, not offAtt);
+		// mode 6 -> screen 1's bitmap (no attributes at all -- ink/paper
+		// are the global port-0xFF colour, not per-cell).
+		MemoryMap::Bank *bmpBank, *bmp2Bank;
+		int bmpOff, bmp2Off;
+		switch (mode) {
+			case 1:  bmpBank = &memory_.ramBank(1); bmpOff = bmpRowOff;
+			         bmp2Bank = &memory_.ramBank(1); bmp2Off = attRowOff; break;
+			case 2:  bmpBank = &memory_.ramBank(0); bmpOff = bmpRowOff;
+			         bmp2Bank = &memory_.ramBank(1); bmp2Off = bmpRowOff; break;
+			case 6:  bmpBank = &memory_.ramBank(0); bmpOff = bmpRowOff;
+			         bmp2Bank = &memory_.ramBank(1); bmp2Off = bmpRowOff; break;
+			default: bmpBank = &memory_.ramBank(0); bmpOff = bmpRowOff;
+			         bmp2Bank = &memory_.ramBank(0); bmp2Off = attRowOff; break;
+		}
+
+		uint8_t* bmpptr  = bmpBank->data  + bmpOff;
+		uint8_t* bmp2ptr = bmp2Bank->data + bmp2Off;
+
+		for (int scrX = 0; scrX < WBOR; scrX++)
+			*dptr++ = borderColor;
+
+		for (int col = 0; col < 32; col++)
 		{
-			int speY = scrY - HBOR;
-			int ulaY = ULA_SWAP(speY);
-
-			int bmpoff = 0x4000 + ( ulaY       << 5);
-			int attoff = 0x5800 + ((speY >> 3) << 5);
-			uint8_t* bmpptr = mem + bmpoff;
-			uint8_t* attptr = mem + attoff;
-
-			for (int scrX = 0; scrX < WSCR; scrX++)
+			if (hiRes)
 			{
-				if (scrX < WBOR)
+				// Each byte-column contributes two adjacent 8px groups:
+				// screen 0's byte first, then screen 1's byte -- NOT bit-by-
+				// bit interleaved. Confirmed against PortFF.tap (real Timex
+				// demo, TimexHiResExample) vs its own reference SpecEmu
+				// screenshot: it draws "A" at screen0 column 0, "B" at
+				// screen1 column 0, "C" at screen0 column 1, and the
+				// reference shows three separate legible letters "ABC" in a
+				// row -- which only matches this grouping, not a per-pixel
+				// alternation (that would merge A and B into one glyph).
+				uint8_t e = *bmpptr++;
+				uint8_t o = *bmp2ptr++;
+				uint8_t b = e;
+				for (int n = 0; n < 8; n++, b <<= 1)
+					*dptr++ = (b & 0x80) ? hrInkColor : hrPapColor;
+				b = o;
+				for (int n = 0; n < 8; n++, b <<= 1)
+					*dptr++ = (b & 0x80) ? hrInkColor : hrPapColor;
+			}
+			else
+			{
+				uint8_t bmp = *bmpptr++;
+				uint8_t att = *bmp2ptr++;
+
+				int ink = (att)      & 7;
+				int pap = (att >> 3) & 7;
+				int bri = (att >> 6) & 1;
+				uint32_t fore = zxColor(ink, bri);
+				uint32_t back = zxColor(pap, bri);
+
+				uint8_t b = bmp;
+				for (int n = 0; n < 8; n++, b <<= 1)
 				{
-					*dptr++ = borderColor;
-				}
-				else if (scrX < WBOR + WBMP)
-				{
-					int speX = scrX - WBOR;
-
-					uint8_t bmp = *bmpptr++;
-					uint8_t att = *attptr++;
-
-					int ink = (att)      & 7;
-					int pap = (att >> 3) & 7;
-					int bri = (att >> 6) & 1;
-					int fla = (att >> 7);
-					uint32_t fore = zxColor(ink, bri);
-					uint32_t back = zxColor(pap, bri);
-
-					// B & W
-					// uint32_t fore = blk;
-					// uint32_t back = whi;
-
-					for (int mask = 0x80; mask > 0; mask >>= 1)
-					{
-						if (mask & bmp)
-							*dptr++ = fore;
-						else
-							*dptr++ = back;
-					}
-
-					scrX += 7;
-				}
-				else
-				{
-					*dptr++ = borderColor;
+					uint32_t c = (b & 0x80) ? fore : back;
+					*dptr++ = c;
+					*dptr++ = c; // pixel-double: fills the 512px content area
 				}
 			}
 		}
-		else
-		{
-			for (int scrX = 0; scrX < WSCR; scrX++)
-			{
-				*dptr++ = borderColor;
-			}
-		}
+
+		for (int scrX = 0; scrX < WBOR; scrX++)
+			*dptr++ = borderColor;
 	}
 }
 
@@ -533,6 +609,36 @@ void MinZX::processOutputPort(uint16_t port, uint8_t value)
 			//Ports::base[0x20] = data;
 			break;
 		}
+		case 0xFF: {
+			// Timex SCLD video mode register -- real hardware decodes this
+			// on all 8 low address bits regardless of the high byte
+			// (confirmed against spectrusty's scld.rs). Absent on real 48K
+			// hardware (no SCLD chip there), so gated on timexVideoEnabled_
+			// to leave 48K behavior untouched.
+			if (!timexVideoEnabled_) break;
+			timexMode_ = value & 0x07;
+			timexInk_  = (value >> 3) & 0x07;
+			break;
+		}
+		case 0xF4: {
+			// Timex DOCK/MMU paging: bit N (0-7) selects the 8K page at
+			// address N*0x2000. 0 = HOME (standard ROM/RAM for that page),
+			// 1 = DOCK bank N from the pool past the standard 6 RAM banks
+			// (ramBank(6+N)..ramBank(6+kDockBankCount-1), see init()). Real
+			// SCLD also supports an EX-ROM source (ctrl port 0xFF bit 7) --
+			// not implemented, DOCK is the only paged source for now.
+			if (!timexVideoEnabled_) break;
+			uint8_t diff = value ^ timexPagedMask_;
+			for (int page = 0; page < MemoryMap::NUM_PAGES; page++) {
+				if (!(diff & (1 << page))) continue;
+				if (value & (1 << page))
+					memory_.mapPage(page, &memory_.ramBank(6 + page));
+				else
+					memory_.mapHome(page);
+			}
+			timexPagedMask_ = value;
+			break;
+		}
 	}
 }
 
@@ -575,7 +681,7 @@ uint8_t MinZX::fetchOpcode(uint16_t address)
 		tstates += delay_contention(address, tstates);
 
 	tstates += 4;
-	return mem[address];
+	return memory_.peek8(address);
 }
 
 /* Read/Write byte from/to RAM */
@@ -586,7 +692,7 @@ uint8_t MinZX::peek8(uint16_t address)
 		tstates += delay_contention(address, tstates);
 
 	tstates += 3;
-	return mem[address];
+	return memory_.peek8(address);
 }
 
 void MinZX::poke8(uint16_t address, uint8_t value)
@@ -596,7 +702,7 @@ void MinZX::poke8(uint16_t address, uint8_t value)
 		tstates += delay_contention(address, tstates);
 
 	tstates += 3;
-	mem[address] = value;
+	memory_.poke8(address, value);
 }
 
 /* Read/Write word from/to RAM */
@@ -769,7 +875,7 @@ void MinZX::checkFastLoad()
 		size_t payloadLen = block.size() >= 2 ? block.size() - 2 : 0;
 		size_t copyLen = (size_t)de < payloadLen ? (size_t)de : payloadLen;
 		for (size_t i = 0; i < copyLen; i++)
-			mem[(uint16_t)(ix + i)] = block[1 + i];
+			memory_.poke8((uint16_t)(ix + i), block[1 + i]);
 		z80->setRegIX((uint16_t)(ix + copyLen));
 		z80->setRegDE((uint16_t)(de - copyLen));
 		z80->setCarryFlag(true);

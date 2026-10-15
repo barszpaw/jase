@@ -55,7 +55,6 @@ bool FileMgr::loadSNA(const char* filename, MinZX* targetEmulator)
 	fseek(pf, 0, SEEK_SET);
 
 	Z80* z80 = targetEmulator->getCPU();
-	uint8_t* mem = targetEmulator->getMemory();
 
 	targetEmulator->reset();
 
@@ -140,7 +139,7 @@ bool FileMgr::loadSNA(const char* filename, MinZX* targetEmulator)
 	uint16_t bytesToRead = 0xC000;
 	uint16_t offset = 0x4000;
 	while (bytesToRead--) {
-		mem[offset++] = fgetc(pf);
+		targetEmulator->poke8(offset++, (uint8_t)fgetc(pf));
 	}
 	
 
@@ -233,7 +232,6 @@ bool FileMgr::saveSNA(const char* filename, MinZX* sourceEmulator)
 	}
 
 	Z80* z80 = sourceEmulator->getCPU();
-	uint8_t* mem = sourceEmulator->getMemory();
 
 	fputc(z80->getRegI(), pf);
 	fputc(z80->getRegLx(), pf);
@@ -281,7 +279,7 @@ bool FileMgr::saveSNA(const char* filename, MinZX* sourceEmulator)
 		else if ((uint16_t)addr == (uint16_t)(snaSP + 1))
 			b = (uint8_t)((pc >> 8) & 0xFF);
 		else
-			b = mem[(uint16_t)addr];
+			b = sourceEmulator->peek8((uint16_t)addr);
 		fputc(b, pf);
 	}
 
