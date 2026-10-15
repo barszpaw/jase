@@ -94,33 +94,60 @@ int main(int argc, char *argv[])
 
 	// Explicit, named media flags — preferred over the positional-argument
 	// fallback below (kept for convenience/backward compat with existing
-	// test scripts). --load-tape PATH / --load-sna PATH, space-separated
-	// like the rest of this program's flags (--poke ADDR=..., not
-	// --poke=ADDR=...), not "freedom to pick interactively" (that's a
-	// separate, bigger feature — see project memory).
+	// test scripts). Space-separated like the rest of this program's flags
+	// (--poke ADDR=..., not --poke=ADDR=...).
+	//   --tape PATH       stage the tape (fast-load hook armed), wait for
+	//                     LOAD "" to be typed/entered normally.
+	//   --load-tape PATH  stage AND resume straight into the ROM's
+	//                     LD-BYTES call via a bundled .sna snapshot
+	//                     (assets/tape_load_point.sna) — pico-spec style:
+	//                     no keyboard/BASIC path at all, instant. A
+	//                     register-only version of this was tried first
+	//                     and reset the machine (no valid stack beneath
+	//                     the jump) — see project memory for why the full
+	//                     snapshot (real stack + memory, not just
+	//                     registers) is what actually makes this work.
+	//   --load-sna PATH   snapshots have no "wait for a command" concept
+	//                     (loadSNA already pokes state + sets PC directly),
+	//                     so there's only one form.
 	const char* tapePath = nullptr;
+	const char* autoTapePath = nullptr;
 	const char* snaPath = nullptr;
 	for (int i = 1; i < argc; i++)
 	{
-		if (0 == strcmp(argv[i], "--load-tape") && i + 1 < argc)
+		if (0 == strcmp(argv[i], "--tape") && i + 1 < argc)
 			tapePath = argv[++i];
+		else if (0 == strcmp(argv[i], "--load-tape") && i + 1 < argc)
+			autoTapePath = argv[++i];
 		else if (0 == strcmp(argv[i], "--load-sna") && i + 1 < argc)
 			snaPath = argv[++i];
 	}
 
-	if (tapePath)
-		fileMgr.loadTAP(tapePath, &minZX);
-	else if (snaPath)
-		fileMgr.loadSNA(snaPath, &minZX);
-	else if (argc > 1 && argv[1][0] != '-')
+	if (autoTapePath)
 	{
-		const char* path = argv[1];
-		size_t len = strlen(path);
-		bool isTap = len > 4 && (0 == strcasecmp(path + len - 4, ".tap"));
-		if (isTap)
-			fileMgr.loadTAP(path, &minZX);
-		else
-			fileMgr.loadSNA(path, &minZX);
+		fileMgr.loadTAP(autoTapePath, &minZX);
+		fileMgr.loadSNA("assets/tape_load_point.sna", &minZX);
+	}
+	else
+	{
+		// --tape and --load-sna are independent and can combine (e.g. to
+		// resume a captured "mid LD-BYTES call" snapshot with a tape
+		// staged so the fast-load hook is armed when it lands on 0x0556)
+		// — NOT an if/else chain like --load-tape's own exclusive path.
+		if (tapePath)
+			fileMgr.loadTAP(tapePath, &minZX);
+		if (snaPath)
+			fileMgr.loadSNA(snaPath, &minZX);
+		if (!tapePath && !snaPath && argc > 1 && argv[1][0] != '-')
+		{
+			const char* path = argv[1];
+			size_t len = strlen(path);
+			bool isTap = len > 4 && (0 == strcasecmp(path + len - 4, ".tap"));
+			if (isTap)
+				fileMgr.loadTAP(path, &minZX);
+			else
+				fileMgr.loadSNA(path, &minZX);
+		}
 	}
 
 	unsigned vsyncFlag = 0;

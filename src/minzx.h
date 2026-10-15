@@ -2,9 +2,11 @@
 #define _MINZX_H_
 
 #include <inttypes.h>
+#include <string>
 #include <vector>
 #include <SDL.h>
 #include "z80.h"
+#include "Peripheral.h"
 
 // Agent/debug port tracing: when set (via --trace-port on the command
 // line, see main.cpp), every IN from this port that changes value gets
@@ -41,6 +43,13 @@ public:
 	Z80*     getCPU()    { return z80; }
 	uint8_t* getMemory() { return mem; }
 
+	// Expansion devices (Kempston now, AY-PSG/ZiFi/DivSD/Spectranext
+	// later) — each owns its own port decoding and Layer 3 debug command.
+	// DebugServer tries each in turn for a command it doesn't itself
+	// recognize. The ULA's own port-0xFE functions (keyboard/border/
+	// beeper/EAR) are NOT here — see Peripheral.h for why.
+	const std::vector<Peripheral*>& getPeripherals() const { return peripherals_; }
+
 	// Debug protocol Layer 2 (see project memory for the contract): a
 	// single step runs exactly n instructions, bypassing update()'s
 	// frame/tstate pacing entirely. Breakpoints are checked in both
@@ -61,6 +70,24 @@ public:
 	// no tape signal connected. `blocks` are raw TAP block bytes
 	// (flag + data + checksum each), in file order.
 	void loadTapeBlocks(const std::vector<std::vector<uint8_t>>& blocks);
+
+	// Scripted key entry through the SAME keyboard-matrix path a human (or
+	// xdotool) would use, one frame at a time, rather than faking the
+	// ROM's internal register contracts directly — see project memory for
+	// why the human-typed path is the one already proven correct. `chords`
+	// is a sequence of steps; each step is the set of scancodes held down
+	// together for that step (e.g. {LALT, P} for a shifted symbol). Used
+	// both by the debug protocol's PRESSKEYS command and internally by
+	// --load-tape's auto-start (LOAD "" + ENTER).
+	void pressKeys(const std::vector<std::vector<SDL_Scancode>>& chords);
+
+	// --load-tape's auto-start mode: queues LOAD "" + ENTER via
+	// pressKeys(), after a delay long enough to clear the ROM's own boot
+	// sequence first — a chord queued from frame 0 lands DURING boot,
+	// before the keyboard scan loop is actually listening, and is gone by
+	// the time it is (confirmed: a 2s hold spanned past boot and worked,
+	// short holds starting at frame 0 didn't register at all).
+	void startAutoTypeLoadCommand();
 
 public:
 	virtual uint8_t  fetchOpcode (uint16_t address);
@@ -89,6 +116,8 @@ private:
 
 	uint32_t cycleTstates;
 
+	std::vector<Peripheral*> peripherals_;
+
 	void loadROM();
 	void loadDump();
 
@@ -109,6 +138,12 @@ private:
 	std::vector<std::vector<uint8_t>> tapBlocks_;
 	size_t tapPos_ = 0;
 	void checkFastLoad();
+
+	struct AutoTypeKeyStep { std::vector<SDL_Scancode> keys; int frames; };
+	std::vector<AutoTypeKeyStep> autoTypeSeq_;
+	size_t autoTypeIdx_ = 0;
+	int autoTypeFrameCounter_ = 0;
+	void advanceAutoType();
 
 	// Beeper (port 0xFE bit 4): a 1-bit speaker signal turned into a real
 	// square wave. One frame's worth of samples (kSamplesPerFrame, fixed

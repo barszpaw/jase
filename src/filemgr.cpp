@@ -23,6 +23,11 @@ static uint16_t fgetWordLE(FILE* pf) {
 	return lo | (hi << 8);
 }
 
+static void fputWordLE(uint16_t word, FILE* pf) {
+	fputc(word & 0xFF, pf);
+	fputc((word >> 8) & 0xFF, pf);
+}
+
 bool FileMgr::loadSNA(const char* filename, MinZX* targetEmulator)
 {
 	if (NULL == filename || '\0' == *filename) {
@@ -207,5 +212,80 @@ bool FileMgr::loadTAP(const char* filename, MinZX* targetEmulator)
 
 	targetEmulator->loadTapeBlocks(blocks);
 	INFO("FileMgr::loadTAP: loaded %zu blocks from %s\n", blocks.size(), filename);
+	return true;
+}
+
+bool FileMgr::saveSNA(const char* filename, MinZX* sourceEmulator)
+{
+	if (NULL == filename || '\0' == *filename) {
+		WARN("FileMgr::saveSNA: no filename specified\n");
+		return false;
+	}
+	if (NULL == sourceEmulator) {
+		WARN("FileMgr::saveSNA: no source emulator\n");
+		return false;
+	}
+
+	FILE* pf = fopen(filename, "wb");
+	if (pf == NULL) {
+		WARN("FileMgr::saveSNA: cannot create file %s\n", filename);
+		return false;
+	}
+
+	Z80* z80 = sourceEmulator->getCPU();
+	uint8_t* mem = sourceEmulator->getMemory();
+
+	fputc(z80->getRegI(), pf);
+	fputc(z80->getRegLx(), pf);
+	fputc(z80->getRegHx(), pf);
+	fputc(z80->getRegEx(), pf);
+	fputc(z80->getRegDx(), pf);
+	fputc(z80->getRegCx(), pf);
+	fputc(z80->getRegBx(), pf);
+	fputc(z80->getRegFx(), pf);
+	fputc(z80->getRegAx(), pf);
+
+	fputc(z80->getRegL(), pf);
+	fputc(z80->getRegH(), pf);
+	fputc(z80->getRegE(), pf);
+	fputc(z80->getRegD(), pf);
+	fputc(z80->getRegC(), pf);
+	fputc(z80->getRegB(), pf);
+	fputWordLE(z80->getRegIY(), pf);
+	fputWordLE(z80->getRegIX(), pf);
+
+	fputc(z80->isIFF2() ? 0x04 : 0x00, pf);
+	fputc(z80->getRegR(), pf);
+
+	fputc(z80->getFlags(), pf);
+	fputc(z80->getRegA(), pf);
+
+	// .SNA has no PC field — loadSNA pops it off the stack on load, so we
+	// push it here instead: SP written to the file is 2 less than the
+	// real SP, and the two bytes "below" the real stack are PC's bytes.
+	// Everything else is the UNMODIFIED real stack/memory — this is the
+	// whole point versus a register-only capture (see project memory):
+	// the real call chain beneath SP comes along for free.
+	uint16_t sp = z80->getRegSP();
+	uint16_t pc = z80->getRegPC();
+	uint16_t snaSP = (uint16_t)(sp - 2);
+	fputWordLE(snaSP, pf);
+
+	fputc((uint8_t)z80->getIM(), pf);
+	fputc(sourceEmulator->getBorderColor(), pf);
+
+	for (uint32_t addr = 0x4000; addr <= 0xFFFF; addr++) {
+		uint8_t b;
+		if ((uint16_t)addr == snaSP)
+			b = (uint8_t)(pc & 0xFF);
+		else if ((uint16_t)addr == (uint16_t)(snaSP + 1))
+			b = (uint8_t)((pc >> 8) & 0xFF);
+		else
+			b = mem[(uint16_t)addr];
+		fputc(b, pf);
+	}
+
+	fclose(pf);
+	INFO("FileMgr::saveSNA: wrote %s (PC=%04x via stack at %04x)\n", filename, pc, snaSP);
 	return true;
 }

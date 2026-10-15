@@ -1,5 +1,6 @@
 #include "minzx.h"
 #include "z80.h"
+#include "Kempston.h"
 #include <SDL.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,6 +20,33 @@
 #define VAL_NO_BRIGHT 176
 
 int g_tracePort = -1;
+
+// Full ZX Spectrum keyboard matrix, scancode -> (row-select hi-byte mask,
+// bit within that row). Mirrors the per-row checks in processInputPort's
+// port 0xFE handler exactly — used by pressKeys()'s forced-key override so
+// scripted/auto-typed input can land on any key, not just the handful a
+// hand-written switch happened to cover.
+struct KeyMapEntry { SDL_Scancode sc; uint8_t hiMask; uint8_t loBit; };
+static const KeyMapEntry kKeyMap[] = {
+	{ SDL_SCANCODE_LSHIFT, 0x01, 0x01 }, { SDL_SCANCODE_RSHIFT, 0x01, 0x01 },
+	{ SDL_SCANCODE_Z, 0x01, 0x02 }, { SDL_SCANCODE_X, 0x01, 0x04 },
+	{ SDL_SCANCODE_C, 0x01, 0x08 }, { SDL_SCANCODE_V, 0x01, 0x10 },
+	{ SDL_SCANCODE_A, 0x02, 0x01 }, { SDL_SCANCODE_S, 0x02, 0x02 },
+	{ SDL_SCANCODE_D, 0x02, 0x04 }, { SDL_SCANCODE_F, 0x02, 0x08 }, { SDL_SCANCODE_G, 0x02, 0x10 },
+	{ SDL_SCANCODE_Q, 0x04, 0x01 }, { SDL_SCANCODE_W, 0x04, 0x02 },
+	{ SDL_SCANCODE_E, 0x04, 0x04 }, { SDL_SCANCODE_R, 0x04, 0x08 }, { SDL_SCANCODE_T, 0x04, 0x10 },
+	{ SDL_SCANCODE_1, 0x08, 0x01 }, { SDL_SCANCODE_2, 0x08, 0x02 },
+	{ SDL_SCANCODE_3, 0x08, 0x04 }, { SDL_SCANCODE_4, 0x08, 0x08 }, { SDL_SCANCODE_5, 0x08, 0x10 },
+	{ SDL_SCANCODE_0, 0x10, 0x01 }, { SDL_SCANCODE_9, 0x10, 0x02 },
+	{ SDL_SCANCODE_8, 0x10, 0x04 }, { SDL_SCANCODE_7, 0x10, 0x08 }, { SDL_SCANCODE_6, 0x10, 0x10 },
+	{ SDL_SCANCODE_P, 0x20, 0x01 }, { SDL_SCANCODE_O, 0x20, 0x02 },
+	{ SDL_SCANCODE_I, 0x20, 0x04 }, { SDL_SCANCODE_U, 0x20, 0x08 }, { SDL_SCANCODE_Y, 0x20, 0x10 },
+	{ SDL_SCANCODE_RETURN, 0x40, 0x01 }, { SDL_SCANCODE_L, 0x40, 0x02 },
+	{ SDL_SCANCODE_K, 0x40, 0x04 }, { SDL_SCANCODE_J, 0x40, 0x08 }, { SDL_SCANCODE_H, 0x40, 0x10 },
+	{ SDL_SCANCODE_SPACE, 0x80, 0x01 }, { SDL_SCANCODE_LALT, 0x80, 0x02 }, { SDL_SCANCODE_RALT, 0x80, 0x02 },
+	{ SDL_SCANCODE_M, 0x80, 0x04 }, { SDL_SCANCODE_N, 0x80, 0x08 }, { SDL_SCANCODE_B, 0x80, 0x10 },
+};
+static const int kKeyMapSize = sizeof(kKeyMap) / sizeof(kKeyMap[0]);
 
 uint32_t speColors[16];
 
@@ -72,6 +100,8 @@ void MinZX::init()
 	//loadDump();
 	createSpectrumColors();
 	initAudio();
+
+	peripherals_.push_back(new Kempston());
 
 	reset();
 }
@@ -139,6 +169,7 @@ void MinZX::update(uint8_t* screen)
 	tstates = 0;
 	uint32_t prevTstates = 0;
 	justHitBreakpoint_ = false;
+	advanceAutoType();
 
 	while (tstates < cycleTstates)
 	{
@@ -227,6 +258,9 @@ void MinZX::destroy()
 {
 	if (audioDev_ != 0)
 		SDL_CloseAudioDevice(audioDev_);
+	for (Peripheral* p : peripherals_)
+		delete p;
+	peripherals_.clear();
 	delete z80;
 	delete[] mem;
 }
@@ -349,6 +383,15 @@ uint8_t MinZX::processInputPort(uint16_t port)
 	uint8_t hiport = port >> 8;
 	uint8_t loport = port & 0xFF;
 
+	// Expansion devices get first refusal on every port — the ULA's own
+	// port-0xFE functions below are intrinsic to the machine, not a
+	// peripheral, so they're not in this list (see Peripheral.h).
+	for (Peripheral* p : peripherals_) {
+		uint8_t value;
+		if (p->in(port, value))
+			return value;
+	}
+
 	if (loport == 0xFE) {
 		uint8_t result = 0xFF;
 
@@ -423,18 +466,20 @@ uint8_t MinZX::processInputPort(uint16_t port)
 			if (ks[SDL_SCANCODE_B]) result &= ~0x10;
 		}
 
-		return result;
-	}
-	// Kempston joystick: arrow keys for direction, left Alt for fire.
-	// Standard bit layout: 0=right,1=left,2=down,3=up,4=fire (active high).
-	if (loport == 0x1F) {
-		const Uint8* ks = SDL_GetKeyboardState(NULL);
-		uint8_t result = 0;
-		if (ks[SDL_SCANCODE_RIGHT]) result |= 0x01;
-		if (ks[SDL_SCANCODE_LEFT])  result |= 0x02;
-		if (ks[SDL_SCANCODE_DOWN])  result |= 0x04;
-		if (ks[SDL_SCANCODE_UP])   result |= 0x08;
-		if (ks[SDL_SCANCODE_LALT])  result |= 0x10;
+		// pressKeys() override: forces specific keys down regardless of
+		// real SDL state, through this SAME matrix path a human/xdotool
+		// press already goes through — not a separate ROM-register-contract
+		// shortcut, since that would mean re-deriving internal ROM state
+		// the already-proven human-typed path sidesteps entirely.
+		if (autoTypeIdx_ < autoTypeSeq_.size()) {
+			for (SDL_Scancode sc : autoTypeSeq_[autoTypeIdx_].keys) {
+				for (int i = 0; i < kKeyMapSize; i++) {
+					if (kKeyMap[i].sc == sc && !(hiport & kKeyMap[i].hiMask))
+						result &= ~kKeyMap[i].loBit;
+				}
+			}
+		}
+
 		return result;
 	}
 	// Sound (AY-3-8912)
@@ -451,6 +496,11 @@ void MinZX::processOutputPort(uint16_t port, uint8_t value)
 {
 	uint8_t hiport = port >> 8;
 	uint8_t loport = port & 0xFF;
+
+	for (Peripheral* p : peripherals_) {
+		if (p->out(port, value))
+			return;
+	}
 
 	uint8_t tmp_data = value;
 	switch (loport) {
@@ -634,6 +684,52 @@ void MinZX::loadTapeBlocks(const std::vector<std::vector<uint8_t>>& blocks)
 {
 	tapBlocks_ = blocks;
 	tapPos_ = 0;
+}
+
+// 15 frames held / 10 released per chord (300ms/200ms at 50Hz): long
+// enough for the ROM's interrupt-driven keyboard scan to register it,
+// comfortably under its ~35-frame REPDEL auto-repeat threshold (a
+// 100-frame hold was tested and DID trigger real ROM auto-repeat,
+// corrupting the line with repeated characters — don't go that long).
+void MinZX::pressKeys(const std::vector<std::vector<SDL_Scancode>>& chords)
+{
+	autoTypeSeq_.clear();
+	for (const auto& chord : chords) {
+		autoTypeSeq_.push_back({ chord, 15 });
+		autoTypeSeq_.push_back({ {}, 10 });
+	}
+	autoTypeIdx_ = 0;
+	autoTypeFrameCounter_ = 0;
+}
+
+void MinZX::startAutoTypeLoadCommand()
+{
+	pressKeys({
+		{SDL_SCANCODE_J},                        // LOAD keyword
+		{SDL_SCANCODE_LALT, SDL_SCANCODE_P},      // first "
+		{SDL_SCANCODE_LALT, SDL_SCANCODE_P},      // second "
+		{SDL_SCANCODE_RETURN},
+	});
+	// Prepend a boot-settle delay (100 frames / 2s): a chord queued from
+	// frame 0 lands DURING the ROM's own boot/copyright-message routine,
+	// before the keyboard scan loop is actually listening, and is long
+	// released by the time it is — confirmed by testing (a 2s hold spans
+	// past boot and registers; short holds starting at frame 0 don't
+	// register at all). A debug client calling PRESSKEYS directly doesn't
+	// need this — it can check STATE/REGS first to know boot is done.
+	autoTypeSeq_.insert(autoTypeSeq_.begin(), { {}, 100 });
+}
+
+void MinZX::advanceAutoType()
+{
+	if (autoTypeIdx_ >= autoTypeSeq_.size())
+		return;
+	autoTypeFrameCounter_++;
+	if (autoTypeFrameCounter_ >= autoTypeSeq_[autoTypeIdx_].frames)
+	{
+		autoTypeFrameCounter_ = 0;
+		autoTypeIdx_++;
+	}
 }
 
 // Standard 48K ROM LD-BYTES contract: A = expected flag byte, DE = length,

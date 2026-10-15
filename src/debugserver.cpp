@@ -1,5 +1,6 @@
 #include "debugserver.h"
 #include "minzx.h"
+#include "filemgr.h"
 #include "z80.h"
 
 #include <sys/socket.h>
@@ -12,6 +13,7 @@
 #include <cstring>
 #include <sstream>
 #include <vector>
+#include <cctype>
 
 static std::vector<std::string> splitWs(const std::string& s)
 {
@@ -20,6 +22,35 @@ static std::vector<std::string> splitWs(const std::string& s)
     std::string tok;
     while (iss >> tok) out.push_back(tok);
     return out;
+}
+
+static std::vector<std::string> splitOn(const std::string& s, char sep)
+{
+    std::vector<std::string> out;
+    std::istringstream iss(s);
+    std::string tok;
+    while (std::getline(iss, tok, sep)) out.push_back(tok);
+    return out;
+}
+
+// Name -> scancode for the PRESSKEYS command: single letters/digits map
+// directly, a handful of named keys (RETURN/ENTER, SPACE, ALT/SYMSHIFT,
+// SHIFT) cover the rest of what the keyboard matrix actually exposes (see
+// minzx.cpp's kKeyMap for the full matrix this feeds into).
+static SDL_Scancode scancodeFromName(std::string name)
+{
+    for (char& c : name) c = (char)toupper((unsigned char)c);
+    if (name.size() == 1) {
+        char c = name[0];
+        if (c >= 'A' && c <= 'Z') return (SDL_Scancode)(SDL_SCANCODE_A + (c - 'A'));
+        if (c == '0') return SDL_SCANCODE_0;
+        if (c >= '1' && c <= '9') return (SDL_Scancode)(SDL_SCANCODE_1 + (c - '1'));
+    }
+    if (name == "RETURN" || name == "ENTER") return SDL_SCANCODE_RETURN;
+    if (name == "SPACE") return SDL_SCANCODE_SPACE;
+    if (name == "ALT" || name == "SYMSHIFT" || name == "SYM") return SDL_SCANCODE_LALT;
+    if (name == "SHIFT" || name == "CAPSSHIFT") return SDL_SCANCODE_LSHIFT;
+    return SDL_SCANCODE_UNKNOWN;
 }
 
 bool DebugServer::init(int port)
@@ -208,24 +239,60 @@ void DebugServer::handleLine(const std::string& line, MinZX& minZX)
         }
         reply(resp);
     }
-    else if (cmd == "KEMPSTON") {
-        // Layer 3 extension (per-peripheral, vSpectranext-style): decode
-        // the raw port 0x1F byte into named fields instead of making the
-        // client re-derive the bit layout every time. Uses inPort() —
-        // the exact same codepath a real IN instruction takes — so this
-        // reports what the Z80 would actually see, not a side-channel
-        // guess (reading via inPort also means an active debug client
-        // polling KEMPSTON perturbs tstates slightly, same caveat as the
-        // Layer 1 PORT/OUT commands).
-        uint8_t val = minZX.inPort(0x1F);
-        snprintf(out, sizeof(out), "OK right=%d left=%d down=%d up=%d fire=%d",
-                 (val & 0x01) ? 1 : 0, (val & 0x02) ? 1 : 0,
-                 (val & 0x04) ? 1 : 0, (val & 0x08) ? 1 : 0,
-                 (val & 0x10) ? 1 : 0);
-        reply(out);
+    else if (cmd == "PRESSKEYS" && toks.size() >= 2) {
+        // Comma-separated chords, '+' within a chord for simultaneous
+        // keys: "J,ALT+P,ALT+P,RETURN" types LOAD "" + ENTER. Pacing
+        // (hold/release timing) is the emulator's job, not the caller's —
+        // see MinZX::pressKeys. Call STATE/REGS first if you need to know
+        // the ROM has finished booting before queuing keys; this command
+        // doesn't add a boot-settle delay itself (startAutoTypeLoadCommand,
+        // used by --load-tape, does — see project memory for why).
+        std::vector<std::vector<SDL_Scancode>> chords;
+        bool bad = false;
+        for (const std::string& chordStr : splitOn(toks[1], ',')) {
+            std::vector<SDL_Scancode> chord;
+            for (const std::string& keyName : splitOn(chordStr, '+')) {
+                SDL_Scancode sc = scancodeFromName(keyName);
+                if (sc == SDL_SCANCODE_UNKNOWN) { bad = true; break; }
+                chord.push_back(sc);
+            }
+            if (bad) break;
+            chords.push_back(chord);
+        }
+        if (bad || chords.empty())
+            reply("ERR bad key name");
+        else {
+            minZX.pressKeys(chords);
+            reply("OK");
+        }
+    }
+    else if (cmd == "SAVESNA" && toks.size() >= 2) {
+        // Captures the FULL machine state (registers + stack + memory),
+        // not just registers — see project memory for why that distinction
+        // mattered (a register-only "jump into LD-BYTES" attempt landed on
+        // a garbage stack and the machine reset itself). Used to build the
+        // bundled "mid natural LOAD "" call" snapshot --load-tape replays.
+        FileMgr fileMgr;
+        if (fileMgr.saveSNA(toks[1].c_str(), &minZX))
+            reply("OK");
+        else
+            reply("ERR saveSNA failed");
     }
     else {
-        reply("ERR unknown command");
+        // Layer 3 extensions: each expansion device (Kempston now, AY-PSG/
+        // ZiFi/DivSD/Spectranext later — see Peripheral.h) owns its own
+        // command name and decodes it independently; nothing here needs
+        // to change when a new device is added.
+        std::string periphReply;
+        for (Peripheral* p : minZX.getPeripherals()) {
+            periphReply = p->debugCommand(toks);
+            if (!periphReply.empty())
+                break;
+        }
+        if (!periphReply.empty())
+            reply(periphReply);
+        else
+            reply("ERR unknown command");
     }
 }
 
