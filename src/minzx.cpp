@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <memory.h>
+#include <strings.h>
 
 #define TRACE  printf
 #define DEBUG  printf
@@ -87,20 +88,54 @@ static uint32_t zxColor(int c, bool b)
 }
 
 
+bool MinZX::setMachine(const char* name)
+{
+	if (0 == strcasecmp(name, "48k")) {
+		machine_ = MachineType::Spectrum48K;
+		romPaths_ = { "zx48.rom" };
+	} else if (0 == strcasecmp(name, "tc2048")) {
+		machine_ = MachineType::TimexTC2048;
+		romPaths_ = { "/usr/share/fusex/tc2048.rom" };
+	} else if (0 == strcasecmp(name, "128k")) {
+		machine_ = MachineType::Spectrum128K;
+		romPaths_ = { "/usr/share/fusex/128-0.rom", "/usr/share/fusex/128-1.rom" };
+	} else {
+		return false;
+	}
+	return true;
+}
+
 void MinZX::init()
 {
 	z80   = new Z80(this);
-	// 2 ROM banks (8K each = standard 16K ROM) always; RAM banks: the
-	// standard 6 (48K) plus, on Timex machines, a full 8-bank DOCK pool so
-	// real DOCK-paging software has something to page in.
-	int numRamBanks = 6 + (timexVideoEnabled_ ? kDockBankCount : 0);
-	memory_.init(2, numRamBanks);
+
+	int numRomBanks, numRamBanks;
+	switch (machine_) {
+		case MachineType::TimexTC2048:
+			// 1 ROM pair (2x8K); RAM: standard 6 (48K) + a full 8-bank DOCK
+			// pool so real DOCK-paging software has something to page in.
+			numRomBanks = 2;
+			numRamBanks = 6 + kDockBankCount;
+			break;
+		case MachineType::Spectrum128K:
+			// 2 ROM pairs (editor + 48K BASIC); RAM: 8 full 16K banks, each
+			// as 2x8K sub-banks -- bank N lives at ramBank(2N)/ramBank(2N+1).
+			numRomBanks = 4;
+			numRamBanks = 16;
+			break;
+		default: // Spectrum48K
+			numRomBanks = 2;
+			numRamBanks = 6;
+			break;
+	}
+	memory_.init(numRomBanks, numRamBanks);
 	ports = new uint8_t[0x10000];
 
 	memset(ports, 0xFF, 0x10000);
 
 	cycleTstates = 69888;
 	loadROM();
+	setupInitialPaging();
 
 	createSpectrumColors();
 	initAudio();
@@ -310,21 +345,72 @@ void MinZX::destroy()
 
 void MinZX::loadROM()
 {
-	FILE* pf = fopen(romPath_, "rb");
-	if (pf == NULL) {
-		ERROR("Cannot load ROM from file\n");
-		return;
+	// Each 16K file loads into one ROM bank pair: file i -> romBank(2i)/
+	// romBank(2i+1). 48K/TC2048 have one file (the editor/BASIC pair for
+	// 128K is two separate 16K files, not one 32K file -- matches how
+	// fusex ships them, /usr/share/fusex/128-0.rom + 128-1.rom).
+	for (size_t i = 0; i < romPaths_.size(); i++) {
+		FILE* pf = fopen(romPaths_[i].c_str(), "rb");
+		if (pf == NULL) {
+			ERROR("Cannot load ROM from file\n");
+			continue;
+		}
+		// Read into a scratch buffer first, not directly into the ROM
+		// banks: MemoryMap::Bank's two banks aren't guaranteed contiguous
+		// (struct padding after the data[] array), so a single fread
+		// spanning both would rely on layout outside the class's contract.
+		uint8_t romBuf[0x4000];
+		size_t elemsRead = fread(romBuf, 1, 0x4000, pf);
+		fclose(pf);
+		memcpy(memory_.romBank(2 * i).data, romBuf, 0x2000);
+		memcpy(memory_.romBank(2 * i + 1).data, romBuf + 0x2000, 0x2000);
 	}
+}
 
-	// Read into a scratch buffer first, not directly into the ROM banks:
-	// MemoryMap::Bank's two banks aren't guaranteed contiguous (struct
-	// padding after the data[] array), so a single fread spanning both
-	// would be relying on layout that isn't part of the class's contract.
-	uint8_t romBuf[0x4000];
-	size_t elemsRead = fread(romBuf, 1, 0x4000, pf);
+void MinZX::setupInitialPaging()
+{
+	switch (machine_) {
+		case MachineType::Spectrum128K:
+			// page0-1: ROM pair 0 (editor) -- bit4=0 is the soft-reset
+			// default. page2-3: RAM bank 5, page4-5: RAM bank 2 -- these
+			// two NEVER move, unlike TC2048's sequential HOME. page6-7:
+			// RAM bank 0 (bits2:0=0 is the soft-reset default).
+			memory_.mapPage(0, &memory_.romBank(0));
+			memory_.mapPage(1, &memory_.romBank(1));
+			memory_.mapPage(2, &memory_.ramBank(10)); // bank 5 low half
+			memory_.mapPage(3, &memory_.ramBank(11)); // bank 5 high half
+			memory_.mapPage(4, &memory_.ramBank(4));  // bank 2 low half
+			memory_.mapPage(5, &memory_.ramBank(5));  // bank 2 high half
+			memory_.mapPage(6, &memory_.ramBank(0));  // bank 0 low half
+			memory_.mapPage(7, &memory_.ramBank(1));  // bank 0 high half
+			break;
+		default: // Spectrum48K, TimexTC2048: sequential ROM+RAM
+			for (int page = 0; page < MemoryMap::NUM_PAGES; page++)
+				memory_.mapHome(page);
+			break;
+	}
+}
+
+bool MinZX::loadDockCartridge(const char* path)
+{
+	FILE* pf = fopen(path, "rb");
+	if (!pf) { ERROR("loadDockCartridge: cannot open file\n"); return false; }
+
+	uint8_t header[9];
+	if (fread(header, 1, 9, pf) != 9) { fclose(pf); return false; }
+	// header[0]: bank ID (0=DOCK, 254=EXROM, 255=HOME) -- only DOCK is
+	// meaningful here, the pool this loads into IS the DOCK bank pool.
+	for (int page = 0; page < 8; page++) {
+		uint8_t type = header[1 + page];
+		MemoryMap::Bank& bank = memory_.ramBank(6 + page);
+		if (type == 2 || type == 3) { // ROM or RAM: data follows
+			if (fread(bank.data, 1, 0x2000, pf) != 0x2000) { fclose(pf); return false; }
+		} else { // NULL or RAM_EMPTY: no data in the file, zero it
+			memset(bank.data, 0x00, 0x2000);
+		}
+	}
 	fclose(pf);
-	memcpy(memory_.romBank(0).data, romBuf, 0x2000);
-	memcpy(memory_.romBank(1).data, romBuf + 0x2000, 0x2000);
+	return true;
 }
 
 #define HBMP 192
@@ -357,8 +443,18 @@ void MinZX::generateScreen(uint8_t* screen)
 
 	uint32_t borderColor = zxColor(border, 0);
 
-	uint8_t mode = timexVideoEnabled_ ? timexMode_ : 0;
+	uint8_t mode = (machine_ == MachineType::TimexTC2048) ? timexMode_ : 0;
 	bool hiRes = (mode == 6);
+
+	// Standard-mode (mode 0/1-fallback) screen source: 48K/TC2048 always
+	// read RAM bank 0 (TC2048's own screen0 convention happens to be the
+	// same bank). 128K's screen can be bank 5 or bank 7 (port 0x7FFD bit
+	// 3) -- read directly from the physical bank regardless of what's
+	// currently paged at $4000 or $C000, same "renderer bypasses the MMU"
+	// rule as everywhere else here.
+	int stdScreenRamBank = 0;
+	if (machine_ == MachineType::Spectrum128K)
+		stdScreenRamBank = (spectrum128ScreenBank_ == 7) ? 14 : 10;
 
 	uint32_t hrInkColor = 0, hrPapColor = 0;
 	if (hiRes) {
@@ -405,8 +501,8 @@ void MinZX::generateScreen(uint8_t* screen)
 			         bmp2Bank = &memory_.ramBank(1); bmp2Off = bmpRowOff; break;
 			case 6:  bmpBank = &memory_.ramBank(0); bmpOff = bmpRowOff;
 			         bmp2Bank = &memory_.ramBank(1); bmp2Off = bmpRowOff; break;
-			default: bmpBank = &memory_.ramBank(0); bmpOff = bmpRowOff;
-			         bmp2Bank = &memory_.ramBank(0); bmp2Off = attRowOff; break;
+			default: bmpBank = &memory_.ramBank(stdScreenRamBank); bmpOff = bmpRowOff;
+			         bmp2Bank = &memory_.ramBank(stdScreenRamBank); bmp2Off = attRowOff; break;
 		}
 
 		uint8_t* bmpptr  = bmpBank->data  + bmpOff;
@@ -587,6 +683,23 @@ void MinZX::processOutputPort(uint16_t port, uint8_t value)
 			return;
 	}
 
+	// 128K paging (port 0x7FFD) isn't low-byte-only decoded -- real
+	// hardware only checks bit15=0, bit1=0, bit0=1 (ZX Next ports.txt),
+	// so it can't be a case in the switch(loport) below.
+	if (machine_ == MachineType::Spectrum128K && (port & 0x8003) == 0x0001) {
+		if (!spectrum128Locked_) {
+			memory_.mapPage(0, value & 0x10 ? &memory_.romBank(2) : &memory_.romBank(0));
+			memory_.mapPage(1, value & 0x10 ? &memory_.romBank(3) : &memory_.romBank(1));
+			int ramBankSel = value & 0x07;
+			memory_.mapPage(6, &memory_.ramBank(2 * ramBankSel));
+			memory_.mapPage(7, &memory_.ramBank(2 * ramBankSel + 1));
+			spectrum128ScreenBank_ = (value & 0x08) ? 7 : 5;
+			if (value & 0x20) spectrum128Locked_ = true;
+		}
+		spectrum128Paging_ = value;
+		return;
+	}
+
 	uint8_t tmp_data = value;
 	switch (loport) {
 		case 0xFE: {
@@ -613,9 +726,9 @@ void MinZX::processOutputPort(uint16_t port, uint8_t value)
 			// Timex SCLD video mode register -- real hardware decodes this
 			// on all 8 low address bits regardless of the high byte
 			// (confirmed against spectrusty's scld.rs). Absent on real 48K
-			// hardware (no SCLD chip there), so gated on timexVideoEnabled_
-			// to leave 48K behavior untouched.
-			if (!timexVideoEnabled_) break;
+			// hardware (no SCLD chip there), so gated on machine_ to leave
+			// other machines' behavior untouched.
+			if (machine_ != MachineType::TimexTC2048) break;
 			timexMode_ = value & 0x07;
 			timexInk_  = (value >> 3) & 0x07;
 			break;
@@ -627,7 +740,7 @@ void MinZX::processOutputPort(uint16_t port, uint8_t value)
 			// (ramBank(6+N)..ramBank(6+kDockBankCount-1), see init()). Real
 			// SCLD also supports an EX-ROM source (ctrl port 0xFF bit 7) --
 			// not implemented, DOCK is the only paged source for now.
-			if (!timexVideoEnabled_) break;
+			if (machine_ != MachineType::TimexTC2048) break;
 			uint8_t diff = value ^ timexPagedMask_;
 			for (int page = 0; page < MemoryMap::NUM_PAGES; page++) {
 				if (!(diff & (1 << page))) continue;

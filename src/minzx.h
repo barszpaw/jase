@@ -15,6 +15,15 @@
 // and one port space in this process.
 extern int g_tracePort;
 
+// The "rampack factory" selector: each value is a self-contained memory
+// configuration (ROM count/content, RAM bank count, initial page table)
+// plus which paging port(s) processOutputPort activates. Adding a machine
+// means adding one enum value, one case in setMachine(), one case in
+// init()'s bank-count switch, one case in setupInitialPaging(), and (if it
+// pages at runtime) one gated block in processOutputPort -- nothing else
+// changes, same shape as adding a new Peripheral.
+enum class MachineType { Spectrum48K, TimexTC2048, Spectrum128K };
+
 class MinZX : public Z80operations
 {
 public:
@@ -28,10 +37,31 @@ public:
 
 	void init();
 
-	// Must be called before init() -- loadROM()/the port-0xFF SCLD handler
-	// both read these at init time.
-	void setRomPath(const char* path) { romPath_ = path; }
-	void setTimexVideo(bool on) { timexVideoEnabled_ = on; }
+	// Must be called before init() -- it decides ROM(s)/bank counts/the
+	// initial page table that init() sets up. name: "48k" (default
+	// behavior if never called), "tc2048", "128k".
+	bool setMachine(const char* name);
+
+	// Test/debug override: replaces ROM pair 0 (the one setMachine() just
+	// picked). For standalone diagnostic ROMs (e.g. Brendan Alford's
+	// zx-diagnostics testrom.bin) that replace the system ROM outright.
+	void setRomOverride(const char* path) { if (!romPaths_.empty()) romPaths_[0] = path; }
+
+	// Loads a real TS2068 .DCK cartridge (Warajevo format, confirmed
+	// against fusex's libspectrum/dck.c -- 9-byte header: bank ID then one
+	// type byte per 8K page [0=null,1=ram-empty,2=rom,3=ram], followed by
+	// 8K of data for each ROM/RAM page) straight into the DOCK bank pool
+	// (ramBank(6+page)). Does NOT page anything in -- real cartridges only
+	// occupy DOCK address space once software pages them in via port
+	// 0xF4, same as any other DOCK content; call out(0xF4, mask) (or run
+	// code that does) afterward for whichever pages the cartridge expects
+	// paged in at boot.
+	bool loadDockCartridge(const char* path);
+
+	// Directly drives a port write without going through the Z80 -- lets
+	// test setup page in DOCK banks (or anything else processOutputPort
+	// handles) before execution starts.
+	void poke_out(uint16_t port, uint8_t value) { processOutputPort(port, value); }
 
 	void update(uint8_t* screen);
 
@@ -131,7 +161,10 @@ private:
 	MemoryMap memory_;
 	uint8_t* ports;
 
-	const char* romPath_ = "zx48.rom";
+	MachineType machine_ = MachineType::Spectrum48K;
+	std::vector<std::string> romPaths_ = { "zx48.rom" };
+
+	void setupInitialPaging();
 
 	// Timex SCLD video mode register (port 0xFF, bits 0-2 mode / 3-5 ink) --
 	// ported from pico-spec-drewpo's Video.cpp/Ports.cpp (confirmed on real
@@ -141,8 +174,7 @@ private:
 	// currently has paged there, same as real SCLD/ULA hardware). Modes
 	// 3/4/5/7 need a second physical bank ("bank 7") and aren't implemented;
 	// they fall back to mode 0, matching pico-spec's own "undefined ->
-	// standard" convention.
-	bool timexVideoEnabled_ = false;
+	// standard" convention. Active only when machine_ == TimexTC2048.
 	uint8_t timexMode_ = 0;
 	uint8_t timexInk_ = 0;
 
@@ -152,6 +184,18 @@ private:
 	// this on the low byte regardless of the high byte, like port 0xFF.
 	uint8_t timexPagedMask_ = 0;
 	static const int kDockBankCount = 8; // full 8x8K = 64K DOCK population
+
+	// Spectrum 128K paging (port 0x7FFD, decoded (port & 0x8003) == 1 per
+	// the real partial hardware decode -- ZX Next ports.txt). Unlike Timex,
+	// pages 2-3 ($4000-7FFF, RAM bank 5) and pages 4-5 ($8000-BFFF, RAM
+	// bank 2) NEVER move -- only page0-1 (ROM pair) and page6-7 (RAM bank
+	// 0-7) are switched. Bit3 (screen bank 5 vs 7) is read-only state for
+	// the renderer, like timexMode_ -- it doesn't repage anything, bank 7
+	// just isn't resident anywhere unless bits2:0 also select it for
+	// page6-7. Active only when machine_ == Spectrum128K.
+	uint8_t spectrum128Paging_ = 0; // last value written, for the lock bit
+	bool spectrum128Locked_ = false;
+	uint8_t spectrum128ScreenBank_ = 5; // 5 or 7, bit3 of the port
 
 	uint8_t* lastScreenBuf_ = nullptr;
 	uint32_t tstates;

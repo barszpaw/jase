@@ -22,17 +22,16 @@ public:
 		bool isRom;
 	};
 
-	// numRomBanks: 8K ROM banks (a standard 16K ROM is 2). numRamBanks: 8K
-	// RAM banks; the first 6 are the HOME-mapped standard 48K (pages 2-7),
-	// any beyond that only exist to be paged in via mapPage() (DOCK, etc).
+	// numRomBanks/numRamBanks: pool sizes only -- this class holds no
+	// policy about what layout a machine wants. The caller sets up the
+	// initial page table afterward via mapHome()/mapPage() (see MinZX::
+	// setupInitialPaging(), one case per machine type).
 	void init(int numRomBanks, int numRamBanks)
 	{
 		romBanks_.resize(numRomBanks);
 		ramBanks_.resize(numRamBanks);
 		for (auto& b : romBanks_) { memset(b.data, 0x00, PAGE_SIZE); b.isRom = true; }
 		for (auto& b : ramBanks_) { memset(b.data, 0x00, PAGE_SIZE); b.isRom = false; }
-		for (int page = 0; page < NUM_PAGES; page++)
-			mapHome(page);
 	}
 
 	void destroy()
@@ -41,9 +40,12 @@ public:
 		ramBanks_.clear();
 	}
 
-	// The non-paged default for one 8K window, same convention as real
-	// SCLD port 0xF4 bit=0: page<2 -> ROM bank `page`, page>=2 -> RAM bank
-	// `page-2`.
+	// The sequential HOME layout real SCLD port 0xF4 bit=0 falls back to:
+	// page<2 -> ROM bank `page`, page>=2 -> RAM bank `page-2`. Used by 48K
+	// and TC2048 (TC2048's DOCK paging is defined relative to exactly this
+	// layout). NOT used by 128K, whose page2-5 are fixed to specific RAM
+	// banks rather than sequential ones -- its setupInitialPaging() calls
+	// mapPage() directly instead.
 	void mapHome(int page)
 	{
 		pageTable_[page] = (page < 2) ? &romBanks_[page] : &ramBanks_[page - 2];

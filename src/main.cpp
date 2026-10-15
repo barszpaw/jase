@@ -66,6 +66,24 @@ static int applyDebugArgs(int argc, char* argv[], MinZX& minZX)
 		{
 			debugPort = atoi(argv[++i]);
 		}
+		else if (0 == strcmp(argv[i], "--out") && i + 1 < argc)
+		{
+			// PORT=VALUE, hex -- drives a port write directly, without the
+			// Z80 executing an OUT instruction. For test bootstrap (e.g.
+			// paging in a DOCK bank before execution starts), same spirit
+			// as --poke/--pc below.
+			char* eq = strchr(argv[++i], '=');
+			if (!eq) { std::cerr << "--out expects PORT=VALUE" << std::endl; continue; }
+			*eq = '\0';
+			uint16_t port = (uint16_t)strtoul(argv[i], nullptr, 16);
+			uint8_t value = (uint8_t)strtoul(eq + 1, nullptr, 16);
+			minZX.poke_out(port, value);
+		}
+		else if (0 == strcmp(argv[i], "--dock-cartridge") && i + 1 < argc)
+		{
+			if (!minZX.loadDockCartridge(argv[++i]))
+				std::cerr << "--dock-cartridge: failed to load " << argv[i] << std::endl;
+		}
 		else if (0 == strcmp(argv[i], "--zifi") && i + 1 < argc)
 		{
 			// HOST:PORT for the ZiFi peripheral's TCP connection — either a
@@ -104,15 +122,12 @@ int main(int argc, char *argv[])
 		if (0 == strcmp(argv[i], "--machine") && i + 1 < argc)
 		{
 			const char* m = argv[++i];
-			if (0 == strcasecmp(m, "tc2048"))
-			{
-				minZX.setRomPath("/usr/share/fusex/tc2048.rom");
-				minZX.setTimexVideo(true);
-			}
-			else
-			{
-				std::cerr << "--machine: unknown value '" << m << "' (expected tc2048)" << std::endl;
-			}
+			if (!minZX.setMachine(m))
+				std::cerr << "--machine: unknown value '" << m << "' (expected 48k, tc2048, 128k)" << std::endl;
+		}
+		else if (0 == strcmp(argv[i], "--rom") && i + 1 < argc)
+		{
+			minZX.setRomOverride(argv[++i]);
 		}
 	}
 
