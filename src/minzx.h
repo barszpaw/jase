@@ -168,6 +168,14 @@ private:
 	// for the audio pipeline, separate from the generic peripherals_ list
 	// (which AyPsg is ALSO in, for port IN/OUT and its debug command).
 	class AyPsg* ay_ = nullptr;
+
+public:
+	// Non-owning accessor so main.cpp can call connectTo() with a
+	// user-supplied host:port after init() constructs the peripheral —
+	// same "separate concerns" split as ay_ above.
+	class ZiFi* getZiFi() const { return zifi_; }
+private:
+	class ZiFi* zifi_ = nullptr;
 };
 
 #endif // _MINZX_H_

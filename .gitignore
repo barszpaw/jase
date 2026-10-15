@@ -2,6 +2,7 @@
 minzx
 jase
 *.o
+tools/virtual_esp01/virtual_esp01
 bin/Win32/
 bin/x64/
 

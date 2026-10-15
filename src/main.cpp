@@ -9,6 +9,7 @@
 #include "minzx.h"
 #include "filemgr.h"
 #include "debugserver.h"
+#include "ZiFi.h"
 #include <cstdlib>
 #include <cstring>
 #include <strings.h>
@@ -65,6 +66,19 @@ static int applyDebugArgs(int argc, char* argv[], MinZX& minZX)
 		else if (0 == strcmp(argv[i], "--debug-port") && i + 1 < argc)
 		{
 			debugPort = atoi(argv[++i]);
+		}
+		else if (0 == strcmp(argv[i], "--zifi") && i + 1 < argc)
+		{
+			// HOST:PORT for the ZiFi peripheral's TCP connection — either a
+			// real ESP-01/Wemos D1 bridged onto TCP via socat, or
+			// tools/virtual_esp01's standalone daemon. JASE only ever
+			// speaks one TCP byte-stream protocol; which of those is on
+			// the other end is entirely outside this process.
+			char* arg = argv[++i];
+			char* colon = strrchr(arg, ':');
+			if (!colon) { std::cerr << "--zifi expects HOST:PORT" << std::endl; continue; }
+			*colon = '\0';
+			minZX.getZiFi()->connectTo(arg, atoi(colon + 1));
 		}
 	}
 	if (pcAddr >= 0)

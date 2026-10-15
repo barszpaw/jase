@@ -2,6 +2,7 @@
 #include "z80.h"
 #include "Kempston.h"
 #include "AyPsg.h"
+#include "ZiFi.h"
 #include <SDL.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -105,6 +106,8 @@ void MinZX::init()
 	peripherals_.push_back(new Kempston());
 	ay_ = new AyPsg();
 	peripherals_.push_back(ay_);
+	zifi_ = new ZiFi();
+	peripherals_.push_back(zifi_);
 
 	reset();
 }
@@ -175,6 +178,7 @@ void MinZX::update(uint8_t* screen)
 	uint32_t prevTstates = 0;
 	justHitBreakpoint_ = false;
 	advanceAutoType();
+	if (zifi_) zifi_->pump();
 
 	while (tstates < cycleTstates)
 	{
