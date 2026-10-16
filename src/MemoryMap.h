@@ -52,6 +52,7 @@ public:
 	}
 
 	void mapPage(int page, Bank* bank) { pageTable_[page] = bank; }
+	Bank* getPage(int page) const { return pageTable_[page]; }
 
 	uint8_t peek8(uint16_t addr) const
 	{

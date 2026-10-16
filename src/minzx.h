@@ -118,6 +118,16 @@ public:
 
 	void reset();
 
+	// /NMI is level-triggered on real hardware (held until serviced); the
+	// z80cpp core models that as a one-shot flag consumed at the start of
+	// the next execute() (see z80cpp/z80.cpp), so a single call here is
+	// enough -- no need to hold/release like a real button. The CPU-level
+	// signal always fires regardless of which peripherals exist -- it's
+	// a generic Z80 feature, not owned by any one card; each peripheral's
+	// own onNMI() (see Peripheral.h) decides what, if anything, the
+	// signal means to it (e.g. Multiface's "red button").
+	void triggerNMI() { z80->triggerNMI(); for (Peripheral* p : peripherals_) p->onNMI(); }
+
 	void setBorderColor(uint8_t bcol) { border = bcol; }
 	uint8_t getBorderColor() const { return border; }
 	uint32_t getTStates() const { return tstates; }
@@ -368,8 +378,19 @@ public:
 	// user-supplied host:port after init() constructs the peripheral —
 	// same "separate concerns" split as ay_ above.
 	class ZiFi* getZiFi() const { return zifi_; }
+
+	// Same idea: main.cpp calls setEnabled()/loadRom() on this after
+	// init() constructs it, for --multiface1/--multiface1-rom.
+	class Multiface* getMultiface() const { return multiface_; }
+
+	// Same idea: main.cpp calls setEnabled()/loadRom()/insertDisk() on
+	// this after init() constructs it, for --divide/--divide-rom/
+	// --divide-disk.
+	class DivIde* getDivIde() const { return divide_; }
 private:
 	class ZiFi* zifi_ = nullptr;
+	class Multiface* multiface_ = nullptr;
+	class DivIde* divide_ = nullptr;
 };
 
 #endif // _MINZX_H_

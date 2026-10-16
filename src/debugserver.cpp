@@ -282,6 +282,17 @@ void DebugServer::handleLine(const std::string& line, MinZX& minZX)
         running_ = false;
         reply("OK");
     }
+    else if (cmd == "RESET") {
+        // Same as the window's F11 hotkey -- a full machine reset.
+        minZX.reset();
+        reply("OK");
+    }
+    else if (cmd == "NMI") {
+        // Same as the window's Alt+F10 hotkey -- see MinZX::triggerNMI()/
+        // multifaceArmOnTrigger() for what actually happens on the Z80 side.
+        minZX.triggerNMI();
+        reply("OK");
+    }
     else if (cmd == "BREAK" && toks.size() >= 2) {
         uint16_t addr = (uint16_t)strtoul(toks[1].c_str(), nullptr, 16);
         minZX.addBreakpoint(addr);

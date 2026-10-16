@@ -3,6 +3,8 @@
 #include "Kempston.h"
 #include "AyPsg.h"
 #include "ZiFi.h"
+#include "Multiface.h"
+#include "DivIde.h"
 #include <SDL.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -145,6 +147,10 @@ void MinZX::init()
 	peripherals_.push_back(ay_);
 	zifi_ = new ZiFi();
 	peripherals_.push_back(zifi_);
+	multiface_ = new Multiface();
+	peripherals_.push_back(multiface_);
+	divide_ = new DivIde();
+	peripherals_.push_back(divide_);
 
 	reset();
 }
@@ -267,6 +273,10 @@ void MinZX::update(uint8_t* screen)
 		} else {
 			tapeArmOnLoadEntry(z80->getRegPC());
 		}
+		// ROMCS-style peripherals (Multiface, later DivMMC/IF1/...) get
+		// the same pre-fetch look at PC the tape engine above does, via
+		// the generic Peripheral hook -- see Peripheral.h.
+		for (Peripheral* p : peripherals_) p->onInstructionFetch(z80->getRegPC(), memory_);
 		// Check AFTER executing, not before: if we're resuming from a
 		// breakpoint we're currently sitting on, checking first would
 		// re-trigger immediately without ever advancing — CONT would
@@ -345,6 +355,7 @@ void MinZX::step(int n)
 		} else {
 			tapeArmOnLoadEntry(z80->getRegPC());
 		}
+		for (Peripheral* p : peripherals_) p->onInstructionFetch(z80->getRegPC(), memory_);
 		z80->execute();
 		if (breakpointsEnabled_ && isBreakpoint(z80->getRegPC()))
 		{
@@ -618,12 +629,24 @@ uint8_t MinZX::processInputPort(uint16_t port)
 
 	// Expansion devices get first refusal on every port — the ULA's own
 	// port-0xFE functions below are intrinsic to the machine, not a
-	// peripheral, so they're not in this list (see Peripheral.h).
+	// peripheral, so they're not in this list (see Peripheral.h). Every
+	// peripheral is called, even after one has already claimed the
+	// value: real hardware genuinely has ports two devices both decode
+	// (Kempston and Multiface ONE both answer 0x1F, confirmed against
+	// fusex's multiface_port_in1() -- a documented conflict, not a bug),
+	// and a device reacting for a side effect (Multiface paging itself
+	// out) still needs to see the access even when it isn't the one
+	// supplying the byte. Only the FIRST claim wins the actual value.
+	bool gotValue = false;
+	uint8_t result8 = 0xFF;
 	for (Peripheral* p : peripherals_) {
 		uint8_t value;
-		if (p->in(port, value))
-			return value;
+		if (p->in(port, value) && !gotValue) {
+			result8 = value;
+			gotValue = true;
+		}
 	}
+	if (gotValue) return result8;
 
 	if (loport == 0xFE) {
 		uint8_t result = 0xFF;

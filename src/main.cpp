@@ -10,6 +10,8 @@
 #include "filemgr.h"
 #include "debugserver.h"
 #include "ZiFi.h"
+#include "Multiface.h"
+#include "DivIde.h"
 #include <cstdlib>
 #include <cstring>
 #include <strings.h>
@@ -137,10 +139,46 @@ static void printUsage(const char* argv0)
 		"                         bank pool (tc2048 only; doesn't page it in --\n"
 		"                         pair with --out F4=MASK and --pc)\n"
 		"\n"
+		"Peripherals:\n"
+		"  --zifi HOST:PORT       connect to a real ESP-01/Wemos D1 bridged\n"
+		"                         over TCP, or tools/virtual_esp01's daemon\n"
+		"  --multiface1           enable the Multiface ONE stand-in (red\n"
+		"                         button = Alt+F10 window hotkey / NMI\n"
+		"                         debug command; ports 0x9F/0x1F page its\n"
+		"                         8K ROM+RAM in/out over 0x0000-0x3FFF).\n"
+		"                         Off by default -- with no card \"installed\"\n"
+		"                         NMI still reaches the CPU, it just has\n"
+		"                         nothing to page in. Without a real ROM\n"
+		"                         (see below) this just proves the paging/\n"
+		"                         NMI mechanism works -- no actual menu.\n"
+		"  --multiface1-rom PATH  load a real, legally-dumped Multiface ONE\n"
+		"                         ROM (exactly 8192 bytes) instead of the\n"
+		"                         built-in placeholder; implies --multiface1.\n"
+		"                         Copyrighted like the system ROMs -- bring\n"
+		"                         your own dump, none is bundled.\n"
+		"  --divide               enable the DivIDE stand-in (esxDOS over a\n"
+		"                         minimal ATA/IDE register interface --\n"
+		"                         ports 0xA3/A7/AB/AF/B3/B7/BB/BF/E3, 8K\n"
+		"                         ROM + 4x8K banked RAM over 0x0000-0x3FFF,\n"
+		"                         paged in by PC, not NMI). Needs both\n"
+		"                         --divide-rom and --divide-disk to do\n"
+		"                         anything -- off by default, no ROM/disk\n"
+		"                         bundled.\n"
+		"  --divide-rom PATH      esxDOS ROM for the IDE variant (exactly\n"
+		"                         8192 bytes, e.g. ESXIDE.BIN from an\n"
+		"                         esxdos release archive); implies --divide.\n"
+		"  --divide-disk PATH     the \"hard disk\" backing store -- a raw\n"
+		"                         sector image or a standard .hdf (RS-IDE\n"
+		"                         signature), sniffed automatically.\n"
+		"\n"
 		"Debugging:\n"
-		"  --debug-port PORT      listen for the line-based debug protocol\n"
-		"                         (REGS/MEM/POKE/STEP/BREAK/PRESSKEYS/TYPE/\n"
-		"                         SCREENSHOT/STATE/... -- see debugserver.cpp)\n"
+		"  --debug-port PORT      listen for the line-based debug protocol:\n"
+		"                           REGS, MEM addr len, POKE addr b1,b2,...,\n"
+		"                           PORT addr, OUT addr val, STATE, STEP [n],\n"
+		"                           CONT, STOP, RESET, NMI, BREAK/UNBREAK addr,\n"
+		"                           BREAKS, PRESSKEYS chord,chord,..., TYPE text,\n"
+		"                           SAVESNA path, SCREENSHOT path\n"
+		"                         (see debugserver.cpp for exact syntax)\n"
 		"  --poke ADDR=B1,B2,...  write bytes to memory before execution starts\n"
 		"                         (hex address, comma-separated hex bytes)\n"
 		"  --pc ADDR              set the initial PC (hex; applied after all\n"
@@ -148,9 +186,14 @@ static void printUsage(const char* argv0)
 		"  --out PORT=VALUE       write a port before execution starts (hex)\n"
 		"  --trace-port PORT      log every IN from this port when it changes\n"
 		"\n"
-		"Networking (ZiFi peripheral):\n"
-		"  --zifi HOST:PORT       connect to a real ESP-01/Wemos D1 bridged\n"
-		"                         over TCP, or tools/virtual_esp01's daemon\n"
+		"Window hotkeys:\n"
+		"  F11                    RESET (full machine reset)\n"
+		"  Alt+F10                NMI (see --multiface1 above; matches\n"
+		"                         pico-spec-drewpo's own F10/Alt+F10 split)\n"
+		"  Esc                    quit\n"
+		"  L                      toggle SDL_LockTexture() vs\n"
+		"                         SDL_UpdateTexture() for the video blit\n"
+		"                         (perf comparison, not user-facing)\n"
 		"\n"
 		"  --help, -h             show this message and exit\n";
 }
@@ -230,6 +273,27 @@ int main(int argc, char *argv[])
 			snaPath = argv[++i];
 		else if (0 == strcmp(argv[i], "--tape-fastload"))
 			minZX.setTapeFastload(true);
+		else if (0 == strcmp(argv[i], "--multiface1"))
+			minZX.getMultiface()->setEnabled(true);
+		else if (0 == strcmp(argv[i], "--multiface1-rom") && i + 1 < argc) {
+			// Implies --multiface1 -- supplying a real ROM dump only
+			// makes sense if you also want the card active.
+			minZX.getMultiface()->setEnabled(true);
+			if (!minZX.getMultiface()->loadRom(argv[++i]))
+				std::cerr << "--multiface1-rom: failed to load, falling back to the built-in placeholder" << std::endl;
+		}
+		else if (0 == strcmp(argv[i], "--divide"))
+			minZX.getDivIde()->setEnabled(true);
+		else if (0 == strcmp(argv[i], "--divide-rom") && i + 1 < argc) {
+			minZX.getDivIde()->setEnabled(true);
+			if (!minZX.getDivIde()->loadRom(argv[++i]))
+				std::cerr << "--divide-rom: failed to load" << std::endl;
+		}
+		else if (0 == strcmp(argv[i], "--divide-disk") && i + 1 < argc) {
+			minZX.getDivIde()->setEnabled(true);
+			if (!minZX.getDivIde()->insertDisk(argv[++i]))
+				std::cerr << "--divide-disk: failed to load" << std::endl;
+		}
 	}
 
 	if (autoTapePath)
@@ -279,13 +343,26 @@ int main(int argc, char *argv[])
 		SDL_RENDERER_ACCELERATED | vsyncFlag
 		);
 
-	SDL_RendererInfo info;
-	SDL_GetRendererInfo(renderer, &info);
-	std::cout << "Renderer name: " << info.name << std::endl;
-	std::cout << "Texture formats: " << std::endl;
-	for (Uint32 i = 0; i < info.num_texture_formats; i++)
+	SDL_RendererInfo info = {};
+	if (0 == SDL_GetRendererInfo(renderer, &info))
 	{
-		std::cout << SDL_GetPixelFormatName(info.texture_formats[i]) << std::endl;
+		std::cout << "Renderer name: " << info.name << std::endl;
+		std::cout << "Texture formats: " << std::endl;
+		// info.texture_formats is a fixed 16-entry array (SDL2's own
+		// SDL_RendererInfo layout) -- num_texture_formats SHOULD never
+		// exceed that, but under SDL_VIDEODRIVER=dummy (no real
+		// acceleration, used for headless debug-protocol testing) it's
+		// been observed garbage/huge, walking this loop straight past
+		// the array into an intermittent segfault.
+		Uint32 count = info.num_texture_formats;
+		if (count > SDL_arraysize(info.texture_formats))
+			count = SDL_arraysize(info.texture_formats);
+		for (Uint32 i = 0; i < count; i++)
+			std::cout << SDL_GetPixelFormatName(info.texture_formats[i]) << std::endl;
+	}
+	else
+	{
+		std::cerr << "SDL_GetRendererInfo failed: " << SDL_GetError() << std::endl;
 	}
 
 	const unsigned int texWidth = MinZX::SCREEN_W;
@@ -325,6 +402,21 @@ int main(int argc, char *argv[])
 			{
 				useLocktexture = !useLocktexture;
 				std::cout << "Using " << (useLocktexture ? "SDL_LockTexture() + memcpy()" : "SDL_UpdateTexture()") << std::endl;
+			}
+			// F11 = RESET, Alt+F10 = NMI -- matches pico-spec-drewpo's own
+			// hotkey convention (Config.cpp: HK_HARD_RESET on plain F11,
+			// HK_NMI on Alt+F10; plain F10 there is volume, not reset) so
+			// muscle memory carries over between the two emulators.
+			if (SDL_KEYDOWN == event.type && SDL_SCANCODE_F11 == event.key.keysym.scancode)
+			{
+				minZX.reset();
+				std::cout << "RESET" << std::endl;
+			}
+			if (SDL_KEYDOWN == event.type && SDL_SCANCODE_F10 == event.key.keysym.scancode
+				&& (event.key.keysym.mod & KMOD_ALT))
+			{
+				minZX.triggerNMI();
+				std::cout << "NMI" << std::endl;
 			}
 		}
 
