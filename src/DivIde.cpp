@@ -227,19 +227,26 @@ void DivIde::onInstructionFetch(uint16_t pc, MemoryMap& memory)
 		unmapAfter_ = true;
 	}
 
+	// Deliberately doesn't restore pages 0/1 itself on page-out -- what
+	// belongs there once ROMCS releases is a MACHINE-level question
+	// (plain 48K: the one system ROM pair, always; 128K: whichever ROM/
+	// RAM the 0x7FFD latch currently says, which esxDOS's own boot code
+	// writes to directly and can change WHILE DivIDE is active) that
+	// only MinZX can answer correctly -- see MinZX::reapplyMachinePaging(),
+	// triggered off ROMCS's falling edge in the per-instruction loop
+	// right after this runs. Confirmed this conflict is real, not
+	// theoretical: esxDOS's own boot code writes port 0x7FFD (harmless
+	// no-op on 48K, where that port doesn't exist; a real 128K ROM-bank
+	// switch on 128K) as part of its generic startup housekeeping.
 	bool shouldPage = conmem_ || automapActive_;
 	if (shouldPage) {
-		if (!savedPage0_) {
-			savedPage0_ = memory.getPage(0);
-			savedPage1_ = memory.getPage(1);
-		}
+		active_ = true;
 		memory.mapPage(0, &rom_);
 		memory.mapPage(1, &ram_[ramBank_]);
-	} else if (savedPage0_) {
-		memory.mapPage(0, savedPage0_);
-		memory.mapPage(1, savedPage1_);
-		savedPage0_ = nullptr;
-		savedPage1_ = nullptr;
+		memory.setRomcsAsserted(true);
+	} else if (active_) {
+		active_ = false;
+		memory.setRomcsAsserted(false);
 	}
 }
 
@@ -250,7 +257,7 @@ std::string DivIde::debugCommand(const std::vector<std::string>& toks)
 
 	char out[160];
 	snprintf(out, sizeof(out), "OK enabled=%d active=%d conmem=%d rambank=%d lba=%u disk=%d sectors=%u",
-	         enabled_ ? 1 : 0, savedPage0_ ? 1 : 0, conmem_ ? 1 : 0, ramBank_,
+	         enabled_ ? 1 : 0, active_ ? 1 : 0, conmem_ ? 1 : 0, ramBank_,
 	         lba(), disk_ ? 1 : 0, diskSectors_);
 	return out;
 }

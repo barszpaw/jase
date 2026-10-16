@@ -68,20 +68,26 @@ bool Multiface::loadRom(const char* path)
 
 void Multiface::pageIn(MemoryMap& memory)
 {
-	if (savedPage0_) return; // already active
-	savedPage0_ = memory.getPage(0);
-	savedPage1_ = memory.getPage(1);
+	if (active_) return; // already active
+	active_ = true;
 	memory.mapPage(0, &rom_);
 	memory.mapPage(1, &ram_);
+	memory.setRomcsAsserted(true);
 }
 
+// Deliberately does NOT restore pages 0/1 itself -- what belongs there
+// once ROMCS releases is a MACHINE-level question (48K: the one system
+// ROM pair, always; 128K: whichever ROM/RAM the 0x7FFD latch currently
+// says, which may have changed WHILE this was active) that only MinZX
+// can answer correctly. Clearing romcs here is the signal MinZX's
+// per-instruction loop watches for to do that (reapplyMachinePaging(),
+// see minzx.cpp) -- restoring a raw saved Bank* here instead would be
+// wrong on 128K the moment something re-pages while Multiface is up.
 void Multiface::pageOut(MemoryMap& memory)
 {
-	if (!savedPage0_) return; // not active
-	memory.mapPage(0, savedPage0_);
-	memory.mapPage(1, savedPage1_);
-	savedPage0_ = nullptr;
-	savedPage1_ = nullptr;
+	if (!active_) return; // not active
+	active_ = false;
+	memory.setRomcsAsserted(false);
 }
 
 void Multiface::onNMI()
@@ -111,7 +117,7 @@ void Multiface::onInstructionFetch(uint16_t pc, MemoryMap& memory)
 		autoUnpage_ = true;
 		return;
 	}
-	if (autoUnpage_ && savedPage0_ && pc >= 0x4000) {
+	if (autoUnpage_ && active_ && pc >= 0x4000) {
 		pageOut(memory);
 		autoUnpage_ = false;
 	}
@@ -150,6 +156,6 @@ std::string Multiface::debugCommand(const std::vector<std::string>& toks)
 
 	char out[96];
 	snprintf(out, sizeof(out), "OK enabled=%d active=%d",
-	         enabled_ ? 1 : 0, savedPage0_ ? 1 : 0);
+	         enabled_ ? 1 : 0, active_ ? 1 : 0);
 	return out;
 }

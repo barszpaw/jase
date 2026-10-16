@@ -69,8 +69,7 @@ private:
 
 	MemoryMap::Bank rom_{};
 	MemoryMap::Bank ram_{};
-	MemoryMap::Bank* savedPage0_ = nullptr;
-	MemoryMap::Bank* savedPage1_ = nullptr;
+	bool active_ = false;    // currently has pages 0/1 + ROMCS, see pageIn/pageOut
 	bool enabled_ = false;
 	bool pending_ = false;    // NMI fired, waiting for PC==0x0066
 	bool autoUnpage_ = false; // only armed for the NMI path, see class comment

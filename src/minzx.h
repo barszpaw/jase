@@ -219,6 +219,17 @@ private:
 
 	void setupInitialPaging();
 
+	// Restores pages 0/1 (0x0000-0x3FFF) to what the MACHINE itself
+	// currently says they should be -- called the instant a ROMCS
+	// peripheral (Multiface, DivIDE) releases memory_'s romcs flag (see
+	// MemoryMap::setRomcsAsserted()), from the per-instruction loop in
+	// update()/step(). Never a raw saved-Bank-pointer restore done by
+	// the peripheral itself: on 128K, esxDOS's own boot code writes port
+	// 0x7FFD directly (a no-op on 48K, where that port doesn't exist; a
+	// real ROM-bank switch on 128K) as ordinary startup housekeeping --
+	// confirmed causing exactly this conflict, not a theoretical one.
+	void reapplyMachinePaging();
+
 	// Timex SCLD video mode register (port 0xFF, bits 0-2 mode / 3-5 ink) --
 	// ported from pico-spec-drewpo's Video.cpp/Ports.cpp (confirmed on real
 	// hardware there, matches Fuse). Modes 0/1/2/6 read from the standard

@@ -54,6 +54,22 @@ public:
 	void mapPage(int page, Bank* bank) { pageTable_[page] = bank; }
 	Bank* getPage(int page) const { return pageTable_[page]; }
 
+	// ROMCS override (real hardware term -- fusex's machine_current->
+	// ram.romcs is the same flag): a plugged-in ROMCS device (Multiface,
+	// DivIDE) asserts this while it has pages 0/1 (0x0000-0x3FFF) mapped
+	// to its own ROM/RAM, and the machine's OWN paging logic (128K's
+	// 0x7FFD ROM-select write, see MinZX::processOutputPort()) must NOT
+	// touch pages 0/1 while it's set -- on real hardware the external
+	// device's /ROMCS line physically overrides the ULA's own ROM/RAM
+	// select for that address range regardless of what the 128K paging
+	// register says. The machine still latches what it WOULD select
+	// (spectrum128Paging_ etc.), and reapplies it once ROMCS clears
+	// (MinZX::reapplyMachinePaging(), called the instant this flag's
+	// falling edge is seen) -- never a raw saved-Bank-pointer restore,
+	// since the latched selection may have changed while ROMCS was up.
+	void setRomcsAsserted(bool on) { romcsAsserted_ = on; }
+	bool isRomcsAsserted() const { return romcsAsserted_; }
+
 	uint8_t peek8(uint16_t addr) const
 	{
 		return pageTable_[addr >> 13]->data[addr & (PAGE_SIZE - 1)];
@@ -72,4 +88,5 @@ private:
 	std::vector<Bank> romBanks_;
 	std::vector<Bank> ramBanks_;
 	Bank* pageTable_[NUM_PAGES] = {};
+	bool romcsAsserted_ = false;
 };

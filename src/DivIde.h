@@ -66,8 +66,7 @@ private:
 
 	MemoryMap::Bank rom_{};
 	MemoryMap::Bank ram_[4]{};
-	MemoryMap::Bank* savedPage0_ = nullptr;
-	MemoryMap::Bank* savedPage1_ = nullptr;
+	bool active_ = false;    // currently has pages 0/1 + ROMCS, see onInstructionFetch
 	bool enabled_ = false;
 
 	// Control register (port 0xE3).

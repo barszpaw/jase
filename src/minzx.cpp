@@ -273,10 +273,15 @@ void MinZX::update(uint8_t* screen)
 		} else {
 			tapeArmOnLoadEntry(z80->getRegPC());
 		}
-		// ROMCS-style peripherals (Multiface, later DivMMC/IF1/...) get
+		// ROMCS-style peripherals (Multiface, DivIDE, later IF1/...) get
 		// the same pre-fetch look at PC the tape engine above does, via
-		// the generic Peripheral hook -- see Peripheral.h.
+		// the generic Peripheral hook -- see Peripheral.h. romcs's
+		// falling edge (a peripheral just released pages 0/1) is caught
+		// right here and reapplied immediately -- see reapplyMachinePaging().
+		bool romcsWasUp = memory_.isRomcsAsserted();
 		for (Peripheral* p : peripherals_) p->onInstructionFetch(z80->getRegPC(), memory_);
+		if (romcsWasUp && !memory_.isRomcsAsserted())
+			reapplyMachinePaging();
 		// Check AFTER executing, not before: if we're resuming from a
 		// breakpoint we're currently sitting on, checking first would
 		// re-trigger immediately without ever advancing — CONT would
@@ -355,7 +360,10 @@ void MinZX::step(int n)
 		} else {
 			tapeArmOnLoadEntry(z80->getRegPC());
 		}
+		bool romcsWasUp = memory_.isRomcsAsserted();
 		for (Peripheral* p : peripherals_) p->onInstructionFetch(z80->getRegPC(), memory_);
+		if (romcsWasUp && !memory_.isRomcsAsserted())
+			reapplyMachinePaging();
 		z80->execute();
 		if (breakpointsEnabled_ && isBreakpoint(z80->getRegPC()))
 		{
@@ -421,6 +429,25 @@ void MinZX::setupInitialPaging()
 		default: // Spectrum48K, TimexTC2048: sequential ROM+RAM
 			for (int page = 0; page < MemoryMap::NUM_PAGES; page++)
 				memory_.mapHome(page);
+			break;
+	}
+}
+
+// See minzx.h -- only ever touches pages 0/1 (ROMCS's own territory),
+// never page2-7 (RAM banking/screen select), which 128K's own
+// processOutputPort() 0x7FFD handler already updates unconditionally
+// regardless of romcs (real hardware's /ROMCS line only overrides the
+// lower 16K, never the upper 48K's bank-switched RAM).
+void MinZX::reapplyMachinePaging()
+{
+	switch (machine_) {
+		case MachineType::Spectrum128K:
+			memory_.mapPage(0, (spectrum128Paging_ & 0x10) ? &memory_.romBank(2) : &memory_.romBank(0));
+			memory_.mapPage(1, (spectrum128Paging_ & 0x10) ? &memory_.romBank(3) : &memory_.romBank(1));
+			break;
+		default: // Spectrum48K, TimexTC2048: pages 0/1 never move outside ROMCS
+			memory_.mapHome(0);
+			memory_.mapHome(1);
 			break;
 	}
 }
