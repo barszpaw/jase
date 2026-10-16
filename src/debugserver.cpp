@@ -251,10 +251,9 @@ void DebugServer::handleLine(const std::string& line, MinZX& minZX)
     }
     else if (cmd == "STATE") {
         char tapeInfo[160];
-        snprintf(tapeInfo, sizeof(tapeInfo), " tapepos=%zu/%zu tapephase=%d tapebyte=%zu tapepilot=%u loopc=%d@%04x",
+        snprintf(tapeInfo, sizeof(tapeInfo), " tapepos=%zu/%zu tapephase=%d tapebyte=%zu tapepilot=%u",
                  minZX.getTapePos(), minZX.getTapeBlockCount(), minZX.getTapePhase(),
-                 minZX.getTapeByteIdx(), (unsigned)minZX.getTapePilotPulsesLeft(),
-                 minZX.getTapeLoopCount(), (unsigned)minZX.getTapeLoopPC());
+                 minZX.getTapeByteIdx(), (unsigned)minZX.getTapePilotPulsesLeft());
         char base[352];
         if (!running_)
             snprintf(base, sizeof(base), "OK border=%u tstates=%u running=0 pc=%04x 7ffd=%02x rambank=%d locked=%d",

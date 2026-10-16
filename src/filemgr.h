@@ -22,6 +22,11 @@ public:
 	// state directly — unlike loadSNA, this doesn't "run" anything; the
 	// Spectrum still needs BASIC's LOAD "" to actually pull the blocks in.
 	bool loadTAP(const char* filename, MinZX* targetEmulator);
+
+	// Same idea as loadTAP but for .TZX: each block carries its own pilot/
+	// sync/bit timing (see TapeBlock in minzx.h) instead of always using
+	// the standard ROM constants, which is how real turbo loaders work.
+	bool loadTZX(const char* filename, MinZX* targetEmulator);
 };
 
 #endif

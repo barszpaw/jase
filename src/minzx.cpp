@@ -245,20 +245,27 @@ void MinZX::update(uint8_t* screen)
 	lastScreenBuf_ = screen;
 	tstates = 0;
 	uint32_t prevTstates = 0;
+	borderAtFrameStart_ = border;
+	borderLog_.clear();
 	justHitBreakpoint_ = false;
 	advanceAutoType();
 	if (zifi_) zifi_->pump();
 
 	while (tstates < cycleTstates)
 	{
-		// Fast-load hook fires before anything else, regardless of
-		// breakpoints — it's not a debug feature, it's standing in for
-		// a cassette deck. Doesn't cost any tstates (treated as instant,
-		// same simplification every fast-loading emulator makes).
-		if (tapPos_ < tapBlocks_.size() && z80->getRegPC() == 0x0556)
-		{
-			checkFastLoad();
-			continue;
+		// --tape-fastload (off by default): the old instant-delivery
+		// shortcut at 0x0556. Off, 0x0556 only ARMS continuous real-pulse
+		// playback (tapeArmOnLoadEntry()) -- no instant delivery, so the
+		// tape engine alone has to get a real commercial tape past its
+		// pilot/sync and actual data decoding, nothing papered over.
+		if (tapeFastloadEnabled_) {
+			if (tapPos_ < tapBlocks_.size() && z80->getRegPC() == 0x0556)
+			{
+				checkFastLoad();
+				continue;
+			}
+		} else {
+			tapeArmOnLoadEntry(z80->getRegPC());
 		}
 		// Check AFTER executing, not before: if we're resuming from a
 		// breakpoint we're currently sitting on, checking first would
@@ -267,6 +274,17 @@ void MinZX::update(uint8_t* screen)
 		// always stops you at the NEXT instruction, same as a real
 		// debugger's "continue".
 		z80->execute();
+		// Advance the tape by exactly this instruction's T-states, not
+		// once at the end of the whole frame -- confirmed as a real bug
+		// (2026-10-16): batching it once per frame left tapeEarBit_ fixed
+		// at one stale value for the ENTIRE ~69888 T-state frame as far
+		// as any IN A,(0xFE) during that frame could see, while a pilot
+		// pulse is only ~2168 T-states wide. The border still flashed
+		// (it re-reads once per frame too) even though the ROM's actual
+		// bit-timing loop never saw a single one of the edges "inside"
+		// that frame -- exactly the "miga ale nie wprowadza danych"
+		// symptom this fixes.
+		tapeAdvance(tstates - prevTstates);
 		prevTstates = tstates;
 		if (breakpointsEnabled_ && isBreakpoint(z80->getRegPC()))
 		{
@@ -275,8 +293,6 @@ void MinZX::update(uint8_t* screen)
 			break;
 		}
 	}
-
-	tapeAdvance(tstates);
 
 	generateScreen(screen);
 	flushAudioFrame();
@@ -319,10 +335,15 @@ void MinZX::step(int n)
 	justHitBreakpoint_ = false;
 	for (int i = 0; i < n; i++)
 	{
-		if (tapPos_ < tapBlocks_.size() && z80->getRegPC() == 0x0556)
-		{
-			checkFastLoad();
-			continue;
+		// --tape-fastload (see update()) applies here too.
+		if (tapeFastloadEnabled_) {
+			if (tapPos_ < tapBlocks_.size() && z80->getRegPC() == 0x0556)
+			{
+				checkFastLoad();
+				continue;
+			}
+		} else {
+			tapeArmOnLoadEntry(z80->getRegPC());
 		}
 		z80->execute();
 		if (breakpointsEnabled_ && isBreakpoint(z80->getRegPC()))
@@ -443,7 +464,27 @@ void MinZX::generateScreen(uint8_t* screen)
 {
 	uint32_t* dptr = (uint32_t*)screen;
 
-	uint32_t borderColor = zxColor(border, 0);
+	// Per-scanline border colour: real hardware's ULA paints each line
+	// with whatever's in the border register AT THAT T-STATE, not one
+	// value for the whole frame -- tape loading changes it on every bit
+	// sampled (many times per frame), which is what makes the classic
+	// striped border. borderLog_ is in increasing-tstate order and our
+	// scanlines are visited in increasing real-line order too (top
+	// border -> content -> bottom border, each range strictly higher
+	// than the last), so a single forward cursor is enough -- no need to
+	// rescan from the start for every line.
+	size_t borderLogPos = 0;
+	uint8_t curBorderReg = borderAtFrameStart_;
+	auto borderColorForRealLine = [&](int realLine) -> uint32_t {
+		uint32_t targetT = (uint32_t)realLine * 224;
+		while (borderLogPos < borderLog_.size() && borderLog_[borderLogPos].first <= targetT) {
+			curBorderReg = borderLog_[borderLogPos].second;
+			borderLogPos++;
+		}
+		return zxColor(curBorderReg, 0);
+	};
+
+	uint32_t borderColor = zxColor(border, 0); // Timex hi-res override only; see below
 
 	uint8_t mode = (machine_ == MachineType::TimexTC2048) ? timexMode_ : 0;
 	bool hiRes = (mode == 6);
@@ -473,8 +514,16 @@ void MinZX::generateScreen(uint8_t* screen)
 	{
 		if (scrY < HBOR || scrY >= HBOR + HBMP)
 		{
+			// Real line numbers: we only render the HBOR lines closest to
+			// content out of the real 64-line top / 56-line bottom border
+			// (40-63 and 256-279 respectively at HBOR=24), not the full
+			// thing -- see the constants below generateScreen's own
+			// declaration for how this maps to delay_contention()'s line
+			// numbering.
+			int realLine = (scrY < HBOR) ? (64 - HBOR + scrY) : (256 + (scrY - HBOR - HBMP));
+			uint32_t rowBorderColor = hiRes ? borderColor : borderColorForRealLine(realLine);
 			for (int scrX = 0; scrX < SCREEN_W; scrX++)
-				*dptr++ = borderColor;
+				*dptr++ = rowBorderColor;
 			continue;
 		}
 
@@ -510,8 +559,9 @@ void MinZX::generateScreen(uint8_t* screen)
 		uint8_t* bmpptr  = bmpBank->data  + bmpOff;
 		uint8_t* bmp2ptr = bmp2Bank->data + bmp2Off;
 
+		uint32_t rowBorderColor = hiRes ? borderColor : borderColorForRealLine(64 + speY);
 		for (int scrX = 0; scrX < WBOR; scrX++)
-			*dptr++ = borderColor;
+			*dptr++ = rowBorderColor;
 
 		for (int col = 0; col < 32; col++)
 		{
@@ -557,7 +607,7 @@ void MinZX::generateScreen(uint8_t* screen)
 		}
 
 		for (int scrX = 0; scrX < WBOR; scrX++)
-			*dptr++ = borderColor;
+			*dptr++ = rowBorderColor;
 	}
 }
 
@@ -578,15 +628,15 @@ uint8_t MinZX::processInputPort(uint16_t port)
 	if (loport == 0xFE) {
 		uint8_t result = 0xFF;
 
-		// EAR_PIN -- real tape-pulse engine (see tapeCheckPoll()), not the
-		// old always-1 stub: that EAR bit never toggling is exactly what
-		// let the ROM's own pilot-tone wait loop spin forever (confirmed
-		// 2026-10-15 on a real commercial 128K tape that doesn't go
-		// through the 0x0556 fast-load hook for its pilot/sync stage).
-		// Also deliberately NOT gated on hiport==0xFE: real tape-reading
-		// code addresses this port with whatever high byte it already has
-		// in A for other reasons, not necessarily 0xFE.
-		if (tapeCheckPoll(z80->getRegPC()))
+		// EAR_PIN -- real tape-pulse engine (armed once by
+		// tapeArmOnLoadEntry(), see minzx.h), not the old always-1 stub:
+		// that EAR bit never toggling is exactly what let the ROM's own
+		// pilot-tone wait loop spin forever (confirmed 2026-10-15 on a
+		// real commercial 128K tape). Deliberately NOT gated on
+		// hiport==0xFE: real tape-reading code addresses this port with
+		// whatever high byte it already has in A for other reasons, not
+		// necessarily 0xFE.
+		if (tapeEarBit_)
 			result |= 0x40;
 		else
 			result &= (uint8_t)~0x40;
@@ -723,6 +773,13 @@ void MinZX::processOutputPort(uint16_t port, uint8_t value)
 
 			// border color (no bright colors)
 			border = value & 0x07;
+			// Timestamped so generateScreen() can paint each scanline with
+			// whatever colour was actually active AT that T-state, not one
+			// flat colour for the whole frame -- real tape loading changes
+			// this many times per frame (every bit sampled), which is what
+			// makes the classic striped border; painting post-hoc with only
+			// the LAST value of the frame loses all of that.
+			borderLog_.push_back({tstates, border});
 
 			audioWriteEdge((value & 0x10) ? 148 : 108);
 
@@ -923,14 +980,12 @@ void MinZX::execDone(void)
 }
 #endif
 
-void MinZX::loadTapeBlocks(const std::vector<std::vector<uint8_t>>& blocks)
+void MinZX::loadTapeBlocks(const std::vector<TapeBlock>& blocks)
 {
 	tapBlocks_ = blocks;
 	tapPos_ = 0;
 	tapePhase_ = TapePhase::Stopped;
 	tapeEarBit_ = false;
-	tapeLoopPC_ = 0;
-	tapeLoopCount_ = 0;
 }
 
 // 15 frames held / 10 released per chord (300ms/200ms at 50Hz): long
@@ -985,8 +1040,18 @@ void MinZX::advanceAutoType()
 // block directly, then simulate the RET this call would have ended with.
 void MinZX::checkFastLoad()
 {
-	if (tapPos_ >= tapBlocks_.size())
-		return;
+	if (tapPos_ >= tapBlocks_.size()) {
+		// Real tape software can keep calling LD-BYTES past what we
+		// initially staged (a VERIFY pass re-reading a block already
+		// delivered, or just a longer loading sequence than this specific
+		// rip's block count) -- confirmed against pico-spec's Tape.cpp,
+		// which unconditionally rewinds (tapeCurBlock=0, f_lseek(tape,0))
+		// rather than ever just stopping. Without this, anything that
+		// asks for "one more" after the last block hangs forever instead
+		// of getting a second pass to find a match.
+		if (tapBlocks_.empty()) return;
+		tapPos_ = 0;
+	}
 
 	// This block is about to be delivered instantly -- stop the real-pulse
 	// engine so it doesn't go on simulating pilot/sync/data for a block
@@ -995,9 +1060,8 @@ void MinZX::checkFastLoad()
 	// now points past it either way, so the engine's next loop-detected
 	// start will correctly begin the NEXT block from a clean Stopped state).
 	tapePhase_ = TapePhase::Stopped;
-	tapeLoopCount_ = 0;
 
-	const std::vector<uint8_t>& block = tapBlocks_[tapPos_];
+	const std::vector<uint8_t>& block = tapBlocks_[tapPos_].data;
 	tapPos_++;
 
 	if (block.empty())
@@ -1032,31 +1096,65 @@ void MinZX::checkFastLoad()
 	z80->setRegPC(retAddr);
 }
 
-// Standard ZX Spectrum ROM tape timing (T-states at 3.5MHz) -- these are
-// not guesses, they're the well-known constants the ROM's own SA/LD-BYTES
-// routine uses, confirmed against pico-spec-drewpo's Tape.cpp.
-static const uint32_t kTapePilotPulse  = 2168;
-static const uint32_t kTapePilotHeader = 8063; // flag byte bit7==0
-static const uint32_t kTapePilotData   = 3223; // flag byte bit7==1
-static const uint32_t kTapeSync1       = 667;
-static const uint32_t kTapeSync2       = 735;
-static const uint32_t kTapeBit0Pulse   = 855;
-static const uint32_t kTapeBit1Pulse   = 1710;
-static const uint32_t kTapePauseTStates = 3500000; // ~1s gap between blocks
+// Bits used in the LAST byte of a block are usually all 8 (plain TAP, and
+// most TZX blocks) but TZX ID 0x11/0x14 can specify fewer -- this returns
+// how many of tapeBitMask_'s positions are actually real data for the
+// given byte index within block.data.
+static int tapeBitsInByte(const TapeBlock& block, size_t byteIdx)
+{
+	if (byteIdx + 1 == block.data.size())
+		return block.usedBitsLastByte ? block.usedBitsLastByte : 8;
+	return 8;
+}
 
 void MinZX::tapeStartBlock()
 {
+	// Deliberately does NOT rewind at end-of-tape itself -- a real deck
+	// just stops when it runs out (confirmed: wrapping here too made the
+	// engine spin through the whole tape forever in the background once
+	// nothing was listening anymore, which a real deck never does on its
+	// own). The rewind-and-retry behaviour belongs to whoever is actually
+	// ASKING (checkFastLoad() sets tapPos_=0 itself, right before calling
+	// this, only when the ROM is the one requesting another block past the
+	// last one).
 	if (tapPos_ >= tapBlocks_.size()) { tapePhase_ = TapePhase::Stopped; return; }
-	const std::vector<uint8_t>& block = tapBlocks_[tapPos_];
-	if (block.empty()) { tapPos_++; tapePhase_ = TapePhase::Stopped; return; }
+	const TapeBlock& block = tapBlocks_[tapPos_];
 
-	uint8_t flag = block[0];
-	tapePilotPulsesLeft_ = (flag & 0x80) ? kTapePilotData : kTapePilotHeader;
+	if (block.isPauseOnly) {
+		tapPos_++;
+		if (block.pauseAfterMs == 0) { tapePhase_ = TapePhase::Stopped; return; }
+		tapeEarBit_ = false;
+		tapeEdgeCountdown_ = block.pauseAfterMs * 3500;
+		tapePhase_ = TapePhase::Pause;
+		return;
+	}
+
+	if (block.isPureTone) {
+		tapePilotPulsesLeft_ = block.pureTonePulseCount;
+		tapeEarBit_ = true;
+		tapeEdgeCountdown_ = block.pureTonePulseLen;
+		tapePhase_ = TapePhase::Pilot;
+		return;
+	}
+
+	if (block.data.empty()) { tapPos_++; tapePhase_ = TapePhase::Stopped; return; }
+
 	tapeByteIdx_ = 0;
 	tapeBitMask_ = 0x80;
 	tapeBitHalf_ = 0;
 	tapeEarBit_ = true;
-	tapeEdgeCountdown_ = kTapePilotPulse;
+
+	if (!block.hasPilotSync) {
+		// TZX Pure Data (ID 0x14): straight to bit-encoding, no leader tone.
+		bool bit = (block.data[0] & tapeBitMask_) != 0;
+		tapeEdgeCountdown_ = bit ? block.bit1Len : block.bit0Len;
+		tapePhase_ = TapePhase::Data;
+		return;
+	}
+
+	uint8_t flag = block.data[0];
+	tapePilotPulsesLeft_ = (flag & 0x80) ? block.pilotCountData : block.pilotCountHeader;
+	tapeEdgeCountdown_ = block.pilotPulseLen;
 	tapePhase_ = TapePhase::Pilot;
 }
 
@@ -1064,63 +1162,90 @@ void MinZX::tapeStartBlock()
 // either continues the current phase or advances to the next one (pilot ->
 // sync -> data bit-by-bit -> pause -> next block's pilot, looping through
 // every block in tapBlocks_ the same way a real cassette just keeps
-// rolling). The fast-load hook (checkFastLoad(), 0x0556) normally cuts
-// this short partway into Data once the ROM re-syncs on real pulses --
-// this full state machine only has to run to completion for loaders that
-// never call through that exact address.
+// rolling). Every timing value comes from the CURRENT block (tapBlocks_[tapPos_])
+// rather than fixed constants, so a TZX turbo block's own pilot/sync/bit
+// lengths just fall out of the same state machine as a plain TAP block --
+// the only thing that differs is which numbers get plugged in. The fast-
+// load hook (checkFastLoad(), 0x0556) normally cuts this short partway
+// into Data once the ROM re-syncs on real pulses -- this full state
+// machine only has to run to completion for loaders that never call
+// through that exact address.
 void MinZX::tapeNextEdge()
 {
 	switch (tapePhase_)
 	{
-		case TapePhase::Pilot:
+		case TapePhase::Pilot: {
+			const TapeBlock& block = tapBlocks_[tapPos_];
 			tapeEarBit_ = !tapeEarBit_;
 			if (tapePilotPulsesLeft_ > 0) tapePilotPulsesLeft_--;
 			if (tapePilotPulsesLeft_ == 0) {
+				if (block.isPureTone) {
+					tapPos_++;
+					tapePhase_ = TapePhase::Pause;
+					tapeEarBit_ = false;
+					// tapeAdvance()'s own loop re-enters immediately on a
+					// 0-length countdown, so pauseAfterMs==0 (back-to-back
+					// blocks) just works without special-casing here.
+					tapeEdgeCountdown_ = block.pauseAfterMs * 3500;
+					break;
+				}
 				tapePhase_ = TapePhase::Sync;
 				tapeBitHalf_ = 0;
-				tapeEdgeCountdown_ = kTapeSync1;
+				tapeEdgeCountdown_ = block.sync1Len;
 			} else {
-				tapeEdgeCountdown_ = kTapePilotPulse;
+				tapeEdgeCountdown_ = block.isPureTone ? block.pureTonePulseLen : block.pilotPulseLen;
 			}
 			break;
+		}
 
-		case TapePhase::Sync:
+		case TapePhase::Sync: {
+			const TapeBlock& block = tapBlocks_[tapPos_];
 			tapeEarBit_ = !tapeEarBit_;
 			if (tapeBitHalf_ == 0) {
 				tapeBitHalf_ = 1;
-				tapeEdgeCountdown_ = kTapeSync2;
+				tapeEdgeCountdown_ = block.sync2Len;
 			} else {
 				tapePhase_ = TapePhase::Data;
 				tapeByteIdx_ = 0;
 				tapeBitMask_ = 0x80;
 				tapeBitHalf_ = 0;
-				bool bit = (tapBlocks_[tapPos_][0] & tapeBitMask_) != 0;
-				tapeEdgeCountdown_ = bit ? kTapeBit1Pulse : kTapeBit0Pulse;
+				bool bit = (block.data[0] & tapeBitMask_) != 0;
+				tapeEdgeCountdown_ = bit ? block.bit1Len : block.bit0Len;
 			}
 			break;
+		}
 
 		case TapePhase::Data: {
 			tapeEarBit_ = !tapeEarBit_;
-			const std::vector<uint8_t>& block = tapBlocks_[tapPos_];
+			const TapeBlock& block = tapBlocks_[tapPos_];
 			if (tapeBitHalf_ == 0) {
 				tapeBitHalf_ = 1;
-				bool bit = (block[tapeByteIdx_] & tapeBitMask_) != 0;
-				tapeEdgeCountdown_ = bit ? kTapeBit1Pulse : kTapeBit0Pulse;
+				bool bit = (block.data[tapeByteIdx_] & tapeBitMask_) != 0;
+				tapeEdgeCountdown_ = bit ? block.bit1Len : block.bit0Len;
 			} else {
 				tapeBitHalf_ = 0;
+				// Was the bit we just finished (tapeBitMask_, still
+				// un-shifted here) the last VALID one of this byte? For a
+				// full 8-bit byte that's mask 0x01, same as the old
+				// "shifts to zero" check -- usedBitsLastByte (TZX) can
+				// make it fewer, so the last byte may end early instead of
+				// shifting all the way down.
+				int bitsInByte = tapeBitsInByte(block, tapeByteIdx_);
+				uint8_t lastBitMask = (uint8_t)(0x80 >> (bitsInByte - 1));
+				bool wasLastBit = (tapeBitMask_ == lastBitMask);
 				tapeBitMask_ >>= 1;
-				if (tapeBitMask_ == 0) {
+				if (wasLastBit) {
 					tapeBitMask_ = 0x80;
 					tapeByteIdx_++;
 				}
-				if (tapeByteIdx_ >= block.size()) {
+				if (tapeByteIdx_ >= block.data.size()) {
 					tapPos_++;
 					tapePhase_ = TapePhase::Pause;
 					tapeEarBit_ = false;
-					tapeEdgeCountdown_ = kTapePauseTStates;
+					tapeEdgeCountdown_ = block.pauseAfterMs * 3500;
 				} else {
-					bool bit = (block[tapeByteIdx_] & tapeBitMask_) != 0;
-					tapeEdgeCountdown_ = bit ? kTapeBit1Pulse : kTapeBit0Pulse;
+					bool bit = (block.data[tapeByteIdx_] & tapeBitMask_) != 0;
+					tapeEdgeCountdown_ = bit ? block.bit1Len : block.bit0Len;
 				}
 			}
 			break;
@@ -1128,9 +1253,8 @@ void MinZX::tapeNextEdge()
 
 		case TapePhase::Pause:
 			// Real tape just keeps rolling into the next block rather than
-			// going idle -- only a loop-detected poll restarts playback
-			// from a genuinely Stopped state (first block, or one the fast-
-			// load hook already consumed).
+			// going idle -- only tapeArmOnLoadEntry()/checkFastLoad() ever
+			// restart playback from a genuinely Stopped state.
 			tapeStartBlock();
 			break;
 
@@ -1151,46 +1275,8 @@ void MinZX::tapeAdvance(uint32_t deltaT)
 	}
 }
 
-// Generic "this looks like a custom loader reading a tape edge" heuristic,
-// ported from pico-spec-drewpo's Tape.cpp isTapeEdgePoll: the instruction
-// right before pc is IN A,(n) (0xDB) and pc itself is a bit-test that
-// would plausibly follow one (RRA/RLCA, a masking AND, or BIT 6,A) --
-// deliberately narrow so ordinary keyboard scanning (different opcodes
-// after its own IN) never matches.
-bool MinZX::tapeLooksLikeEdgePoll(uint16_t pc) const
+void MinZX::tapeArmOnLoadEntry(uint16_t pc)
 {
-	if (pc < 0x4000) return false;
-	if (memory_.peek8((uint16_t)(pc - 2)) != 0xDB) return false;
-	uint8_t nextOp = memory_.peek8(pc);
-	if (nextOp == 0x1F || nextOp == 0x07) return true; // RRA / RLCA
-	if (nextOp == 0xE6 && (memory_.peek8((uint16_t)(pc + 1)) & 0x60)) return true; // AND n
-	if (nextOp == 0xCB && memory_.peek8((uint16_t)(pc + 1)) == 0x77) return true; // BIT 6,A
-	return false;
-}
-
-// Called on every IN A,(0xFE) (see processInputPort): a real cassette deck
-// doesn't know the guest wants it playing -- it starts turning once
-// something is actually listening. Detects that by watching for the same
-// PC reading this port over and over (a polling loop, by definition) at an
-// address that looks like tape-edge code, and only then starts real pulse
-// playback. Ported from pico-spec-drewpo's Tape::TapePortRead(), minus the
-// per-game Cerikopik/Jumping-Jack signature shortcuts -- this is the
-// general path those are an optimization on top of, not a replacement for.
-bool MinZX::tapeCheckPoll(uint16_t pc)
-{
-	if (tapePhase_ == TapePhase::Stopped) {
-		bool looksLikePoll = (pc >= 0x05E3 && pc <= 0x05F5) || tapeLooksLikeEdgePoll(pc);
-		if (looksLikePoll && tapPos_ < tapBlocks_.size()) {
-			if (pc == tapeLoopPC_) {
-				if (++tapeLoopCount_ > 200) {
-					tapeLoopCount_ = 0;
-					tapeStartBlock();
-				}
-			} else {
-				tapeLoopPC_ = pc;
-				tapeLoopCount_ = 1;
-			}
-		}
-	}
-	return tapeEarBit_;
+	if (tapePhase_ == TapePhase::Stopped && pc == 0x0556 && tapPos_ < tapBlocks_.size())
+		tapeStartBlock();
 }

@@ -103,6 +103,15 @@ static int applyDebugArgs(int argc, char* argv[], MinZX& minZX)
 	return debugPort;
 }
 
+// Dispatches by extension: .tzx gets the richer per-block TZX parser,
+// everything else (notably .tap) goes through the plain-TAP loader.
+static bool loadTapeFile(FileMgr& fileMgr, const char* path, MinZX* minZX)
+{
+	size_t len = strlen(path);
+	bool isTzx = len > 4 && (0 == strcasecmp(path + len - 4, ".tzx"));
+	return isTzx ? fileMgr.loadTZX(path, minZX) : fileMgr.loadTAP(path, minZX);
+}
+
 static void printUsage(const char* argv0)
 {
 	std::cout <<
@@ -115,11 +124,15 @@ static void printUsage(const char* argv0)
 		"                         outright)\n"
 		"\n"
 		"Media:\n"
-		"  --tape PATH            stage a .tap; LOAD \"\" loads it normally\n"
-		"  --load-tape PATH       stage a .tap AND resume instantly via the\n"
-		"                         bundled mid-LOAD snapshot (48K ROM only --\n"
+		"  --tape PATH            stage a .tap/.tzx; LOAD \"\" loads it normally\n"
+		"  --load-tape PATH       stage a .tap/.tzx AND resume instantly via\n"
+		"                         the bundled mid-LOAD snapshot (48K ROM only --\n"
 		"                         doesn't work on tc2048/128k, use --tape there)\n"
 		"  --load-sna PATH        load a .sna snapshot directly\n"
+		"  --tape-fastload        restore the old instant-delivery shortcut\n"
+		"                         at PC==0x0556 on top of the real tape\n"
+		"                         engine (default off -- the pure pulse\n"
+		"                         engine alone has to get a tape through)\n"
 		"  --dock-cartridge PATH  load a TS2068 .dck cartridge into the DOCK\n"
 		"                         bank pool (tc2048 only; doesn't page it in --\n"
 		"                         pair with --out F4=MASK and --pc)\n"
@@ -215,11 +228,13 @@ int main(int argc, char *argv[])
 			autoTapePath = argv[++i];
 		else if (0 == strcmp(argv[i], "--load-sna") && i + 1 < argc)
 			snaPath = argv[++i];
+		else if (0 == strcmp(argv[i], "--tape-fastload"))
+			minZX.setTapeFastload(true);
 	}
 
 	if (autoTapePath)
 	{
-		fileMgr.loadTAP(autoTapePath, &minZX);
+		loadTapeFile(fileMgr, autoTapePath, &minZX);
 		fileMgr.loadSNA("assets/tape_load_point.sna", &minZX);
 	}
 	else
@@ -229,16 +244,16 @@ int main(int argc, char *argv[])
 		// staged so the fast-load hook is armed when it lands on 0x0556)
 		// — NOT an if/else chain like --load-tape's own exclusive path.
 		if (tapePath)
-			fileMgr.loadTAP(tapePath, &minZX);
+			loadTapeFile(fileMgr, tapePath, &minZX);
 		if (snaPath)
 			fileMgr.loadSNA(snaPath, &minZX);
 		if (!tapePath && !snaPath && argc > 1 && argv[1][0] != '-')
 		{
 			const char* path = argv[1];
 			size_t len = strlen(path);
-			bool isTap = len > 4 && (0 == strcasecmp(path + len - 4, ".tap"));
-			if (isTap)
-				fileMgr.loadTAP(path, &minZX);
+			bool isTape = len > 4 && (0 == strcasecmp(path + len - 4, ".tap") || 0 == strcasecmp(path + len - 4, ".tzx"));
+			if (isTape)
+				loadTapeFile(fileMgr, path, &minZX);
 			else
 				fileMgr.loadSNA(path, &minZX);
 		}

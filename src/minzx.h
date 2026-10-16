@@ -24,6 +24,42 @@ extern int g_tracePort;
 // changes, same shape as adding a new Peripheral.
 enum class MachineType { Spectrum48K, TimexTC2048, Spectrum128K };
 
+// One playable tape block, with its own pulse timing. A plain .TAP block
+// is just `data` (flag + payload + checksum) with every timing field left
+// at the standard ROM defaults below. TZX gives each block (ID 0x11 Turbo
+// Speed Data, ID 0x14 Pure Data, ID 0x12 Pure Tone, ID 0x20 Pause) its own
+// parameters instead -- that's what "turbo loaders" actually are, not a
+// different protocol, just different pilot/sync/bit lengths encoded per
+// block. See FileMgr::loadTAP()/loadTZX() for how these get filled in, and
+// MinZX::tapeStartBlock()/tapeNextEdge() for how they're consumed.
+struct TapeBlock
+{
+	std::vector<uint8_t> data; // flag + payload + checksum, as on a real tape
+
+	uint32_t pilotPulseLen     = 2168;
+	uint32_t pilotCountHeader  = 8063; // used when data[0] bit7==0 (flag<0x80)
+	uint32_t pilotCountData    = 3223; // used when data[0] bit7==1
+	uint32_t sync1Len          = 667;
+	uint32_t sync2Len          = 735;
+	uint32_t bit0Len           = 855;
+	uint32_t bit1Len           = 1710;
+	uint8_t  usedBitsLastByte  = 8;    // TZX: bits actually used in the final data byte
+	uint32_t pauseAfterMs      = 1000; // silence after this block before the next
+
+	// TZX ID 0x14 Pure Data: straight to bit-encoding, no pilot/sync at all.
+	bool hasPilotSync = true;
+
+	// TZX ID 0x12 Pure Tone: just N pulses of a given length, no data.
+	bool isPureTone = false;
+	uint32_t pureTonePulseLen = 0;
+	uint32_t pureTonePulseCount = 0;
+
+	// TZX ID 0x20 Pause/Stop the tape: silence only. pauseAfterMs==0 here
+	// specifically means "stop the tape" (per the TZX spec), not "no gap" --
+	// unlike every other block type above, where 0 just means back-to-back.
+	bool isPauseOnly = false;
+};
+
 class MinZX : public Z80operations
 {
 public:
@@ -41,6 +77,14 @@ public:
 	// initial page table that init() sets up. name: "48k" (default
 	// behavior if never called), "tc2048", "128k".
 	bool setMachine(const char* name);
+
+	// Opt-in: restores the old instant-delivery shortcut at PC==0x0556
+	// (checkFastLoad()) on top of the real pulse engine, same as JASE had
+	// before today's tape work. Default off, so the pure/no-shortcut
+	// engine (tapeArmOnLoadEntry() only) is what actually gets exercised
+	// -- this flag exists to A/B the two against each other, not to be
+	// the normal way to load tapes.
+	void setTapeFastload(bool on) { tapeFastloadEnabled_ = on; }
 
 	// Test/debug override: replaces ROM pair 0 (the one setMachine() just
 	// picked). For standalone diagnostic ROMs (e.g. Brendan Alford's
@@ -111,13 +155,12 @@ public:
 	bool justHitBreakpoint() const { return justHitBreakpoint_; }
 	uint16_t lastBreakpointPC() const { return lastBreakpointPC_; }
 
-	// TAP loading via the standard 48K ROM fast-load hook (LD-BYTES,
-	// 0x0556) — not real tape-pulse emulation. Covers the standard
-	// loader (BASIC LOAD ""); custom/turbo loaders don't call through
-	// this exact address and will just fail, same as real hardware with
-	// no tape signal connected. `blocks` are raw TAP block bytes
-	// (flag + data + checksum each), in file order.
-	void loadTapeBlocks(const std::vector<std::vector<uint8_t>>& blocks);
+	// Stages tape blocks for playback -- either via the real pulse engine
+	// (tapeArmOnLoadEntry(), the default) or the --tape-fastload shortcut.
+	// FileMgr::loadTAP() fills in plain-TAP blocks with the standard ROM
+	// timing (TapeBlock's defaults); FileMgr::loadTZX() fills in whatever
+	// each TZX block itself declares.
+	void loadTapeBlocks(const std::vector<TapeBlock>& blocks);
 
 	// Scripted key entry through the SAME keyboard-matrix path a human (or
 	// xdotool) would use, one frame at a time, rather than faking the
@@ -205,15 +248,13 @@ public:
 	int get7FFDRamBank() const { return spectrum128Paging_ & 0x07; }
 	bool get7FFDLocked() const { return spectrum128Locked_; }
 
-	// Tape engine inspection (see tapeCheckPoll()/tapeAdvance()): is a
-	// block actually moving, or is tapPos_/tapePhase_ stuck?
+	// Tape engine inspection (see tapeAdvance()): is a block actually
+	// moving, or is tapPos_/tapePhase_ stuck?
 	size_t getTapeBlockCount() const { return tapBlocks_.size(); }
 	size_t getTapePos() const { return tapPos_; }
 	int getTapePhase() const { return (int)tapePhase_; } // 0=Stopped 1=Pilot 2=Sync 3=Data 4=Pause
 	size_t getTapeByteIdx() const { return tapeByteIdx_; }
 	uint32_t getTapePilotPulsesLeft() const { return tapePilotPulsesLeft_; }
-	uint16_t getTapeLoopPC() const { return tapeLoopPC_; }
-	int getTapeLoopCount() const { return tapeLoopCount_; }
 private:
 
 	uint8_t* lastScreenBuf_ = nullptr;
@@ -233,25 +274,40 @@ private:
 
 	uint8_t border;
 
+	// Per-scanline border colour (see generateScreen()): (tstates, value)
+	// for every port-0xFE border write this frame, plus whatever was
+	// already active when the frame started (carried over from the end
+	// of the previous one, since `border` itself is never reset).
+	std::vector<std::pair<uint32_t, uint8_t>> borderLog_;
+	uint8_t borderAtFrameStart_ = 0;
+
 	std::vector<uint16_t> breakpoints_;
 	bool breakpointsEnabled_ = false;
 	bool justHitBreakpoint_ = false;
 	uint16_t lastBreakpointPC_ = 0;
 	bool isBreakpoint(uint16_t pc) const;
 
-	std::vector<std::vector<uint8_t>> tapBlocks_;
+	bool tapeFastloadEnabled_ = false;
+	std::vector<TapeBlock> tapBlocks_;
 	size_t tapPos_ = 0;
 	void checkFastLoad();
 
 	// General, loader-agnostic tape playback -- the fallback for whenever
 	// checkFastLoad()'s exact-PC hook doesn't fire (ROM pilot/sync tone,
 	// which blocks in real time no matter which loader is used, or a
-	// custom loader that never calls through 0x0556 at all). Ported from
-	// pico-spec-drewpo's Tape.cpp: real EAR-bit pulse timing (standard TAP
-	// pilot/sync/data constants) started automatically once the Z80 is
-	// seen polling port 0xFE from the same PC repeatedly (a tape deck
-	// doesn't know the guest wants it playing; it starts when something
-	// listens) -- same mechanism as the real hardware, not a trick.
+	// custom loader that never calls through 0x0556 at all). Real EAR-bit
+	// pulse timing (standard TAP pilot/sync/data constants), started
+	// unconditionally the moment a tape is loaded and left running
+	// straight through to the end -- a physical cassette deck doesn't
+	// inspect what the CPU is doing to decide whether to turn; it just
+	// plays from the moment it's inserted, continuously, like any other
+	// audio source. An earlier version tried to be clever and only start
+	// once it saw the Z80 "polling port 0xFE in a way that looks like
+	// tape-edge code" -- border-flashing with that scheme proved nothing
+	// about whether the ROM was actually decoding anything (the flash is
+	// driven by the SAME heuristic, not by successful sync), and it adds
+	// a whole class of maybe-it-matched-maybe-it-didn't uncertainty for
+	// zero benefit over just always playing.
 	enum class TapePhase { Stopped, Pilot, Sync, Data, Pause };
 	TapePhase tapePhase_ = TapePhase::Stopped;
 	bool tapeEarBit_ = false;
@@ -260,14 +316,22 @@ private:
 	size_t tapeByteIdx_ = 0;           // index within tapBlocks_[tapPos_]
 	uint8_t tapeBitMask_ = 0;          // current bit within tapeByteIdx_, MSB first
 	int tapeBitHalf_ = 0;              // 0 = first half-pulse of the bit, 1 = second
-	uint16_t tapeLoopPC_ = 0;
-	int tapeLoopCount_ = 0;
 
 	void tapeAdvance(uint32_t deltaT);
 	void tapeStartBlock();
 	void tapeNextEdge();
-	bool tapeLooksLikeEdgePoll(uint16_t pc) const;
-	bool tapeCheckPoll(uint16_t pc);
+
+	// The ONE trigger for starting continuous tape playback: the first
+	// time PC reaches 0x0556 (confirmed present at the same address in
+	// both the 48K ROM and 128K ROM1 -- two real call sites, 0x076E and
+	// 0x0802, both "CALL 0x0556") while the tape hasn't started yet. This
+	// is LD-BYTES's actual, singular, 100%-reliable entry point -- not a
+	// guess about what a polling loop looks like, so it can't miss the
+	// leader/pilot signal by arming too late, and it can't mis-fire on
+	// unrelated code the way an address-range-plus-opcode heuristic can.
+	// Deliberately does nothing else (no instant delivery) -- once armed,
+	// tapeAdvance() alone carries the whole tape through to the end.
+	void tapeArmOnLoadEntry(uint16_t pc);
 
 	struct AutoTypeKeyStep { std::vector<SDL_Scancode> keys; int frames; };
 	std::vector<AutoTypeKeyStep> autoTypeSeq_;
