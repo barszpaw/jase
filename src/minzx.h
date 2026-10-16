@@ -204,6 +204,16 @@ public:
 	uint8_t get7FFDRaw() const { return spectrum128Paging_; }
 	int get7FFDRamBank() const { return spectrum128Paging_ & 0x07; }
 	bool get7FFDLocked() const { return spectrum128Locked_; }
+
+	// Tape engine inspection (see tapeCheckPoll()/tapeAdvance()): is a
+	// block actually moving, or is tapPos_/tapePhase_ stuck?
+	size_t getTapeBlockCount() const { return tapBlocks_.size(); }
+	size_t getTapePos() const { return tapPos_; }
+	int getTapePhase() const { return (int)tapePhase_; } // 0=Stopped 1=Pilot 2=Sync 3=Data 4=Pause
+	size_t getTapeByteIdx() const { return tapeByteIdx_; }
+	uint32_t getTapePilotPulsesLeft() const { return tapePilotPulsesLeft_; }
+	uint16_t getTapeLoopPC() const { return tapeLoopPC_; }
+	int getTapeLoopCount() const { return tapeLoopCount_; }
 private:
 
 	uint8_t* lastScreenBuf_ = nullptr;
@@ -232,6 +242,32 @@ private:
 	std::vector<std::vector<uint8_t>> tapBlocks_;
 	size_t tapPos_ = 0;
 	void checkFastLoad();
+
+	// General, loader-agnostic tape playback -- the fallback for whenever
+	// checkFastLoad()'s exact-PC hook doesn't fire (ROM pilot/sync tone,
+	// which blocks in real time no matter which loader is used, or a
+	// custom loader that never calls through 0x0556 at all). Ported from
+	// pico-spec-drewpo's Tape.cpp: real EAR-bit pulse timing (standard TAP
+	// pilot/sync/data constants) started automatically once the Z80 is
+	// seen polling port 0xFE from the same PC repeatedly (a tape deck
+	// doesn't know the guest wants it playing; it starts when something
+	// listens) -- same mechanism as the real hardware, not a trick.
+	enum class TapePhase { Stopped, Pilot, Sync, Data, Pause };
+	TapePhase tapePhase_ = TapePhase::Stopped;
+	bool tapeEarBit_ = false;
+	uint32_t tapeEdgeCountdown_ = 0;   // T-states until the next edge/event
+	uint32_t tapePilotPulsesLeft_ = 0;
+	size_t tapeByteIdx_ = 0;           // index within tapBlocks_[tapPos_]
+	uint8_t tapeBitMask_ = 0;          // current bit within tapeByteIdx_, MSB first
+	int tapeBitHalf_ = 0;              // 0 = first half-pulse of the bit, 1 = second
+	uint16_t tapeLoopPC_ = 0;
+	int tapeLoopCount_ = 0;
+
+	void tapeAdvance(uint32_t deltaT);
+	void tapeStartBlock();
+	void tapeNextEdge();
+	bool tapeLooksLikeEdgePoll(uint16_t pc) const;
+	bool tapeCheckPoll(uint16_t pc);
 
 	struct AutoTypeKeyStep { std::vector<SDL_Scancode> keys; int frames; };
 	std::vector<AutoTypeKeyStep> autoTypeSeq_;

@@ -250,15 +250,22 @@ void DebugServer::handleLine(const std::string& line, MinZX& minZX)
         reply("OK");
     }
     else if (cmd == "STATE") {
+        char tapeInfo[160];
+        snprintf(tapeInfo, sizeof(tapeInfo), " tapepos=%zu/%zu tapephase=%d tapebyte=%zu tapepilot=%u loopc=%d@%04x",
+                 minZX.getTapePos(), minZX.getTapeBlockCount(), minZX.getTapePhase(),
+                 minZX.getTapeByteIdx(), (unsigned)minZX.getTapePilotPulsesLeft(),
+                 minZX.getTapeLoopCount(), (unsigned)minZX.getTapeLoopPC());
+        char base[352];
         if (!running_)
-            snprintf(out, sizeof(out), "OK border=%u tstates=%u running=0 pc=%04x 7ffd=%02x rambank=%d locked=%d",
+            snprintf(base, sizeof(base), "OK border=%u tstates=%u running=0 pc=%04x 7ffd=%02x rambank=%d locked=%d",
                      (unsigned)minZX.getBorderColor(), (unsigned)minZX.getTStates(),
                      minZX.getCPU()->getRegPC(), (unsigned)minZX.get7FFDRaw(),
                      minZX.get7FFDRamBank(), minZX.get7FFDLocked() ? 1 : 0);
         else
-            snprintf(out, sizeof(out), "OK border=%u tstates=%u running=1 7ffd=%02x rambank=%d locked=%d",
+            snprintf(base, sizeof(base), "OK border=%u tstates=%u running=1 7ffd=%02x rambank=%d locked=%d",
                      (unsigned)minZX.getBorderColor(), (unsigned)minZX.getTStates(),
                      (unsigned)minZX.get7FFDRaw(), minZX.get7FFDRamBank(), minZX.get7FFDLocked() ? 1 : 0);
+        snprintf(out, sizeof(out), "%s%s", base, tapeInfo);
         reply(out);
     }
     else if (cmd == "STEP") {
