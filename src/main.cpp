@@ -12,6 +12,7 @@
 #include "ZiFi.h"
 #include "Multiface.h"
 #include "DivIde.h"
+#include "OsdMenu.h"
 #include <cstdlib>
 #include <cstring>
 #include <strings.h>
@@ -195,10 +196,14 @@ static void printUsage(const char* argv0)
 		"  --trace-port PORT      log every IN from this port when it changes\n"
 		"\n"
 		"Window hotkeys:\n"
+		"  F5                     toggle the on-screen menu (load/save\n"
+		"                         snapshot, load tape -- see Peripherals\n"
+		"                         note: this is JASE's own OSD, not a card)\n"
 		"  F11                    RESET (full machine reset)\n"
 		"  Alt+F10                NMI (see --multiface1 above; matches\n"
 		"                         pico-spec-drewpo's own F10/Alt+F10 split)\n"
-		"  Esc                    quit\n"
+		"  Esc                    quit (or back out of the on-screen menu,\n"
+		"                         if it's open)\n"
 		"  L                      toggle SDL_LockTexture() vs\n"
 		"                         SDL_UpdateTexture() for the video blit\n"
 		"                         (perf comparison, not user-facing)\n"
@@ -224,6 +229,7 @@ int main(int argc, char *argv[])
 	SDL_Init(SDL_INIT_EVERYTHING);
 
 	MinZX minZX;
+	OsdMenu osdMenu(&minZX);
 
 	// --machine must be applied before init() -- it picks the ROM that
 	// loadROM() reads during init().
@@ -408,8 +414,33 @@ int main(int argc, char *argv[])
 
 		while (SDL_PollEvent(&event))
 		{
-			if ((SDL_QUIT == event.type) ||
-				(SDL_KEYDOWN == event.type && SDL_SCANCODE_ESCAPE == event.key.keysym.scancode))
+			if (SDL_QUIT == event.type)
+			{
+				running = false;
+				break;
+			}
+
+			if (SDL_KEYDOWN == event.type && SDL_SCANCODE_F5 == event.key.keysym.scancode)
+			{
+				osdMenu.toggle();
+				continue;
+			}
+
+			// While the menu is open it owns all keyboard input -- Esc backs
+			// out of it instead of quitting, arrows/Enter navigate, and none
+			// of the hotkeys below (L/F11/Alt+F10) fire. The Spectrum's own
+			// keyboard matrix keeps reading SDL_GetKeyboardState() live
+			// regardless (see minzx.cpp), but that's harmless: main.cpp
+			// skips calling minZX.update() for every frame the menu is open
+			// (see below), so nothing ever acts on it.
+			if (osdMenu.isOpen())
+			{
+				if (SDL_KEYDOWN == event.type)
+					osdMenu.handleKey(event.key.keysym.scancode);
+				continue;
+			}
+
+			if (SDL_KEYDOWN == event.type && SDL_SCANCODE_ESCAPE == event.key.keysym.scancode)
 			{
 				running = false;
 				break;
@@ -437,21 +468,29 @@ int main(int argc, char *argv[])
 		}
 
 		// splat down some random pixels
-		for (unsigned int i = 0; i < 1000; i++)
+		if (!osdMenu.isOpen())
 		{
-			const unsigned int x = rand() % texWidth;
-			const unsigned int y = rand() % texHeight;
+			for (unsigned int i = 0; i < 1000; i++)
+			{
+				const unsigned int x = rand() % texWidth;
+				const unsigned int y = rand() % texHeight;
 
-			const unsigned int offset = (texWidth * 4 * y) + x * 4;
-			pixels[offset + 0] = rand() % 256;        // b
-			pixels[offset + 1] = rand() % 256;        // g
-			pixels[offset + 2] = rand() % 256;        // r
-			pixels[offset + 3] = SDL_ALPHA_OPAQUE;    // a
+				const unsigned int offset = (texWidth * 4 * y) + x * 4;
+				pixels[offset + 0] = rand() % 256;        // b
+				pixels[offset + 1] = rand() % 256;        // g
+				pixels[offset + 2] = rand() % 256;        // r
+				pixels[offset + 3] = SDL_ALPHA_OPAQUE;    // a
+			}
 		}
 
-		if (debugServer.isRunning())
+		// Menu open == emulation paused: skip minZX.update() so the last
+		// rendered Spectrum frame stays in `pixels` underneath the overlay,
+		// same "frozen picture behind the menu" look fusex/pico-spec have.
+		if (debugServer.isRunning() && !osdMenu.isOpen())
 			minZX.update(&pixels[0]);
 		debugServer.poll(minZX);
+
+		osdMenu.render(&pixels[0], texWidth, texHeight);
 
 		if (useLocktexture)
 		{
@@ -491,6 +530,11 @@ int main(int argc, char *argv[])
 		const Uint32 samplesPerFrame = (Uint32)MinZX::kAudioSamplesPerFrame;
 		while (minZX.getQueuedAudioBytes() > samplesPerFrame * 3)
 			SDL_Delay(1);
+		// Menu open means minZX.update() isn't running, so the audio queue
+		// drains and the loop above never blocks -- without this it busy-
+		// spins the render loop as fast as the GPU allows for no reason.
+		if (osdMenu.isOpen())
+			SDL_Delay(10);
 
 		frames++;
 		const Uint64 end = SDL_GetPerformanceCounter();
