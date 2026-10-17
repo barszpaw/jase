@@ -77,6 +77,7 @@ public:
 	// initial page table that init() sets up. name: "48k" (default
 	// behavior if never called), "tc2048", "128k".
 	bool setMachine(const char* name);
+	MachineType getMachine() const { return machine_; }
 
 	// Opt-in: restores the old instant-delivery shortcut at PC==0x0556
 	// (checkFastLoad()) on top of the real pulse engine, same as JASE had
@@ -144,6 +145,13 @@ public:
 
 	// accessors (for loaders)
 	Z80*     getCPU()    { return z80; }
+
+	// Direct access to a specific RAM/ROM bank regardless of current
+	// paging -- poke8()/peek8() only reach whatever's CURRENTLY mapped
+	// at a page slot, but a .Z80 snapshot stores all 8 128K RAM banks
+	// even ones not presently paged in anywhere. Loaders need this;
+	// nothing else should (prefer poke8/peek8 for anything PC-relative).
+	MemoryMap& getMemory() { return memory_; }
 
 	// Expansion devices (Kempston now, AY-PSG/ZiFi/DivSD/Spectranext
 	// later) — each owns its own port decoding and Layer 3 debug command.

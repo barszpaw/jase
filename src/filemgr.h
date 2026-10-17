@@ -27,6 +27,17 @@ public:
 	// sync/bit timing (see TapeBlock in minzx.h) instead of always using
 	// the standard ROM constants, which is how real turbo loaders work.
 	bool loadTZX(const char* filename, MinZX* targetEmulator);
+
+	// .Z80 snapshot (v1/v2/v3, compressed or not) -- facts (header
+	// layout, page-number remapping, RLE compression) cross-checked
+	// against libspectrum's z80.c (GPL, facts only, no code copied).
+	// Covers plain 48K and 128K only -- no Interface 1/+D/Multiface/MGT
+	// page data, no Timex, no AY register state (JASE doesn't expose
+	// AyPsg's current registers for read-back yet). Refuses to load a
+	// snapshot whose machine type doesn't match the emulator's current
+	// --machine (can't be switched post-init, see MinZX::setMachine()).
+	bool loadZ80(const char* filename, MinZX* targetEmulator);
+	bool saveZ80(const char* filename, MinZX* sourceEmulator);
 };
 
 #endif

@@ -131,6 +131,10 @@ static void printUsage(const char* argv0)
 		"                         the bundled mid-LOAD snapshot (48K ROM only --\n"
 		"                         doesn't work on tc2048/128k, use --tape there)\n"
 		"  --load-sna PATH        load a .sna snapshot directly\n"
+		"  --load-z80 PATH        load a .z80 snapshot directly (v1/v2/v3,\n"
+		"                         compressed or not; 48K/128K only -- the\n"
+		"                         snapshot's machine must match --machine,\n"
+		"                         since that can't change after startup)\n"
 		"  --tape-fastload        restore the old instant-delivery shortcut\n"
 		"                         at PC==0x0556 on top of the real tape\n"
 		"                         engine (default off -- the pure pulse\n"
@@ -177,7 +181,8 @@ static void printUsage(const char* argv0)
 		"                           PORT addr, OUT addr val, STATE, STEP [n],\n"
 		"                           CONT, STOP, RESET, NMI, BREAK/UNBREAK addr,\n"
 		"                           BREAKS, PRESSKEYS chord,chord,..., TYPE text,\n"
-		"                           SAVESNA path, SCREENSHOT path\n"
+		"                           SAVESNA path, LOADZ80 path, SAVEZ80 path,\n"
+		"                           SCREENSHOT path\n"
 		"                         plus one per peripheral (each device owns its\n"
 		"                         own command, see Peripheral.h): KEMPSTON, AY,\n"
 		"                         ZIFI, MULTIFACE1, DIVIDE\n"
@@ -266,6 +271,7 @@ int main(int argc, char *argv[])
 	const char* tapePath = nullptr;
 	const char* autoTapePath = nullptr;
 	const char* snaPath = nullptr;
+	const char* z80Path = nullptr;
 	for (int i = 1; i < argc; i++)
 	{
 		if (0 == strcmp(argv[i], "--tape") && i + 1 < argc)
@@ -274,6 +280,8 @@ int main(int argc, char *argv[])
 			autoTapePath = argv[++i];
 		else if (0 == strcmp(argv[i], "--load-sna") && i + 1 < argc)
 			snaPath = argv[++i];
+		else if (0 == strcmp(argv[i], "--load-z80") && i + 1 < argc)
+			z80Path = argv[++i];
 		else if (0 == strcmp(argv[i], "--tape-fastload"))
 			minZX.setTapeFastload(true);
 		else if (0 == strcmp(argv[i], "--multiface1"))
@@ -314,13 +322,18 @@ int main(int argc, char *argv[])
 			loadTapeFile(fileMgr, tapePath, &minZX);
 		if (snaPath)
 			fileMgr.loadSNA(snaPath, &minZX);
-		if (!tapePath && !snaPath && argc > 1 && argv[1][0] != '-')
+		if (z80Path)
+			fileMgr.loadZ80(z80Path, &minZX);
+		if (!tapePath && !snaPath && !z80Path && argc > 1 && argv[1][0] != '-')
 		{
 			const char* path = argv[1];
 			size_t len = strlen(path);
 			bool isTape = len > 4 && (0 == strcasecmp(path + len - 4, ".tap") || 0 == strcasecmp(path + len - 4, ".tzx"));
+			bool isZ80 = len > 4 && 0 == strcasecmp(path + len - 4, ".z80");
 			if (isTape)
 				loadTapeFile(fileMgr, path, &minZX);
+			else if (isZ80)
+				fileMgr.loadZ80(path, &minZX);
 			else
 				fileMgr.loadSNA(path, &minZX);
 		}

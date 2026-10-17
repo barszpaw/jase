@@ -372,6 +372,20 @@ void DebugServer::handleLine(const std::string& line, MinZX& minZX)
         else
             reply("ERR saveSNA failed");
     }
+    else if (cmd == "SAVEZ80" && toks.size() >= 2) {
+        FileMgr fileMgr;
+        if (fileMgr.saveZ80(toks[1].c_str(), &minZX))
+            reply("OK");
+        else
+            reply("ERR saveZ80 failed");
+    }
+    else if (cmd == "LOADZ80" && toks.size() >= 2) {
+        FileMgr fileMgr;
+        if (fileMgr.loadZ80(toks[1].c_str(), &minZX))
+            reply("OK");
+        else
+            reply("ERR loadZ80 failed");
+    }
     else if (cmd == "SCREENSHOT" && toks.size() >= 2) {
         // Dumps the exact buffer generateScreen() wrote this frame -- unlike
         // reading $4000 over MEM and re-rendering host-side (dump_screen.py),

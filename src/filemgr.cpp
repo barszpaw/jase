@@ -472,3 +472,380 @@ bool FileMgr::saveSNA(const char* filename, MinZX* sourceEmulator)
 	INFO("FileMgr::saveSNA: wrote %s (PC=%04x via stack at %04x)\n", filename, pc, snaSP);
 	return true;
 }
+
+// .Z80 RLE: a run of N>=2 identical bytes becomes ED ED <N> <byte> (N is a
+// single byte, so runs cap at 255); any other byte is literal. The one
+// wrinkle: a LITERAL lone 0xED must never be immediately followed by what
+// the decompressor would read as a run, so the compressor refuses to
+// start a new run right after emitting a literal 0xED (z80Compress's
+// lastWasLiteralEd) -- and a run of exactly 0xED bytes is ALWAYS encoded
+// via the escape (never literally), because two literal EDs in a row is
+// indistinguishable from the escape sequence itself otherwise. Algorithm
+// confirmed byte-for-byte against libspectrum's compress_block/
+// uncompress_block (z80.c) -- GPL, facts only, no code copied.
+static std::vector<uint8_t> z80Decompress(const uint8_t* src, size_t srcLen)
+{
+	std::vector<uint8_t> out;
+	out.reserve(srcLen * 2);
+	size_t i = 0;
+	while (i < srcLen) {
+		if (i + 1 == srcLen) { out.push_back(src[i]); i++; continue; }
+		if (src[i] == 0xED && src[i + 1] == 0xED && i + 3 < srcLen) {
+			size_t runLen = src[i + 2];
+			uint8_t value = src[i + 3];
+			i += 4;
+			out.insert(out.end(), runLen, value);
+		} else {
+			out.push_back(src[i]);
+			i++;
+		}
+	}
+	return out;
+}
+
+static std::vector<uint8_t> z80Compress(const uint8_t* src, size_t srcLen)
+{
+	std::vector<uint8_t> out;
+	out.reserve(srcLen);
+	size_t i = 0;
+	bool lastWasLiteralEd = false;
+	while (i < srcLen) {
+		if (i + 1 == srcLen) { out.push_back(src[i]); i++; continue; }
+		if (src[i] == src[i + 1] && !lastWasLiteralEd) {
+			uint8_t repeated = src[i];
+			size_t runLen = 2;
+			size_t j = i + 2;
+			while (j < srcLen && src[j] == repeated && runLen < 0xFF) { runLen++; j++; }
+			if (runLen >= 5 || repeated == 0xED) {
+				out.push_back(0xED); out.push_back(0xED);
+				out.push_back((uint8_t)runLen); out.push_back(repeated);
+			} else {
+				out.insert(out.end(), runLen, repeated);
+			}
+			i = j;
+			lastWasLiteralEd = false;
+		} else {
+			lastWasLiteralEd = (src[i] == 0xED);
+			out.push_back(src[i]);
+			i++;
+		}
+	}
+	return out;
+}
+
+// Z80 page-number <-> physical 16K block mapping. Confirmed against
+// libspectrum's read_block(): page 3 is always ROM (discard); page 1 is
+// Interface 1/+D ROM-or-RAM (discard -- JASE doesn't emulate either);
+// page 11 is the Multiface ROM (discard -- not what MinZX's own
+// Multiface page uses, and JASE doesn't want snapshot loads fighting
+// over it); everything else maps to "page - 3" EXCEPT on 48K machines,
+// where pages 4 and 5 are swapped first. The resulting final index (0-7)
+// is a real 128K RAM bank number for 128K snapshots; for 48K, only
+// 0/2/5 are ever used, meaning 0xC000-0xFFFF / 0x8000-0xBFFF /
+// 0x4000-0x7FFF respectively (the fixed 48K memory map, addressed using
+// the SAME bank numbers it would occupy if it were a 128K machine).
+static int z80PageToFinalIndex(uint8_t rawPage, bool is128k)
+{
+	if (rawPage == 1 || rawPage == 11) return -1; // IF1/+D or Multiface -- unsupported, discard
+	if (!is128k) {
+		switch (rawPage) {
+			case 3: return -1; // ROM
+			case 4: rawPage = 5; break;
+			case 5: rawPage = 3; break;
+			default: break; // page 8 (screen) passes through unchanged
+		}
+	} else if (rawPage == 3) {
+		return -1; // ROM
+	}
+	return (int)rawPage - 3;
+}
+
+static void z80WritePage16k(MinZX* target, bool is128k, int finalIndex, const uint8_t* data, size_t len)
+{
+	if (len != 0x4000) return; // a block that didn't decompress to a full 16K page is corrupt -- drop it
+	if (is128k) {
+		if (finalIndex < 0 || finalIndex > 7) return;
+		MemoryMap& mem = target->getMemory();
+		memcpy(mem.ramBank(2 * finalIndex).data, data, 0x2000);
+		memcpy(mem.ramBank(2 * finalIndex + 1).data, data + 0x2000, 0x2000);
+	} else {
+		uint16_t base;
+		switch (finalIndex) {
+			case 5: base = 0x4000; break;
+			case 2: base = 0x8000; break;
+			case 0: base = 0xC000; break;
+			default: return; // not one of the fixed 48K banks -- discard
+		}
+		for (size_t i = 0; i < len; i++)
+			target->poke8((uint16_t)(base + i), data[i]);
+	}
+}
+
+// For saveZ80: the inverse of z80PageToFinalIndex(), enumerated directly
+// rather than derived, since the forward mapping isn't cleanly invertible
+// in code (it's lossy by design -- several raw pages discard to -1).
+static const struct { uint16_t base; uint8_t rawPage; } kZ80Pages48[3] = {
+	{ 0x4000, 8 }, { 0x8000, 4 }, { 0xC000, 5 }
+};
+
+bool FileMgr::loadZ80(const char* filename, MinZX* targetEmulator)
+{
+	if (NULL == filename || '\0' == *filename) {
+		WARN("FileMgr::loadZ80: no filename specified\n");
+		return false;
+	}
+	if (NULL == targetEmulator) {
+		WARN("FileMgr::loadZ80: no target emulator\n");
+		return false;
+	}
+
+	FILE* pf = fopen(filename, "rb");
+	if (pf == NULL) {
+		WARN("FileMgr::loadZ80: cannot open file %s\n", filename);
+		return false;
+	}
+	fseek(pf, 0, SEEK_END);
+	long fileSize = ftell(pf);
+	fseek(pf, 0, SEEK_SET);
+	if (fileSize < 30) {
+		WARN("FileMgr::loadZ80: %s is too short to be a .z80 file\n", filename);
+		fclose(pf);
+		return false;
+	}
+	std::vector<uint8_t> buf((size_t)fileSize);
+	size_t n = fread(buf.data(), 1, (size_t)fileSize, pf);
+	fclose(pf);
+	if (n != (size_t)fileSize) {
+		WARN("FileMgr::loadZ80: short read on %s\n", filename);
+		return false;
+	}
+
+	const uint8_t* h = buf.data();
+	uint16_t pcField = h[6] | (h[7] << 8);
+
+	int version;
+	size_t dataOffset;
+	uint16_t pc;
+	bool is128k;
+
+	if (pcField != 0) {
+		// v1: no extended header, PC lives in the base header, and the
+		// WHOLE 48K (no page framing) follows as one block.
+		version = 1;
+		pc = pcField;
+		dataOffset = 30;
+		is128k = false;
+	} else {
+		if ((size_t)fileSize < 32) {
+			WARN("FileMgr::loadZ80: %s truncated before the v2/v3 extra header\n", filename);
+			return false;
+		}
+		uint16_t extraLen = h[30] | (h[31] << 8);
+		const uint8_t* eh = h + 32;
+		pc = (uint16_t)(eh[0] | (eh[1] << 8));
+		uint8_t machineByte = eh[2];
+		if (extraLen == 23) {
+			version = 2;
+			is128k = (machineByte == 3 || machineByte == 4); // v2: 3=128k, 4=128k+IF1
+		} else if (extraLen == 54 || extraLen == 55) {
+			version = 3;
+			is128k = (machineByte >= 4); // v3: 4=128k, 5=128k+IF1, 6=128k+MGT
+		} else {
+			WARN("FileMgr::loadZ80: %s has an unrecognised extra header length %u\n", filename, extraLen);
+			return false;
+		}
+		dataOffset = 32 + extraLen;
+	}
+
+	MachineType current = targetEmulator->getMachine();
+	bool currentIs128k = (current == MachineType::Spectrum128K);
+	if (is128k != currentIs128k) {
+		WARN("FileMgr::loadZ80: %s is a %s snapshot but the emulator is running as %s "
+		     "-- machine type can't change after startup, restart with --machine %s\n",
+		     filename, is128k ? "128K" : "48K", currentIs128k ? "128K" : "48K",
+		     is128k ? "128k" : "48k");
+		return false;
+	}
+
+	targetEmulator->reset();
+	Z80* z80 = targetEmulator->getCPU();
+
+	z80->setRegA(h[0]);
+	z80->setFlags(h[1]);
+	z80->setRegBC((uint16_t)(h[2] | (h[3] << 8)));
+	z80->setRegHL((uint16_t)(h[4] | (h[5] << 8)));
+	z80->setRegSP((uint16_t)(h[8] | (h[9] << 8)));
+	z80->setRegI(h[10]);
+	uint8_t rLow = h[11] & 0x7F;
+	uint8_t flagsByte = h[12];
+	uint8_t border = (flagsByte & 0x0E) >> 1;
+	bool v1Compressed = (flagsByte & 0x20) != 0;
+	bool rBit7 = (flagsByte & 0x01) != 0;
+	z80->setRegR((uint8_t)(rLow | (rBit7 ? 0x80 : 0)));
+	z80->setRegDE((uint16_t)(h[13] | (h[14] << 8)));
+	z80->setRegBCx((uint16_t)(h[15] | (h[16] << 8)));
+	z80->setRegDEx((uint16_t)(h[17] | (h[18] << 8)));
+	z80->setRegHLx((uint16_t)(h[19] | (h[20] << 8)));
+	z80->setRegAx(h[21]);
+	z80->setRegFx(h[22]);
+	z80->setRegIY((uint16_t)(h[23] | (h[24] << 8)));
+	z80->setRegIX((uint16_t)(h[25] | (h[26] << 8)));
+	z80->setIFF1(h[27] != 0);
+	z80->setIFF2(h[28] != 0);
+	z80->setIM((Z80::IntMode)(h[29] & 0x03));
+	targetEmulator->setBorderColor(border);
+	z80->setRegPC(pc);
+
+	if (version == 1) {
+		std::vector<uint8_t> mem48k;
+		if (v1Compressed) {
+			// No explicit length for a v1 block -- scan for the 4-byte
+			// "00 ED ED 00" end marker (confirmed state machine against
+			// libspectrum's read_v1_block()), then decompress everything
+			// before it.
+			size_t end = buf.size();
+			for (size_t i = dataOffset; i + 4 <= buf.size(); i++) {
+				if (buf[i] == 0x00 && buf[i + 1] == 0xED && buf[i + 2] == 0xED && buf[i + 3] == 0x00) {
+					end = i;
+					break;
+				}
+			}
+			mem48k = z80Decompress(buf.data() + dataOffset, end - dataOffset);
+		} else {
+			if (buf.size() < dataOffset + 0xC000) {
+				WARN("FileMgr::loadZ80: %s truncated (uncompressed v1 body too short)\n", filename);
+				return false;
+			}
+			mem48k.assign(buf.begin() + dataOffset, buf.begin() + dataOffset + 0xC000);
+		}
+		if (mem48k.size() != 0xC000) {
+			WARN("FileMgr::loadZ80: %s v1 body decompressed to %zu bytes, expected 49152\n",
+			     filename, mem48k.size());
+			return false;
+		}
+		for (size_t i = 0; i < mem48k.size(); i++)
+			targetEmulator->poke8((uint16_t)(0x4000 + i), mem48k[i]);
+	} else {
+		size_t pos = dataOffset;
+		while (pos + 3 <= buf.size()) {
+			uint16_t blockLen = (uint16_t)(buf[pos] | (buf[pos + 1] << 8));
+			uint8_t rawPage = buf[pos + 2];
+			pos += 3;
+			bool rawBlock = (blockLen == 0xFFFF); // 0xffff => 16384 bytes, uncompressed
+			size_t storedLen = rawBlock ? 0x4000 : blockLen;
+			if (pos + storedLen > buf.size()) {
+				WARN("FileMgr::loadZ80: %s truncated mid-page (page %u)\n", filename, rawPage);
+				break;
+			}
+			std::vector<uint8_t> pageData = rawBlock
+				? std::vector<uint8_t>(buf.begin() + pos, buf.begin() + pos + storedLen)
+				: z80Decompress(buf.data() + pos, storedLen);
+			pos += storedLen;
+
+			int finalIndex = z80PageToFinalIndex(rawPage, is128k);
+			if (finalIndex >= 0)
+				z80WritePage16k(targetEmulator, is128k, finalIndex, pageData.data(), pageData.size());
+		}
+	}
+
+	INFO("FileMgr::loadZ80: loaded %s (v%d, %s)\n", filename, version, is128k ? "128K" : "48K");
+	return true;
+}
+
+bool FileMgr::saveZ80(const char* filename, MinZX* sourceEmulator)
+{
+	if (NULL == filename || '\0' == *filename) {
+		WARN("FileMgr::saveZ80: no filename specified\n");
+		return false;
+	}
+	if (NULL == sourceEmulator) {
+		WARN("FileMgr::saveZ80: no source emulator\n");
+		return false;
+	}
+
+	FILE* pf = fopen(filename, "wb");
+	if (pf == NULL) {
+		WARN("FileMgr::saveZ80: cannot create file %s\n", filename);
+		return false;
+	}
+
+	Z80* z80 = sourceEmulator->getCPU();
+	bool is128k = (sourceEmulator->getMachine() == MachineType::Spectrum128K);
+
+	uint8_t header[30] = {};
+	header[0] = z80->getRegA();
+	header[1] = z80->getFlags();
+	uint16_t bc = z80->getRegBC(); header[2] = (uint8_t)bc; header[3] = (uint8_t)(bc >> 8);
+	uint16_t hl = z80->getRegHL(); header[4] = (uint8_t)hl; header[5] = (uint8_t)(hl >> 8);
+	header[6] = 0; header[7] = 0; // PC=0 in the base header signals a v2/v3 file
+	uint16_t sp = z80->getRegSP(); header[8] = (uint8_t)sp; header[9] = (uint8_t)(sp >> 8);
+	header[10] = z80->getRegI();
+	uint8_t rFull = z80->getRegR();
+	header[11] = rFull & 0x7F;
+	uint8_t border = sourceEmulator->getBorderColor();
+	header[12] = (uint8_t)(((rFull & 0x80) ? 0x01 : 0x00) | ((border & 0x07) << 1));
+	uint16_t de = z80->getRegDE(); header[13] = (uint8_t)de; header[14] = (uint8_t)(de >> 8);
+	uint16_t bcx = z80->getRegBCx(); header[15] = (uint8_t)bcx; header[16] = (uint8_t)(bcx >> 8);
+	uint16_t dex = z80->getRegDEx(); header[17] = (uint8_t)dex; header[18] = (uint8_t)(dex >> 8);
+	uint16_t hlx = z80->getRegHLx(); header[19] = (uint8_t)hlx; header[20] = (uint8_t)(hlx >> 8);
+	header[21] = z80->getRegAx();
+	header[22] = z80->getRegFx();
+	uint16_t iy = z80->getRegIY(); header[23] = (uint8_t)iy; header[24] = (uint8_t)(iy >> 8);
+	uint16_t ix = z80->getRegIX(); header[25] = (uint8_t)ix; header[26] = (uint8_t)(ix >> 8);
+	header[27] = z80->isIFF1() ? 1 : 0;
+	header[28] = z80->isIFF2() ? 1 : 0;
+	header[29] = (uint8_t)z80->getIM();
+	fwrite(header, 1, sizeof(header), pf);
+
+	// v3, 54-byte extra header. AY register state (extra[6..22]) is left
+	// zeroed -- AyPsg doesn't expose its current registers for read-back
+	// yet, so a reloaded snapshot's AY chip starts silent/default rather
+	// than wherever it actually was. Everything else not set below
+	// (Spectaculator extension flags, MGT/Disciple/joystick fields,
+	// hardware-modify byte) is genuinely inapplicable to JASE's machines.
+	uint8_t extra[54] = {};
+	uint16_t pc = z80->getRegPC();
+	extra[0] = (uint8_t)pc; extra[1] = (uint8_t)(pc >> 8);
+	extra[2] = is128k ? 4 : 0; // v3 machine byte: 0=48k, 4=128k
+	extra[3] = is128k ? sourceEmulator->get7FFDRaw() : 0;
+	// The 2-byte extra-header LENGTH field (separate from the extra
+	// header's own content) -- this is what a loader's "PC==0 means v2/
+	// v3, read bytes 30-31 for how long the extra header is" check
+	// actually reads. Forgetting it shifts everything after by 2 bytes,
+	// which a loader can only detect as "unrecognised extra header
+	// length" garbage, not point back at this specific omission.
+	fputc((int)sizeof(extra), pf);
+	fputc((int)(sizeof(extra) >> 8), pf);
+	fwrite(extra, 1, sizeof(extra), pf);
+
+	if (is128k) {
+		MemoryMap& mem = sourceEmulator->getMemory();
+		for (int k = 0; k < 8; k++) {
+			uint8_t raw[0x4000];
+			memcpy(raw, mem.ramBank(2 * k).data, 0x2000);
+			memcpy(raw + 0x2000, mem.ramBank(2 * k + 1).data, 0x2000);
+			std::vector<uint8_t> compressed = z80Compress(raw, sizeof(raw));
+			uint8_t blockHeader[3] = {
+				(uint8_t)compressed.size(), (uint8_t)(compressed.size() >> 8), (uint8_t)(k + 3)
+			};
+			fwrite(blockHeader, 1, sizeof(blockHeader), pf);
+			fwrite(compressed.data(), 1, compressed.size(), pf);
+		}
+	} else {
+		for (const auto& p : kZ80Pages48) {
+			uint8_t raw[0x4000];
+			for (int i = 0; i < 0x4000; i++)
+				raw[i] = sourceEmulator->peek8((uint16_t)(p.base + i));
+			std::vector<uint8_t> compressed = z80Compress(raw, sizeof(raw));
+			uint8_t blockHeader[3] = {
+				(uint8_t)compressed.size(), (uint8_t)(compressed.size() >> 8), p.rawPage
+			};
+			fwrite(blockHeader, 1, sizeof(blockHeader), pf);
+			fwrite(compressed.data(), 1, compressed.size(), pf);
+		}
+	}
+
+	fclose(pf);
+	INFO("FileMgr::saveZ80: wrote %s (%s)\n", filename, is128k ? "128K" : "48K");
+	return true;
+}
