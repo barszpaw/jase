@@ -8,6 +8,7 @@
 #include "z80.h"
 #include "Peripheral.h"
 #include "MemoryMap.h"
+#include "IAySound.h"
 
 // Agent/debug port tracing: when set (via --trace-port on the command
 // line, see main.cpp), every IN from this port that changes value gets
@@ -78,6 +79,11 @@ public:
 	// behavior if never called), "tc2048", "128k".
 	bool setMachine(const char* name);
 	MachineType getMachine() const { return machine_; }
+
+	// Must also be called before init() -- decides which of AyPsg (one
+	// AY-3-8912) or TurboSound (two, NedoPC chip-select convention -- see
+	// TurboSound.h) gets constructed as ay_. Off by default (plain AyPsg).
+	void setTurboSound(bool on) { turboSoundRequested_ = on; }
 
 	// Opt-in: restores the old instant-delivery shortcut at PC==0x0556
 	// (checkFastLoad()) on top of the real pulse engine, same as JASE had
@@ -402,13 +408,17 @@ private:
 	void audioWriteEdge(uint8_t newLevel);
 	void flushAudioFrame();
 
-	// Set once in init() if an AyPsg peripheral is present — flushAudioFrame()
-	// mixes its output into audioBuf_ alongside the beeper. Not part of the
-	// generic Peripheral interface since most devices (Kempston, future
-	// ZiFi/DivSD) don't generate audio; this is a direct pointer specifically
-	// for the audio pipeline, separate from the generic peripherals_ list
-	// (which AyPsg is ALSO in, for port IN/OUT and its debug command).
-	class AyPsg* ay_ = nullptr;
+	// Set once in init() to whichever of AyPsg/TurboSound got constructed
+	// (see setTurboSound()) -- flushAudioFrame() mixes its output into
+	// audioBuf_ alongside the beeper through this one shared interface
+	// (IAySound), without needing to know which concrete type it is. Not
+	// part of the generic Peripheral interface since most devices
+	// (Kempston, future ZiFi/DivSD) don't generate audio; this is a
+	// direct pointer specifically for the audio pipeline, separate from
+	// the generic peripherals_ list (which the AY peripheral is ALSO in,
+	// for port IN/OUT and its own debug command).
+	IAySound* ay_ = nullptr;
+	bool turboSoundRequested_ = false;
 
 public:
 	// Non-owning accessor so main.cpp can call connectTo() with a

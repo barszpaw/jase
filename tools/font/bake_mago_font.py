@@ -25,7 +25,9 @@ script_dir = os.path.dirname(__file__)
 font_path = os.path.join(script_dir, "..", "..", "mago1.ttf")
 
 SIZE = 16
-CELL_H = 13  # ascent(11) + descent(2) at this size -- covers full ink incl. descenders
+CELL_H = 13  # ascent(11) + descent(2) at this size -- the initial, generous canvas
+             # height; trimmed down losslessly further below once every glyph's
+             # actual ink is known (see "trimmed N universally-blank..." print)
 FIRST = 32
 COUNT = 95   # 0x20..0x7E inclusive
 MAX_W = 8    # fits one uint8_t row; only '}' (natural width 9) gets trimmed by 1px
@@ -51,6 +53,50 @@ for code in range(FIRST, FIRST + COUNT):
                 bits |= (1 << (w - 1 - x))
         rows.append(bits)
     glyphs.append((w, rows))
+
+# mago1's "Eye Candy" variant repurposes six punctuation codepoints as
+# decorative icons (hearts, a flag, a Facebook-ish logo, a chat bubble)
+# instead of the literal glyph -- confirmed by direct rendering, twice.
+# Harmless for menu labels, but actively wrong wherever the real symbol
+# matters: the ZX KEYBOARD legend, AND -- the bug that actually surfaced
+# this -- any real filename containing '_' (common word-separator in
+# ROM-set naming, e.g. "007_-_A_View_to_a_Kill.tap") rendered as a row of
+# hearts instead of underscores. Hand-drawn replacements below, in the
+# same blocky style and baseline convention as the rest of the font
+# (compare '(' / ')' / 'I' / 'l' in the generated table: cap-height spans
+# rows 4-10, descenders reach into 11-12, baseline sits at row 10).
+OVERRIDES = {
+    '^': (5, [0,0,0,0x04,0x0A,0x11,0,0,0,0,0,0,0]),       # small chevron, x-height
+    '_': (5, [0,0,0,0,0,0,0,0,0,0,0,0x1F,0]),              # bar one row below baseline
+    '{': (4, [0,0,0,0,0x02,0x04,0x04,0x08,0x04,0x04,0x02,0,0]),
+    '}': (4, [0,0,0,0,0x04,0x02,0x02,0x01,0x02,0x02,0x04,0,0]),
+    '|': (2, [0,0,0x02,0x02,0x02,0x02,0x02,0x02,0x02,0x02,0x02,0x02,0x02]),  # full ascender-to-descender bar
+    '~': (6, [0,0,0,0,0,0,0x1A,0x25,0,0,0,0,0]),           # small wave at x-height
+}
+for ch, (w, rows) in OVERRIDES.items():
+    glyphs[ord(ch) - FIRST] = (w, rows)
+
+# Pawel's own observation (comparing the "<DIR>" marker's 'I' against the
+# row it sits in): there's visible dead space above every glyph. Measured
+# why -- EVERY glyph's row 0 and row 1 are unlit (confirmed by scanning
+# all 95 baked glyphs; CELL_H=13 only exists to leave headroom for tall
+# ascenders this font never actually draws that high). Trim however many
+# leading rows are universally blank -- lossless (nothing is cropped that
+# any glyph actually uses), unlike shrinking from the bottom, which would
+# clip real descenders (g/j/p/q/y and the hand-drawn '|'/'_' overrides
+# above reach all the way to the last row).
+leadingBlank = CELL_H
+for w, rows in glyphs:
+    for i, v in enumerate(rows):
+        if v != 0:
+            leadingBlank = min(leadingBlank, i)
+            break
+    else:
+        continue  # an all-blank glyph (space) doesn't constrain the trim
+if leadingBlank:
+    glyphs = [(w, rows[leadingBlank:]) for w, rows in glyphs]
+    CELL_H -= leadingBlank
+    print(f"trimmed {leadingBlank} universally-blank leading row(s), CELL_H now {CELL_H}")
 
 lines = []
 lines.append("// Auto-generated proportional bitmap font, printable ASCII 0x20-0x7E.")

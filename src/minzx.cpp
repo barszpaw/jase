@@ -2,6 +2,7 @@
 #include "z80.h"
 #include "Kempston.h"
 #include "AyPsg.h"
+#include "TurboSound.h"
 #include "ZiFi.h"
 #include "Multiface.h"
 #include "DivIde.h"
@@ -146,8 +147,15 @@ void MinZX::init()
 	initAudio();
 
 	peripherals_.push_back(new Kempston());
-	ay_ = new AyPsg();
-	peripherals_.push_back(ay_);
+	if (turboSoundRequested_) {
+		TurboSound* ts = new TurboSound();
+		ay_ = ts;
+		peripherals_.push_back(ts);
+	} else {
+		AyPsg* ay = new AyPsg();
+		ay_ = ay;
+		peripherals_.push_back(ay);
+	}
 	zifi_ = new ZiFi();
 	peripherals_.push_back(zifi_);
 	multiface_ = new Multiface();

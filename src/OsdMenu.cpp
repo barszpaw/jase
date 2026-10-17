@@ -762,19 +762,18 @@ void OsdMenu::renderSimpleList(uint8_t* pixels, int texW, int texH, const char* 
 // Spectrum Keyboard Technical Document" (QWERTY Key List, Symbol Shift
 // column) -- see OsdMenu.h. On JASE's own keyboard matrix (minzx.cpp),
 // Symbol Shift is (left or right) Alt. "GBP" spells out the pound sign
-// since it isn't in mago1's ASCII range either. mago1's "Eye Candy"
-// variant also repurposes six punctuation codepoints (^ _ { | } ~) as
-// decorative icons (hearts, a flag, ...) instead of the literal glyphs
-// -- harmless for menu labels, but actively WRONG here (a reference
-// table needs the real symbol, not a heart standing in for "_"), so
-// those six are spelled out as words instead of risking the icon.
+// since it isn't in mago1's ASCII range either. The six codepoints
+// mago1's "Eye Candy" variant otherwise repurposes as decorative icons
+// (^ _ { | } ~) are hand-drawn overrides in bake_mago_font.py instead,
+// so they're safe to use literally here (and anywhere else real text
+// might contain them -- see that script for the actual bug this fixed).
 void OsdMenu::renderZxKeyboard(uint8_t* pixels, int texW, int texH) const
 {
 	std::vector<std::string> lines = {
 		"SYMBOL SHIFT (ALT) + KEY =",
-		"1=! 2=@ 3=# 4=$ 5=% 6=& 7=' 8=( 9=) 0=UNDERSCORE",
+		"1=! 2=@ 3=# 4=$ 5=% 6=& 7=' 8=( 9=) 0=_",
 		"Q=<= W=<> E=>= R=< T=> Y=[ U=] O=; P=\"",
-		"A=TILDE S=PIPE D=\\ F=LBRACE G=RBRACE H=CARET J=- K=+ L==",
+		"A=~ S=| D=\\ F={ G=} H=^ J=- K=+ L==",
 		"Z=: X=GBP C=? V=/ B=* N=, M=.",
 	};
 	renderSimpleList(pixels, texW, texH, "ZX KEYBOARD", lines, -1);

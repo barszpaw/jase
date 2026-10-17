@@ -125,6 +125,12 @@ static void printUsage(const char* argv0)
 		"  --rom PATH             override the ROM --machine picked (e.g. a\n"
 		"                         standalone diagnostic ROM that replaces it\n"
 		"                         outright)\n"
+		"  --turbosound           two AY-3-8912 chips instead of one, selected\n"
+		"                         via the NedoPC convention real clones use\n"
+		"                         (write 0xFF/0xFE as the \"register\" to\n"
+		"                         0xFFFD to pick chip A/B -- see TurboSound.h).\n"
+		"                         Replaces the plain single-chip AY outright,\n"
+		"                         not an addition to it.\n"
 		"\n"
 		"Media:\n"
 		"  --tape PATH            stage a .tap/.tzx; LOAD \"\" loads it normally\n"
@@ -253,6 +259,10 @@ int main(int argc, char *argv[])
 		else if (0 == strcmp(argv[i], "--rom") && i + 1 < argc)
 		{
 			minZX.setRomOverride(argv[++i]);
+		}
+		else if (0 == strcmp(argv[i], "--turbosound"))
+		{
+			minZX.setTurboSound(true);
 		}
 	}
 
