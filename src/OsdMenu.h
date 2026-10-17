@@ -28,9 +28,10 @@ public:
 
 	bool isOpen() const { return mode_ != Mode::Closed; }
 
-	// F5: opens to the top-level menu if closed, closes outright if
-	// already open (same effect as Esc at the top level). Reopening
-	// always starts back at the top -- no "resume where I left off".
+	// F1 (and F5 when closed -- see main.cpp): opens to the top-level
+	// menu if closed, closes outright if already open (same effect as
+	// Esc at the top level). Reopening always starts back at the top --
+	// no "resume where I left off".
 	void toggle();
 
 	// One call per SDL_KEYDOWN while isOpen(). Up/Down move the cursor,
@@ -50,7 +51,7 @@ public:
 	void render(uint8_t* pixels, int texW, int texH);
 
 private:
-	enum class Mode { Closed, TopMenu, FileBrowser, NetworkMenu, RemoteList, ProtoPicker, TextInput, RemoteBrowser };
+	enum class Mode { Closed, TopMenu, StorageMenu, FileBrowser, NetworkMenu, RemoteList, ProtoPicker, TextInput, RemoteBrowser, ZxKeyboard };
 	enum class Action { None, LoadSnapshot, LoadTape };
 	enum class Proto { Gopher, Tnfs };
 
@@ -69,8 +70,20 @@ private:
 	std::vector<uint8_t> background_;
 	bool haveBackground_ = false;
 
+	// Top-level categories mirror pico-spec's own OSD (Volume/Storage/
+	// Audio/Video/Machine/Reset/Options/Debug/Hardware/Network/ZX
+	// Keyboard/Help/About, minus ESPectrum branding) -- but only the
+	// categories that actually correspond to something JASE has: no
+	// Volume/Audio/Video (no mixer), Options/Debug/Hardware (nothing to
+	// show), Help/About (not written yet). ZX Keyboard IS kept, as a
+	// read-only Symbol Shift legend -- even with a real SDL keyboard,
+	// finding which PC key types which punctuation symbol isn't obvious
+	// (Pawel's point: the keyboard view helps locate multi-symbol keys).
 	int topSel_ = 0;
-	static const int kTopItemCount = 6; // Load Snapshot/Tape, Save SNA/Z80, Network, Close
+	static const int kTopItemCount = 6; // Storage, Machine, Reset, Network, ZX Keyboard, Close
+
+	int storageSel_ = 0;
+	static const int kStorageItemCount = 4; // Load Snapshot/Tape, Save SNA/Z80
 
 	Action browseAction_ = Action::None;
 	std::string cwd_ = ".";
@@ -84,12 +97,9 @@ private:
 	bool statusOk_ = false;
 	int statusFramesLeft_ = 0;
 
-	// bitluni's Font6x8 (see OsdFont.h) is native-pixel-accurate to real
-	// pico-spec hardware's own ~320px-wide OSD framebuffer. JASE's buffer
-	// is 576px wide (MinZX::SCREEN_W) -- drawn at 1:1 the same font looks
-	// tiny/thin by comparison (confirmed against a real device photo:
-	// text there fills noticeably more of the screen). 2x integer scaling
-	// restores that same look/weight without touching the font data.
+	// bitluni's Font6x8 (see OsdFont.h), scaled by this integer factor
+	// when drawn (drawText()/renderSimpleList() both honour it). Kept as
+	// a single knob rather than a hardcoded 1x/2x choice.
 	static const int kFontScale = 1;
 
 	// Every path that closes the menu (Esc from the top, a successful
@@ -102,6 +112,16 @@ private:
 	void openBrowser(Action action);
 	void rescan();
 	void activateTop();
+	void activateStorage(); // Enter in StorageMenu
+	void showMachineInfo(); // "MACHINE" row -- read-only (JASE's machine type is fixed at startup, see MinZX::setMachine())
+	// "ZX KEYBOARD" row -- not pico-spec's bitmap keyboard overlay image
+	// (that's a copyrighted/hand-drawn asset, not something to copy), but
+	// a text table of the same information that actually matters day to
+	// day: which PC key, held with (left) Alt == Symbol Shift on this
+	// keyboard matrix (see minzx.cpp's keyTable), types which punctuation
+	// symbol. Verified against the official "Recreated ZX Spectrum
+	// Keyboard Technical Document" (QWERTY Key List, Symbol Shift column).
+	void renderZxKeyboard(uint8_t* pixels, int texW, int texH) const;
 	void activateFile();
 	bool matchesFilter(const std::string& name) const;
 	void doSave(bool asZ80);
@@ -109,6 +129,15 @@ private:
 
 	void drawText(uint8_t* pixels, int texW, int texH, int x, int y, const std::string& text, uint32_t argb) const;
 	void fillRect(uint8_t* pixels, int texW, int texH, int x, int y, int w, int h, uint32_t argb) const;
+	// mago1 (OsdFont.h) is PROPORTIONAL, not fixed-width like the earlier
+	// bitluni font -- every text layout that used to divide available
+	// pixels by a constant per-char step now has to measure real glyph
+	// widths instead. glyphWidth() is the one place that knows the font's
+	// own [-> width] lookup (with the same out-of-range '?' fallback
+	// drawText() uses); textWidth()/truncateToWidth() are built on it.
+	int glyphWidth(unsigned char ch) const;
+	int textWidth(const std::string& text) const; // includes the 1px inter-glyph gap drawText() advances by
+	std::string truncateToWidth(const std::string& s, int maxWidthPx) const;
 	// Shared renderer for the simple "N items, pick one" screens
 	// (NetworkMenu/RemoteList/ProtoPicker/TextInput) -- no scrolling,
 	// sized to fit all of `items` (they're expected to stay short).
@@ -174,4 +203,16 @@ private:
 	void activateRemote();   // Enter in RemoteList
 	void activateProto();    // Enter in ProtoPicker
 	void activateRemoteFile(); // Enter in RemoteBrowser
+
+	// F8 in RemoteList: delete the selected saved connection (no
+	// confirmation dialog -- re-adding one is cheap, unlike pico-spec's
+	// msgDialog Yes/No, which this doesn't have a widget for).
+	void forgetSelectedRemote();
+	// F2 in RemoteBrowser: re-fetch the current directory's listing.
+	void reloadRemoteBrowser();
+	// F5 in RemoteBrowser: download the selected FILE (not a directory)
+	// to JASE's own working directory under its real filename, without
+	// loading it -- pico-spec's "save a copy locally" action, distinct
+	// from Enter (which loads it straight into the emulator).
+	void saveSelectedRemoteFile();
 };

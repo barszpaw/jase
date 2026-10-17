@@ -92,6 +92,24 @@ public:
 	// zx-diagnostics testrom.bin) that replace the system ROM outright.
 	void setRomOverride(const char* path) { if (!romPaths_.empty()) romPaths_[0] = path; }
 
+	// Resolves a relative asset path (zx48.rom, assets/tape_load_point.sna)
+	// against the CURRENT WORKING DIRECTORY first (unchanged behavior --
+	// e.g. the OSD's own file browser still opens wherever the user
+	// launched jase from, same as any other CLI tool), then falls back to
+	// the directory the running executable itself lives in (via
+	// /proc/self/exe) if the file isn't there. Without this fallback,
+	// running `jase` from anywhere other than its own directory silently
+	// fails to find zx48.rom -- the machine never boots (ROM stays all
+	// zero, an infinite NOP sled) and just sits there with a blank
+	// screen forever, which looks exactly like a hang (confirmed: this
+	// is what Pawel hit, not an actual deadlock -- see project notes).
+	// Absolute paths (already rooted, or from --rom/--divide-rom/...)
+	// pass through unchanged. Returns the original path unresolved if
+	// neither location has the file, so the caller's own "cannot open"
+	// error still fires with a clear message instead of this silently
+	// swallowing the problem.
+	static std::string resolveAssetPath(const std::string& relPath);
+
 	// Loads a real TS2068 .DCK cartridge (Warajevo format, confirmed
 	// against fusex's libspectrum/dck.c -- 9-byte header: bank ID then one
 	// type byte per 8K page [0=null,1=ram-empty,2=rom,3=ram], followed by

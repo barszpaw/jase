@@ -13,3 +13,8 @@ lib/SDL2/x64/
 
 # Copyrighted ROM images — not ours to distribute, keep local only
 *.rom
+
+# Separately-sold font asset (Nimble Beasts Collective's mago1, used to
+# generate src/OsdFont.h via tools/font/bake_mago_font.py) — not ours to
+# distribute either, keep local only
+mago1.ttf

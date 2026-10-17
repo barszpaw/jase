@@ -86,7 +86,14 @@ void OsdMenu::rescan()
 void OsdMenu::openBrowser(Action action)
 {
 	browseAction_ = action;
-	cwd_ = ".";
+	// Must be an ABSOLUTE path, not textual ".": fs::path(".").parent_path()
+	// is empty, so activateFile()'s ".." handling (which falls back to "."
+	// on an empty parent_path()) immediately bounced right back to the
+	// starting directory on every "go up" -- never able to climb past it,
+	// confirmed as the bug Pawel hit. fs::current_path() resolves to the
+	// real absolute directory, whose parent_path() walks correctly all
+	// the way up to the filesystem root.
+	cwd_ = fs::current_path().string();
 	mode_ = Mode::FileBrowser;
 	rescan();
 }
@@ -110,13 +117,36 @@ void OsdMenu::activateTop()
 {
 	switch (topSel_)
 	{
+		case 0: mode_ = Mode::StorageMenu; storageSel_ = 0; break;
+		case 1: showMachineInfo(); break;
+		case 2: minZX_->reset(); close(); break;
+		case 3: activateNetwork(); break;
+		case 4: mode_ = Mode::ZxKeyboard; break;
+		case 5: close(); break;
+	}
+}
+
+void OsdMenu::activateStorage()
+{
+	switch (storageSel_)
+	{
 		case 0: openBrowser(Action::LoadSnapshot); break;
 		case 1: openBrowser(Action::LoadTape); break;
 		case 2: doSave(false); break;
 		case 3: doSave(true); break;
-		case 4: activateNetwork(); break;
-		case 5: close(); break;
 	}
+}
+
+void OsdMenu::showMachineInfo()
+{
+	const char* name = "48K";
+	switch (minZX_->getMachine())
+	{
+		case MachineType::Spectrum128K: name = "128K"; break;
+		case MachineType::TimexTC2048:  name = "TC2048"; break;
+		default: break; // Spectrum48K
+	}
+	setStatus(std::string("Machine: ") + name + " (fixed at startup -- see --machine)", true);
 }
 
 void OsdMenu::activateFile()
@@ -345,6 +375,53 @@ void OsdMenu::activateRemoteFile()
 	// on failure remoteLoadFile() already set a status message; stay put
 }
 
+void OsdMenu::forgetSelectedRemote()
+{
+	int n = (int)remotes_.size();
+	if (remoteSel_ < 0 || remoteSel_ >= n)
+		return; // on the "[ADD REMOTE]" row, or the list is empty
+	remotes_.erase(remotes_.begin() + remoteSel_);
+	saveRemotes();
+	if (remoteSel_ > (int)remotes_.size())
+		remoteSel_ = (int)remotes_.size();
+}
+
+void OsdMenu::reloadRemoteBrowser()
+{
+	if (!remoteList(entries_))
+	{
+		setStatus("Reload FAILED", false);
+		return;
+	}
+	if (entries_.empty())
+		fileSel_ = 0;
+	else if (fileSel_ >= (int)entries_.size())
+		fileSel_ = (int)entries_.size() - 1;
+	if (fileScroll_ > fileSel_)
+		fileScroll_ = fileSel_;
+	setStatus("Reloaded", true);
+}
+
+void OsdMenu::saveSelectedRemoteFile()
+{
+	if (entries_.empty())
+		return;
+	const Entry e = entries_[fileSel_];
+	if (e.name == "..")
+		return;
+	if (e.isDir)
+	{
+		setStatus("Can't save a directory", false);
+		return;
+	}
+
+	std::string realName = (activeProto_ == Proto::Gopher) ? gopher_.downloadBasename(e.name) : e.name;
+	std::string destPath = "./" + realName;
+	bool ok = (activeProto_ == Proto::Gopher) ? gopher_.getToFile(e.name, destPath)
+	                                           : tnfs_.getToFile(e.name, destPath);
+	setStatus(ok ? (std::string("Saved: ") + realName) : (std::string("Save FAILED: ") + realName), ok);
+}
+
 void OsdMenu::beginAddRemote()
 {
 	mode_ = Mode::ProtoPicker;
@@ -428,12 +505,14 @@ void OsdMenu::handleKey(SDL_Scancode sc)
 	{
 		switch (mode_)
 		{
-			case Mode::FileBrowser:   mode_ = Mode::TopMenu; break;
+			case Mode::StorageMenu:   mode_ = Mode::TopMenu; break;
+			case Mode::FileBrowser:   mode_ = Mode::StorageMenu; break;
 			case Mode::NetworkMenu:   mode_ = Mode::TopMenu; break;
 			case Mode::RemoteList:    mode_ = Mode::NetworkMenu; break;
 			case Mode::ProtoPicker:   mode_ = Mode::RemoteList; break;
 			case Mode::TextInput:     mode_ = Mode::RemoteList; break; // abandons the whole add-remote flow
 			case Mode::RemoteBrowser: remoteDisconnect(); mode_ = Mode::RemoteList; break;
+			case Mode::ZxKeyboard:    mode_ = Mode::TopMenu; break;
 			default:                  close(); break; // TopMenu
 		}
 		return;
@@ -457,6 +536,20 @@ void OsdMenu::handleKey(SDL_Scancode sc)
 		else if (sc == SDL_SCANCODE_RETURN || sc == SDL_SCANCODE_KP_ENTER)
 			activateTop();
 	}
+	else if (mode_ == Mode::StorageMenu)
+	{
+		if (sc == SDL_SCANCODE_UP)
+			storageSel_ = (storageSel_ - 1 + kStorageItemCount) % kStorageItemCount;
+		else if (sc == SDL_SCANCODE_DOWN)
+			storageSel_ = (storageSel_ + 1) % kStorageItemCount;
+		else if (sc == SDL_SCANCODE_RETURN || sc == SDL_SCANCODE_KP_ENTER)
+			activateStorage();
+	}
+	else if (mode_ == Mode::ZxKeyboard)
+	{
+		if (sc == SDL_SCANCODE_RETURN || sc == SDL_SCANCODE_KP_ENTER)
+			mode_ = Mode::TopMenu; // read-only -- Enter and Esc do the same thing
+	}
 	else if (mode_ == Mode::NetworkMenu)
 	{
 		int n = networkMenuItemCount();
@@ -478,6 +571,8 @@ void OsdMenu::handleKey(SDL_Scancode sc)
 			remoteSel_ = (remoteSel_ + 1) % n;
 		else if (sc == SDL_SCANCODE_RETURN || sc == SDL_SCANCODE_KP_ENTER)
 			activateRemote();
+		else if (sc == SDL_SCANCODE_F8)
+			forgetSelectedRemote();
 	}
 	else if (mode_ == Mode::ProtoPicker)
 	{
@@ -490,6 +585,11 @@ void OsdMenu::handleKey(SDL_Scancode sc)
 	}
 	else if (mode_ == Mode::FileBrowser || mode_ == Mode::RemoteBrowser)
 	{
+		if (mode_ == Mode::RemoteBrowser && sc == SDL_SCANCODE_F2)
+		{
+			reloadRemoteBrowser(); // doesn't need a non-empty selection, unlike everything below
+			return;
+		}
 		if (entries_.empty())
 			return;
 		if (sc == SDL_SCANCODE_UP)
@@ -507,6 +607,8 @@ void OsdMenu::handleKey(SDL_Scancode sc)
 			if (mode_ == Mode::FileBrowser) activateFile();
 			else activateRemoteFile();
 		}
+		else if (mode_ == Mode::RemoteBrowser && sc == SDL_SCANCODE_F5)
+			saveSelectedRemoteFile();
 	}
 }
 
@@ -536,11 +638,36 @@ void OsdMenu::fillRect(uint8_t* pixels, int texW, int texH, int x, int y, int w,
 	}
 }
 
-// bitluni's Font6x8 (see OsdFont.h) is 6 pixels wide, firstChar=32 --
-// codes outside [32, 32+96) (e.g. high-bit/control bytes from a filename
-// in some other codepage) fall back to '?', same as Font::valid() would
-// refuse them in pico-spec's own OSD. Each source pixel is blown up into
-// a kFontScale x kFontScale block (see OsdMenu.h for why).
+// mago1 (see OsdFont.h) is PROPORTIONAL -- every glyph has its own pixel
+// width (OsdGlyph::width), unlike the earlier fixed-6px bitluni font.
+// Codes outside [32, 32+95) fall back to '?'.
+int OsdMenu::glyphWidth(unsigned char ch) const
+{
+	int rel = (int)ch - kOsdFontFirstChar;
+	if (rel < 0 || rel >= kOsdFontCharCount) rel = '?' - kOsdFontFirstChar;
+	return kOsdFont[rel].width;
+}
+
+int OsdMenu::textWidth(const std::string& text) const
+{
+	int w = 0;
+	for (unsigned char ch : text)
+		w += glyphWidth(ch) * kFontScale + kFontScale; // glyph + 1px inter-glyph gap
+	return w;
+}
+
+std::string OsdMenu::truncateToWidth(const std::string& s, int maxWidthPx) const
+{
+	int w = 0;
+	for (size_t i = 0; i < s.size(); i++)
+	{
+		w += glyphWidth((unsigned char)s[i]) * kFontScale + kFontScale;
+		if (w > maxWidthPx)
+			return s.substr(0, i);
+	}
+	return s;
+}
+
 void OsdMenu::drawText(uint8_t* pixels, int texW, int texH, int x, int y, const std::string& text, uint32_t argb) const
 {
 	uint8_t a = (argb >> 24) & 0xFF, r = (argb >> 16) & 0xFF, g = (argb >> 8) & 0xFF, b = argb & 0xFF;
@@ -549,13 +676,13 @@ void OsdMenu::drawText(uint8_t* pixels, int texW, int texH, int x, int y, const 
 	{
 		int rel = (int)ch - kOsdFontFirstChar;
 		if (rel < 0 || rel >= kOsdFontCharCount) rel = '?' - kOsdFontFirstChar;
-		const uint8_t* glyph = kOsdFont6x8[rel];
-		for (int row = 0; row < 8; row++)
+		const OsdGlyph& glyph = kOsdFont[rel];
+		for (int row = 0; row < kOsdFontHeight; row++)
 		{
-			uint8_t bits = glyph[row];
-			for (int col = 0; col < 6; col++)
+			uint8_t bits = glyph.rows[row];
+			for (int col = 0; col < glyph.width; col++)
 			{
-				if (!(bits & (1 << (5 - col))))
+				if (!(bits & (1 << (glyph.width - 1 - col))))
 					continue;
 				int px0 = cx + col * kFontScale;
 				int py0 = y + row * kFontScale;
@@ -574,7 +701,7 @@ void OsdMenu::drawText(uint8_t* pixels, int texW, int texH, int x, int y, const 
 				}
 			}
 		}
-		cx += 7 * kFontScale; // 6px glyph + 1px gap, matches pico-spec's own letter spacing
+		cx += glyph.width * kFontScale + kFontScale; // glyph width + 1px gap
 	}
 }
 
@@ -592,11 +719,17 @@ static const uint32_t kOsdCyanBri   = 0xFF00FFFF;
 static const uint32_t kOsdGreenBri  = 0xFF00FF00;
 static const uint32_t kOsdRedBri    = 0xFFFF0000;
 
+// No inter-row gap at all -- row height is exactly the font's own cell
+// height, nothing added. Kept as a named constant (not just deleted
+// from the rowH formulas) so a future tweak has one obvious place to
+// change, rather than re-deriving which "+N" to resurrect.
+static const int kRowGap = 0;
+
 void OsdMenu::renderSimpleList(uint8_t* pixels, int texW, int texH, const char* title,
                                 const std::vector<std::string>& items, int selIndex,
                                 const std::string& statusLine, bool statusOk) const
 {
-	const int rowH = 8 * kFontScale + 4;
+	const int rowH = kOsdFontHeight * kFontScale + kRowGap;
 	const int titleH = rowH;
 	const int border = kFontScale;
 	int extraRows = statusLine.empty() ? 0 : 1;
@@ -609,24 +742,42 @@ void OsdMenu::renderSimpleList(uint8_t* pixels, int texW, int texH, const char* 
 	drawText(pixels, texW, texH, boxX + 2 * kFontScale, boxY + kFontScale, title, kOsdWhiteBri);
 
 	int textX = boxX + 2 * kFontScale, rowY0 = boxY + titleH;
-	size_t maxChars = (size_t)(boxW - 4 * kFontScale) / (7 * kFontScale);
+	int maxWidthPx = boxW - 4 * kFontScale;
 	for (size_t i = 0; i < items.size(); i++)
 	{
 		int rowY = rowY0 + (int)i * rowH;
 		bool sel = ((int)i == selIndex);
 		fillRect(pixels, texW, texH, boxX, rowY - 1, boxW, rowH, sel ? kOsdCyanBri : kOsdWhiteBri);
-		std::string label = items[i];
-		if (label.size() > maxChars) label = label.substr(0, maxChars);
-		drawText(pixels, texW, texH, textX, rowY, label, kOsdBlack);
+		drawText(pixels, texW, texH, textX, rowY, truncateToWidth(items[i], maxWidthPx), kOsdBlack);
 	}
 	if (extraRows)
 	{
 		int rowY = rowY0 + (int)items.size() * rowH;
 		fillRect(pixels, texW, texH, boxX, rowY - 1, boxW, rowH, kOsdWhiteBri);
-		std::string label = statusLine;
-		if (label.size() > maxChars) label = label.substr(0, maxChars);
-		drawText(pixels, texW, texH, textX, rowY, label, statusOk ? kOsdGreenBri : kOsdRedBri);
+		drawText(pixels, texW, texH, textX, rowY, truncateToWidth(statusLine, maxWidthPx), statusOk ? kOsdGreenBri : kOsdRedBri);
 	}
+}
+
+// Symbol Shift legend verified against the official "Recreated ZX
+// Spectrum Keyboard Technical Document" (QWERTY Key List, Symbol Shift
+// column) -- see OsdMenu.h. On JASE's own keyboard matrix (minzx.cpp),
+// Symbol Shift is (left or right) Alt. "GBP" spells out the pound sign
+// since it isn't in mago1's ASCII range either. mago1's "Eye Candy"
+// variant also repurposes six punctuation codepoints (^ _ { | } ~) as
+// decorative icons (hearts, a flag, ...) instead of the literal glyphs
+// -- harmless for menu labels, but actively WRONG here (a reference
+// table needs the real symbol, not a heart standing in for "_"), so
+// those six are spelled out as words instead of risking the icon.
+void OsdMenu::renderZxKeyboard(uint8_t* pixels, int texW, int texH) const
+{
+	std::vector<std::string> lines = {
+		"SYMBOL SHIFT (ALT) + KEY =",
+		"1=! 2=@ 3=# 4=$ 5=% 6=& 7=' 8=( 9=) 0=UNDERSCORE",
+		"Q=<= W=<> E=>= R=< T=> Y=[ U=] O=; P=\"",
+		"A=TILDE S=PIPE D=\\ F=LBRACE G=RBRACE H=CARET J=- K=+ L==",
+		"Z=: X=GBP C=? V=/ B=* N=, M=.",
+	};
+	renderSimpleList(pixels, texW, texH, "ZX KEYBOARD", lines, -1);
 }
 
 void OsdMenu::render(uint8_t* pixels, int texW, int texH)
@@ -669,7 +820,8 @@ void OsdMenu::render(uint8_t* pixels, int texW, int texH)
 			}
 		}
 		items.push_back("[ADD REMOTE]");
-		renderSimpleList(pixels, texW, texH, "REMOTE", items, remoteSel_,
+		const char* title = remotes_.empty() ? "REMOTE" : "REMOTE (F8=FORGET)";
+		renderSimpleList(pixels, texW, texH, title, items, remoteSel_,
 			statusFramesLeft_ > 0 ? status_ : "", statusOk_);
 		return;
 	}
@@ -684,17 +836,48 @@ void OsdMenu::render(uint8_t* pixels, int texW, int texH)
 		renderSimpleList(pixels, texW, texH, "ADD REMOTE", { line }, -1);
 		return;
 	}
+	if (mode_ == Mode::TopMenu)
+	{
+		static const char* kItems[kTopItemCount] = {
+			"STORAGE", "MACHINE", "RESET", "NETWORK", "ZX KEYBOARD", "CLOSE MENU",
+		};
+		renderSimpleList(pixels, texW, texH, "JASE MENU",
+			std::vector<std::string>(kItems, kItems + kTopItemCount), topSel_,
+			statusFramesLeft_ > 0 ? status_ : "", statusOk_);
+		return;
+	}
+	if (mode_ == Mode::StorageMenu)
+	{
+		static const char* kItems[kStorageItemCount] = {
+			"LOAD SNAPSHOT (.SNA/.Z80)",
+			"LOAD TAPE (.TAP/.TZX)",
+			"SAVE SNAPSHOT AS .SNA",
+			"SAVE SNAPSHOT AS .Z80",
+		};
+		renderSimpleList(pixels, texW, texH, "STORAGE",
+			std::vector<std::string>(kItems, kItems + kStorageItemCount), storageSel_,
+			statusFramesLeft_ > 0 ? status_ : "", statusOk_);
+		return;
+	}
+	if (mode_ == Mode::ZxKeyboard)
+	{
+		renderZxKeyboard(pixels, texW, texH);
+		return;
+	}
 
-	const int rowH = 8 * kFontScale + 4; // glyph height + a little breathing room
+	// FileBrowser or RemoteBrowser -- same Entry{name,isDir} shape, same
+	// scroll/cursor fields, laid out with the fixed-row scroller instead
+	// of renderSimpleList() (which sizes its box to fit every item, no
+	// good for a directory that might have hundreds of entries). Row
+	// spacing, the "name ... <DIR>" right-aligned marker, the separate
+	// path/breadcrumb row, and the always-on hotkey legend all match a
+	// real pico-spec device photo of its own TNFS "Open File" browser.
+	const int rowH = kOsdFontHeight * kFontScale + kRowGap;
 	const int titleH = rowH;
-	const int border = kFontScale; // thicker outline at 2x, matches the bolder look overall
-	int visibleBodyRows = (mode_ == Mode::TopMenu) ? kTopItemCount : kFileRows;
-	// Near full-width, small margins each side -- matches the real
-	// pico-spec OSD (a photo of the actual device showed its menu box
-	// spanning almost the whole screen, not a small centered dialog like
-	// this used to be).
+	const int border = kFontScale;
+	bool showStatus = statusFramesLeft_ > 0;
 	int boxW = texW - 40;
-	int boxH = titleH + visibleBodyRows * rowH + 4;
+	int boxH = titleH /*title*/ + titleH /*path*/ + kFileRows * rowH + titleH /*legend*/ + (showStatus ? rowH : 0) + 4;
 	int boxX = texW / 2 - boxW / 2, boxY = 8;
 
 	// Black border, like OSD::WindowDraw()'s vga.rect() -- an outline, not
@@ -712,51 +895,61 @@ void OsdMenu::render(uint8_t* pixels, int texW, int texH)
 	drawText(pixels, texW, texH, boxX + 2 * kFontScale, boxY + kFontScale, title, kOsdWhiteBri);
 
 	int textX = boxX + 2 * kFontScale, rowY0 = boxY + titleH;
+	int maxWidthPx = boxW - 4 * kFontScale;
 
-	if (mode_ == Mode::TopMenu)
+	// Path/breadcrumb row -- a second header line, same style as the
+	// title (continues the black bar rather than a separate box).
+	std::string path = truncateToWidth((mode_ == Mode::RemoteBrowser) ? remoteCwdPath() : cwd_, maxWidthPx);
+	fillRect(pixels, texW, texH, boxX, rowY0, boxW, titleH, kOsdBlack);
+	drawText(pixels, texW, texH, textX, rowY0 + kFontScale, path, kOsdWhiteBri);
+	rowY0 += titleH;
+
+	int visible = std::min((int)entries_.size() - fileScroll_, kFileRows);
+	for (int row = 0; row < kFileRows; row++)
 	{
-		static const char* kItems[kTopItemCount] = {
-			"LOAD SNAPSHOT (.SNA/.Z80)",
-			"LOAD TAPE (.TAP/.TZX)",
-			"SAVE SNAPSHOT AS .SNA",
-			"SAVE SNAPSHOT AS .Z80",
-			"NETWORK",
-			"CLOSE MENU",
-		};
-		for (int i = 0; i < kTopItemCount; i++)
+		int rowY = rowY0 + row * rowH;
+		if (row >= visible)
 		{
-			int rowY = rowY0 + i * rowH;
-			bool sel = (i == topSel_);
-			fillRect(pixels, texW, texH, boxX, rowY - 1, boxW, rowH, sel ? kOsdCyanBri : kOsdWhiteBri);
-			drawText(pixels, texW, texH, textX, rowY, kItems[i], kOsdBlack);
-		}
-
-		if (statusFramesLeft_ > 0)
-		{
-			int rowY = rowY0 + kTopItemCount * rowH;
 			fillRect(pixels, texW, texH, boxX, rowY - 1, boxW, rowH, kOsdWhiteBri);
-			drawText(pixels, texW, texH, textX, rowY, status_, statusOk_ ? kOsdGreenBri : kOsdRedBri);
+			continue;
 		}
-	}
-	else // FileBrowser or RemoteBrowser -- same Entry{name,isDir} shape, same scroll/cursor fields
-	{
-		int visible = std::min((int)entries_.size() - fileScroll_, kFileRows);
-		for (int row = 0; row < kFileRows; row++)
+		int idx = fileScroll_ + row;
+		const Entry& e = entries_[idx];
+		bool sel = (idx == fileSel_);
+		fillRect(pixels, texW, texH, boxX, rowY - 1, boxW, rowH, sel ? kOsdCyanBri : kOsdWhiteBri);
+
+		static const char* kDirMarker = "<DIR>";
+		std::string label = e.name;
+		if (e.isDir && e.name != "..")
 		{
-			int rowY = rowY0 + row * rowH;
-			if (row >= visible)
-			{
-				fillRect(pixels, texW, texH, boxX, rowY - 1, boxW, rowH, kOsdWhiteBri);
-				continue;
-			}
-			int idx = fileScroll_ + row;
-			const Entry& e = entries_[idx];
-			std::string label = e.isDir ? ("[" + e.name + "]") : e.name;
-			size_t maxChars = (size_t)(boxW - 4 * kFontScale) / (7 * kFontScale);
-			if (label.size() > maxChars) label = label.substr(0, maxChars);
-			bool sel = (idx == fileSel_);
-			fillRect(pixels, texW, texH, boxX, rowY - 1, boxW, rowH, sel ? kOsdCyanBri : kOsdWhiteBri);
-			drawText(pixels, texW, texH, textX, rowY, label, kOsdBlack);
+			int markerW = textWidth(kDirMarker);
+			int avail = maxWidthPx > markerW + kFontScale ? maxWidthPx - markerW - kFontScale : maxWidthPx;
+			label = truncateToWidth(label, avail);
+			int markerX = boxX + boxW - 2 * kFontScale - markerW;
+			drawText(pixels, texW, texH, markerX, rowY, kDirMarker, kOsdBlack);
 		}
+		else
+		{
+			label = truncateToWidth(label, maxWidthPx);
+		}
+		drawText(pixels, texW, texH, textX, rowY, label, kOsdBlack);
+	}
+	rowY0 += kFileRows * rowH;
+
+	// Hotkey legend -- always visible (not transient like status_), and
+	// only lists keys this build actually implements (see handleKey()):
+	// real pico-spec screens also show F7 Upload/F8 Del here, which JASE
+	// doesn't support yet, so they're left off rather than shown as dead
+	// keys.
+	fillRect(pixels, texW, texH, boxX, rowY0, boxW, titleH, kOsdBlack);
+	const char* legend = (mode_ == Mode::RemoteBrowser) ? "ENT=LOAD  F2=RELOAD  F5=SAVE A COPY"
+	                                                     : "ENT=LOAD";
+	drawText(pixels, texW, texH, textX, rowY0 + kFontScale, legend, kOsdWhiteBri);
+	rowY0 += titleH;
+
+	if (showStatus)
+	{
+		fillRect(pixels, texW, texH, boxX, rowY0 - 1, boxW, rowH, kOsdWhiteBri);
+		drawText(pixels, texW, texH, textX, rowY0, truncateToWidth(status_, maxWidthPx), statusOk_ ? kOsdGreenBri : kOsdRedBri);
 	}
 }

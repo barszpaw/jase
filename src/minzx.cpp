@@ -10,6 +10,9 @@
 #include <stdlib.h>
 #include <memory.h>
 #include <strings.h>
+#include <unistd.h>
+#include <climits>
+#include <sys/stat.h>
 
 #define TRACE  printf
 #define DEBUG  printf
@@ -385,6 +388,29 @@ void MinZX::destroy()
 	memory_.destroy();
 }
 
+std::string MinZX::resolveAssetPath(const std::string& relPath)
+{
+	if (relPath.empty() || relPath[0] == '/')
+		return relPath; // absolute, or nothing to resolve
+	struct stat st;
+	if (0 == stat(relPath.c_str(), &st))
+		return relPath; // found relative to cwd -- unchanged behavior
+
+	char exe[PATH_MAX];
+	ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+	if (n <= 0)
+		return relPath; // couldn't resolve our own path -- let the caller's error fire
+	exe[n] = '\0';
+	std::string exePath(exe);
+	size_t slash = exePath.find_last_of('/');
+	if (slash == std::string::npos)
+		return relPath;
+	std::string candidate = exePath.substr(0, slash) + "/" + relPath;
+	if (0 == stat(candidate.c_str(), &st))
+		return candidate;
+	return relPath; // not found anywhere -- caller's existing "cannot open" message fires
+}
+
 void MinZX::loadROM()
 {
 	// Each 16K file loads into one ROM bank pair: file i -> romBank(2i)/
@@ -392,7 +418,7 @@ void MinZX::loadROM()
 	// 128K is two separate 16K files, not one 32K file -- matches how
 	// fusex ships them, /usr/share/fusex/128-0.rom + 128-1.rom).
 	for (size_t i = 0; i < romPaths_.size(); i++) {
-		FILE* pf = fopen(romPaths_[i].c_str(), "rb");
+		FILE* pf = fopen(resolveAssetPath(romPaths_[i]).c_str(), "rb");
 		if (pf == NULL) {
 			ERROR("Cannot load ROM from file\n");
 			continue;

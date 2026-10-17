@@ -196,11 +196,18 @@ static void printUsage(const char* argv0)
 		"  --trace-port PORT      log every IN from this port when it changes\n"
 		"\n"
 		"Window hotkeys:\n"
-		"  F1 or F5               toggle the on-screen menu (load/save\n"
-		"                         snapshot, load tape, network -- see\n"
-		"                         Peripherals note: this is JASE's own OSD,\n"
-		"                         not a card). F1 matches pico-spec-drewpo's\n"
-		"                         own HK_MAIN_MENU; F5 is kept as an alias.\n"
+		"  F1                     toggle the on-screen menu -- Storage (load/\n"
+		"                         save snapshot, load tape), Machine (info),\n"
+		"                         Reset, Network (Gopher/TNFS), ZX Keyboard\n"
+		"                         (Symbol Shift legend). Matches pico-spec-\n"
+		"                         drewpo's own HK_MAIN_MENU. This is JASE's\n"
+		"                         own OSD, not a card -- see Peripherals.\n"
+		"  F5                     also opens the menu when closed; once open,\n"
+		"                         it's context-specific inside a remote file\n"
+		"                         browser (Save a copy locally), matching\n"
+		"                         pico-spec's own F2 Reload/F5 Save/F8 Forget\n"
+		"                         file-browser convention (also F2 Reload,\n"
+		"                         F8 Forget-connection in the Network menus).\n"
 		"  F11                    RESET (full machine reset)\n"
 		"  Alt+F10                NMI (see --multiface1 above; matches\n"
 		"                         pico-spec-drewpo's own F10/Alt+F10 split)\n"
@@ -318,7 +325,7 @@ int main(int argc, char *argv[])
 	if (autoTapePath)
 	{
 		loadTapeFile(fileMgr, autoTapePath, &minZX);
-		fileMgr.loadSNA("assets/tape_load_point.sna", &minZX);
+		fileMgr.loadSNA(MinZX::resolveAssetPath("assets/tape_load_point.sna").c_str(), &minZX);
 	}
 	else
 	{
@@ -422,12 +429,20 @@ int main(int argc, char *argv[])
 				break;
 			}
 
-			// F1 is pico-spec's own HK_MAIN_MENU binding; F5 is kept as an
-			// alias (common "quick menu" convention in other emulators) --
-			// both open the exact same menu, there's no difference in
-			// behavior between them.
-			if (SDL_KEYDOWN == event.type &&
-				(SDL_SCANCODE_F1 == event.key.keysym.scancode || SDL_SCANCODE_F5 == event.key.keysym.scancode))
+			// F1 is pico-spec's own HK_MAIN_MENU binding -- the one key
+			// that always opens/closes the menu outright.
+			if (SDL_KEYDOWN == event.type && SDL_SCANCODE_F1 == event.key.keysym.scancode)
+			{
+				osdMenu.toggle();
+				continue;
+			}
+			// F5 ALSO opens the menu when closed (common "quick menu"
+			// convention elsewhere), but once open it's a context-specific
+			// action key (pico-spec's own convention: F2 Reload/F5 Save/
+			// F8 Forget inside a file browser) -- so it must NOT be
+			// intercepted here while the menu is already open, or it could
+			// never reach osdMenu.handleKey() to do anything else.
+			if (SDL_KEYDOWN == event.type && SDL_SCANCODE_F5 == event.key.keysym.scancode && !osdMenu.isOpen())
 			{
 				osdMenu.toggle();
 				continue;
