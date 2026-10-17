@@ -58,15 +58,21 @@ single-step, speakable by actual `gdb`/VS Code or a scripted session.
 
 ## Build
 
-Plain `g++` + SDL2, no Visual Studio project needed on Linux:
+Plain `g++` + SDL2, no Visual Studio project needed on Linux. A `Makefile`
+builds every `src/*.cpp` (it picks up new files automatically, so there's
+nothing to edit here when a source file is added):
 
 ```
-g++ -std=c++17 -include cstring -I src -I include/z80cpp -I include \
-  $(pkg-config --cflags sdl2) \
-  src/main.cpp src/minzx.cpp src/filemgr.cpp src/z80cpp/z80.cpp \
-  $(pkg-config --libs sdl2) \
-  -o jase
+sudo apt install libsdl2-dev   # if not already present
+make
 ```
+
+This produces a `jase` binary in the project root. `make clean` removes
+the build's `.o` files and the binary.
 
 Needs a real 48K ROM at `zx48.rom` in the working directory (not included
 — copyrighted; not ours to distribute).
+
+The `MinZX_SDL.sln`/`.vcxproj` files are for the original Windows/Visual
+Studio project this was forked from (see top of this README) — unrelated
+to the Makefile, only relevant if you're building on Windows.

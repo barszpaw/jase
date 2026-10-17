@@ -196,9 +196,11 @@ static void printUsage(const char* argv0)
 		"  --trace-port PORT      log every IN from this port when it changes\n"
 		"\n"
 		"Window hotkeys:\n"
-		"  F5                     toggle the on-screen menu (load/save\n"
-		"                         snapshot, load tape -- see Peripherals\n"
-		"                         note: this is JASE's own OSD, not a card)\n"
+		"  F1 or F5               toggle the on-screen menu (load/save\n"
+		"                         snapshot, load tape, network -- see\n"
+		"                         Peripherals note: this is JASE's own OSD,\n"
+		"                         not a card). F1 matches pico-spec-drewpo's\n"
+		"                         own HK_MAIN_MENU; F5 is kept as an alias.\n"
 		"  F11                    RESET (full machine reset)\n"
 		"  Alt+F10                NMI (see --multiface1 above; matches\n"
 		"                         pico-spec-drewpo's own F10/Alt+F10 split)\n"
@@ -420,7 +422,12 @@ int main(int argc, char *argv[])
 				break;
 			}
 
-			if (SDL_KEYDOWN == event.type && SDL_SCANCODE_F5 == event.key.keysym.scancode)
+			// F1 is pico-spec's own HK_MAIN_MENU binding; F5 is kept as an
+			// alias (common "quick menu" convention in other emulators) --
+			// both open the exact same menu, there's no difference in
+			// behavior between them.
+			if (SDL_KEYDOWN == event.type &&
+				(SDL_SCANCODE_F1 == event.key.keysym.scancode || SDL_SCANCODE_F5 == event.key.keysym.scancode))
 			{
 				osdMenu.toggle();
 				continue;
@@ -437,6 +444,8 @@ int main(int argc, char *argv[])
 			{
 				if (SDL_KEYDOWN == event.type)
 					osdMenu.handleKey(event.key.keysym.scancode);
+				else if (SDL_TEXTINPUT == event.type)
+					osdMenu.handleTextInput(event.text.text);
 				continue;
 			}
 

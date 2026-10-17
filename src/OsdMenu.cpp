@@ -5,9 +5,12 @@
 #include <filesystem>
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <cstring>
 #include <strings.h>
+#include <fstream>
+#include <unistd.h>
 
 namespace fs = std::filesystem;
 
@@ -30,7 +33,7 @@ void OsdMenu::toggle()
 	}
 	else
 	{
-		mode_ = Mode::Closed;
+		close();
 	}
 }
 
@@ -40,6 +43,8 @@ void OsdMenu::setStatus(const std::string& s, bool ok)
 	statusOk_ = ok;
 	statusFramesLeft_ = 100; // ~2s at the ~50fps main loop cadence
 }
+
+// ---- local filesystem browser (Load Snapshot / Load Tape) -------------
 
 bool OsdMenu::matchesFilter(const std::string& name) const
 {
@@ -109,7 +114,8 @@ void OsdMenu::activateTop()
 		case 1: openBrowser(Action::LoadTape); break;
 		case 2: doSave(false); break;
 		case 3: doSave(true); break;
-		case 4: mode_ = Mode::Closed; break;
+		case 4: activateNetwork(); break;
+		case 5: close(); break;
 	}
 }
 
@@ -144,10 +150,274 @@ void OsdMenu::activateFile()
 		                            : fileMgr.loadTAP(fullPath.c_str(), minZX_);
 
 	if (ok)
-		mode_ = Mode::Closed; // load succeeded -- resume play immediately, same as a real emulator's file menu
+		close(); // load succeeded -- resume play immediately, same as a real emulator's file menu
 	else
 		setStatus(std::string("Load FAILED: ") + e.name, false);
 }
+
+// ---- NETWORK -> REMOTE (Gopher/TNFS) -----------------------------------
+
+static std::string remotesFilePath()
+{
+	const char* home = getenv("HOME");
+	return std::string(home ? home : ".") + "/.jase_remotes.tsv";
+}
+
+void OsdMenu::loadRemotes()
+{
+	remotes_.clear();
+	std::ifstream f(remotesFilePath());
+	std::string line;
+	while (std::getline(f, line))
+	{
+		std::vector<std::string> cols;
+		size_t start = 0;
+		for (size_t i = 0; i <= line.size(); i++)
+			if (i == line.size() || line[i] == '\t') { cols.push_back(line.substr(start, i - start)); start = i + 1; }
+		if (cols.size() < 4)
+			continue;
+		RemoteConfig rc;
+		rc.proto = atoi(cols[0].c_str());
+		rc.host = cols[1];
+		rc.port = (uint16_t)atoi(cols[2].c_str());
+		rc.path = cols[3];
+		rc.alias = cols.size() > 4 ? cols[4] : "";
+		remotes_.push_back(rc);
+	}
+}
+
+void OsdMenu::saveRemotes() const
+{
+	std::ofstream f(remotesFilePath(), std::ios::trunc);
+	for (const auto& rc : remotes_)
+		f << rc.proto << '\t' << rc.host << '\t' << rc.port << '\t' << rc.path << '\t' << rc.alias << '\n';
+}
+
+void OsdMenu::activateNetwork()
+{
+	// Only one row for now ("REMOTE") -- see networkMenuItemCount().
+	mode_ = Mode::NetworkMenu;
+	netSel_ = 0;
+}
+
+bool OsdMenu::connectActive(const RemoteConfig& rc)
+{
+	activeProto_ = (rc.proto == 0) ? Proto::Gopher : Proto::Tnfs;
+	return (activeProto_ == Proto::Gopher) ? gopher_.connect(rc.host, rc.port)
+	                                        : tnfs_.connect(rc.host, rc.port);
+}
+
+bool OsdMenu::remoteList(std::vector<Entry>& out)
+{
+	out.clear();
+	if (activeProto_ == Proto::Gopher)
+	{
+		bool addUp = gopher_.cwdPath() != "/";
+		std::vector<Gopher::Entry> ge;
+		if (!gopher_.list(ge)) return false;
+		if (addUp) out.push_back({ "..", true });
+		for (const auto& e : ge) out.push_back({ e.display, e.isDir });
+	}
+	else
+	{
+		bool addUp = tnfs_.cwdPath() != "/";
+		std::vector<Tnfs::Entry> te;
+		if (!tnfs_.list(te)) return false;
+		if (addUp) out.push_back({ "..", true });
+		for (const auto& e : te) out.push_back({ e.name, e.isDir });
+	}
+	return true;
+}
+
+bool OsdMenu::remoteCwd(const std::string& name)
+{
+	return (activeProto_ == Proto::Gopher) ? gopher_.cwd(name) : tnfs_.cwd(name);
+}
+
+bool OsdMenu::remoteCwdUp()
+{
+	return (activeProto_ == Proto::Gopher) ? gopher_.cwdUp() : tnfs_.cwd("..");
+}
+
+std::string OsdMenu::remoteCwdPath() const
+{
+	return (activeProto_ == Proto::Gopher) ? gopher_.cwdPath() : tnfs_.cwdPath();
+}
+
+void OsdMenu::remoteDisconnect()
+{
+	if (activeProto_ == Proto::Gopher) gopher_.disconnect(); else tnfs_.disconnect();
+}
+
+bool OsdMenu::remoteLoadFile(const std::string& name)
+{
+	// Gopher's display text is a human description, not necessarily a
+	// filename -- the real name with extension lives in the entry's
+	// selector (Gopher::downloadBasename resolves that). TNFS entries
+	// already are real filesystem names.
+	std::string realName = (activeProto_ == Proto::Gopher) ? gopher_.downloadBasename(name) : name;
+
+	bool isSna = hasExt(realName, ".sna");
+	bool isZ80 = hasExt(realName, ".z80");
+	bool isTap = hasExt(realName, ".tap");
+	bool isTzx = hasExt(realName, ".tzx");
+	if (!isSna && !isZ80 && !isTap && !isTzx)
+	{
+		setStatus(std::string("Unsupported: ") + realName, false);
+		return false;
+	}
+
+	std::string tmpPath = "/tmp/jase_netload_" + std::to_string((long)getpid()) +
+		(isSna ? ".sna" : isZ80 ? ".z80" : isTap ? ".tap" : ".tzx");
+	bool dlOk = (activeProto_ == Proto::Gopher) ? gopher_.getToFile(name, tmpPath)
+	                                             : tnfs_.getToFile(name, tmpPath);
+	if (!dlOk)
+	{
+		setStatus(std::string("Download FAILED: ") + realName, false);
+		return false;
+	}
+
+	FileMgr fileMgr;
+	bool ok = false;
+	if (isSna) ok = fileMgr.loadSNA(tmpPath.c_str(), minZX_);
+	else if (isZ80) ok = fileMgr.loadZ80(tmpPath.c_str(), minZX_);
+	else if (isTap) ok = fileMgr.loadTAP(tmpPath.c_str(), minZX_);
+	else if (isTzx) ok = fileMgr.loadTZX(tmpPath.c_str(), minZX_);
+	unlink(tmpPath.c_str()); // loaders read everything up front -- not needed after
+	if (!ok)
+		setStatus(std::string("Load FAILED: ") + realName, false);
+	return ok;
+}
+
+void OsdMenu::activateRemote()
+{
+	int n = (int)remotes_.size();
+	if (remoteSel_ == n) { beginAddRemote(); return; } // trailing "[ADD REMOTE]" row
+	if (remoteSel_ < 0 || remoteSel_ >= n) return;
+
+	const RemoteConfig rc = remotes_[remoteSel_];
+	if (!connectActive(rc))
+	{
+		setStatus(std::string("Connect FAILED: ") + rc.host, false);
+		mode_ = Mode::RemoteList;
+		return;
+	}
+	if (!rc.path.empty())
+		remoteCwd(rc.path);
+	if (!remoteList(entries_))
+	{
+		setStatus("Listing FAILED", false);
+		remoteDisconnect();
+		mode_ = Mode::RemoteList;
+		return;
+	}
+	fileSel_ = 0;
+	fileScroll_ = 0;
+	mode_ = Mode::RemoteBrowser;
+}
+
+void OsdMenu::activateRemoteFile()
+{
+	if (entries_.empty())
+		return;
+	const Entry e = entries_[fileSel_];
+
+	if (e.name == "..")
+	{
+		remoteCwdUp();
+		if (!remoteList(entries_)) setStatus("Listing FAILED", false);
+		fileSel_ = 0; fileScroll_ = 0;
+		return;
+	}
+	if (e.isDir)
+	{
+		if (!remoteCwd(e.name)) { setStatus("CWD FAILED", false); return; }
+		if (!remoteList(entries_)) setStatus("Listing FAILED", false);
+		fileSel_ = 0; fileScroll_ = 0;
+		return;
+	}
+
+	if (remoteLoadFile(e.name))
+	{
+		remoteDisconnect();
+		close(); // load succeeded -- resume play immediately
+	}
+	// on failure remoteLoadFile() already set a status message; stay put
+}
+
+void OsdMenu::beginAddRemote()
+{
+	mode_ = Mode::ProtoPicker;
+	protoSel_ = 0;
+}
+
+void OsdMenu::activateProto()
+{
+	pendingProto_ = (protoSel_ == 0) ? Proto::Gopher : Proto::Tnfs;
+	pendingHost_.clear(); pendingPort_.clear(); pendingPath_.clear(); pendingAlias_.clear();
+	startTextField(TextField::Host);
+}
+
+void OsdMenu::startTextField(TextField f)
+{
+	pendingField_ = f;
+	mode_ = Mode::TextInput;
+	switch (f)
+	{
+		case TextField::Host:
+			textLabel_ = "HOST"; textBuf_ = pendingHost_;
+			break;
+		case TextField::Port:
+			textLabel_ = "PORT";
+			textBuf_ = pendingPort_.empty() ? (pendingProto_ == Proto::Gopher ? "70" : "16384") : pendingPort_;
+			break;
+		case TextField::Path:
+			textLabel_ = "START PATH (OPTIONAL)"; textBuf_ = pendingPath_;
+			break;
+		case TextField::Alias:
+			textLabel_ = "ALIAS (OPTIONAL)"; textBuf_ = pendingAlias_;
+			break;
+	}
+}
+
+void OsdMenu::advanceTextField()
+{
+	switch (pendingField_)
+	{
+		case TextField::Host:
+			if (textBuf_.empty())
+				return; // required -- stay in this field
+			pendingHost_ = textBuf_;
+			startTextField(TextField::Port);
+			return;
+		case TextField::Port:
+			pendingPort_ = textBuf_;
+			startTextField(TextField::Path);
+			return;
+		case TextField::Path:
+			pendingPath_ = textBuf_;
+			startTextField(TextField::Alias);
+			return;
+		case TextField::Alias:
+		{
+			pendingAlias_ = textBuf_;
+			RemoteConfig rc;
+			rc.proto = (pendingProto_ == Proto::Gopher) ? 0 : 1;
+			rc.host = pendingHost_;
+			rc.port = (uint16_t)atoi(pendingPort_.c_str());
+			if (rc.port == 0) rc.port = (pendingProto_ == Proto::Gopher) ? 70 : 16384;
+			rc.path = pendingPath_;
+			rc.alias = pendingAlias_;
+			remotes_.push_back(rc);
+			saveRemotes();
+			remoteSel_ = (int)remotes_.size() - 1;
+			mode_ = Mode::RemoteList;
+			return;
+		}
+	}
+}
+
+// ---- input --------------------------------------------------------------
 
 void OsdMenu::handleKey(SDL_Scancode sc)
 {
@@ -156,10 +426,25 @@ void OsdMenu::handleKey(SDL_Scancode sc)
 
 	if (sc == SDL_SCANCODE_ESCAPE)
 	{
-		if (mode_ == Mode::FileBrowser)
-			mode_ = Mode::TopMenu;
-		else
-			mode_ = Mode::Closed;
+		switch (mode_)
+		{
+			case Mode::FileBrowser:   mode_ = Mode::TopMenu; break;
+			case Mode::NetworkMenu:   mode_ = Mode::TopMenu; break;
+			case Mode::RemoteList:    mode_ = Mode::NetworkMenu; break;
+			case Mode::ProtoPicker:   mode_ = Mode::RemoteList; break;
+			case Mode::TextInput:     mode_ = Mode::RemoteList; break; // abandons the whole add-remote flow
+			case Mode::RemoteBrowser: remoteDisconnect(); mode_ = Mode::RemoteList; break;
+			default:                  close(); break; // TopMenu
+		}
+		return;
+	}
+
+	if (mode_ == Mode::TextInput)
+	{
+		if (sc == SDL_SCANCODE_RETURN || sc == SDL_SCANCODE_KP_ENTER)
+			advanceTextField();
+		else if (sc == SDL_SCANCODE_BACKSPACE && !textBuf_.empty())
+			textBuf_.pop_back();
 		return;
 	}
 
@@ -172,7 +457,38 @@ void OsdMenu::handleKey(SDL_Scancode sc)
 		else if (sc == SDL_SCANCODE_RETURN || sc == SDL_SCANCODE_KP_ENTER)
 			activateTop();
 	}
-	else if (mode_ == Mode::FileBrowser)
+	else if (mode_ == Mode::NetworkMenu)
+	{
+		int n = networkMenuItemCount();
+		if (sc == SDL_SCANCODE_UP)
+			netSel_ = (netSel_ - 1 + n) % n;
+		else if (sc == SDL_SCANCODE_DOWN)
+			netSel_ = (netSel_ + 1) % n;
+		else if (sc == SDL_SCANCODE_RETURN || sc == SDL_SCANCODE_KP_ENTER)
+		{
+			if (netSel_ == 0) { loadRemotes(); mode_ = Mode::RemoteList; remoteSel_ = 0; }
+		}
+	}
+	else if (mode_ == Mode::RemoteList)
+	{
+		int n = (int)remotes_.size() + 1; // + "[ADD REMOTE]"
+		if (sc == SDL_SCANCODE_UP)
+			remoteSel_ = (remoteSel_ - 1 + n) % n;
+		else if (sc == SDL_SCANCODE_DOWN)
+			remoteSel_ = (remoteSel_ + 1) % n;
+		else if (sc == SDL_SCANCODE_RETURN || sc == SDL_SCANCODE_KP_ENTER)
+			activateRemote();
+	}
+	else if (mode_ == Mode::ProtoPicker)
+	{
+		if (sc == SDL_SCANCODE_UP)
+			protoSel_ = (protoSel_ - 1 + 2) % 2;
+		else if (sc == SDL_SCANCODE_DOWN)
+			protoSel_ = (protoSel_ + 1) % 2;
+		else if (sc == SDL_SCANCODE_RETURN || sc == SDL_SCANCODE_KP_ENTER)
+			activateProto();
+	}
+	else if (mode_ == Mode::FileBrowser || mode_ == Mode::RemoteBrowser)
 	{
 		if (entries_.empty())
 			return;
@@ -187,8 +503,19 @@ void OsdMenu::handleKey(SDL_Scancode sc)
 			if (fileSel_ >= fileScroll_ + kFileRows) fileScroll_ = fileSel_ - kFileRows + 1;
 		}
 		else if (sc == SDL_SCANCODE_RETURN || sc == SDL_SCANCODE_KP_ENTER)
-			activateFile();
+		{
+			if (mode_ == Mode::FileBrowser) activateFile();
+			else activateRemoteFile();
+		}
 	}
+}
+
+void OsdMenu::handleTextInput(const char* text)
+{
+	if (mode_ != Mode::TextInput || !text)
+		return;
+	if (textBuf_.size() < 120)
+		textBuf_ += text;
 }
 
 // --- drawing -----------------------------------------------------------
@@ -265,13 +592,98 @@ static const uint32_t kOsdCyanBri   = 0xFF00FFFF;
 static const uint32_t kOsdGreenBri  = 0xFF00FF00;
 static const uint32_t kOsdRedBri    = 0xFFFF0000;
 
+void OsdMenu::renderSimpleList(uint8_t* pixels, int texW, int texH, const char* title,
+                                const std::vector<std::string>& items, int selIndex,
+                                const std::string& statusLine, bool statusOk) const
+{
+	const int rowH = 8 * kFontScale + 4;
+	const int titleH = rowH;
+	const int border = kFontScale;
+	int extraRows = statusLine.empty() ? 0 : 1;
+	int boxW = texW - 40;
+	int boxH = titleH + (int)(items.size() + extraRows) * rowH + 4;
+	int boxX = texW / 2 - boxW / 2, boxY = 8;
+
+	fillRect(pixels, texW, texH, boxX - border, boxY - border, boxW + 2 * border, boxH + 2 * border, kOsdBlack);
+	fillRect(pixels, texW, texH, boxX, boxY, boxW, titleH, kOsdBlack);
+	drawText(pixels, texW, texH, boxX + 2 * kFontScale, boxY + kFontScale, title, kOsdWhiteBri);
+
+	int textX = boxX + 2 * kFontScale, rowY0 = boxY + titleH;
+	size_t maxChars = (size_t)(boxW - 4 * kFontScale) / (7 * kFontScale);
+	for (size_t i = 0; i < items.size(); i++)
+	{
+		int rowY = rowY0 + (int)i * rowH;
+		bool sel = ((int)i == selIndex);
+		fillRect(pixels, texW, texH, boxX, rowY - 1, boxW, rowH, sel ? kOsdCyanBri : kOsdWhiteBri);
+		std::string label = items[i];
+		if (label.size() > maxChars) label = label.substr(0, maxChars);
+		drawText(pixels, texW, texH, textX, rowY, label, kOsdBlack);
+	}
+	if (extraRows)
+	{
+		int rowY = rowY0 + (int)items.size() * rowH;
+		fillRect(pixels, texW, texH, boxX, rowY - 1, boxW, rowH, kOsdWhiteBri);
+		std::string label = statusLine;
+		if (label.size() > maxChars) label = label.substr(0, maxChars);
+		drawText(pixels, texW, texH, textX, rowY, label, statusOk ? kOsdGreenBri : kOsdRedBri);
+	}
+}
+
 void OsdMenu::render(uint8_t* pixels, int texW, int texH)
 {
 	if (mode_ == Mode::Closed)
 		return;
 
+	size_t bufSize = (size_t)texW * texH * 4;
+	if (!haveBackground_)
+	{
+		background_.assign(pixels, pixels + bufSize);
+		haveBackground_ = true;
+	}
+	else
+	{
+		memcpy(pixels, background_.data(), bufSize);
+	}
+
 	if (statusFramesLeft_ > 0)
 		statusFramesLeft_--;
+
+	if (mode_ == Mode::NetworkMenu)
+	{
+		renderSimpleList(pixels, texW, texH, "NETWORK", { "REMOTE" }, netSel_);
+		return;
+	}
+	if (mode_ == Mode::RemoteList)
+	{
+		std::vector<std::string> items;
+		for (const auto& rc : remotes_)
+		{
+			if (!rc.alias.empty())
+				items.push_back(rc.alias);
+			else
+			{
+				char b[128];
+				snprintf(b, sizeof(b), "%s:%u (%s)", rc.host.c_str(), (unsigned)rc.port,
+					rc.proto == 0 ? "gopher" : "tnfs");
+				items.push_back(b);
+			}
+		}
+		items.push_back("[ADD REMOTE]");
+		renderSimpleList(pixels, texW, texH, "REMOTE", items, remoteSel_,
+			statusFramesLeft_ > 0 ? status_ : "", statusOk_);
+		return;
+	}
+	if (mode_ == Mode::ProtoPicker)
+	{
+		renderSimpleList(pixels, texW, texH, "ADD REMOTE: PROTOCOL", { "GOPHER", "TNFS" }, protoSel_);
+		return;
+	}
+	if (mode_ == Mode::TextInput)
+	{
+		std::string line = textLabel_ + ": " + textBuf_ + "_";
+		renderSimpleList(pixels, texW, texH, "ADD REMOTE", { line }, -1);
+		return;
+	}
 
 	const int rowH = 8 * kFontScale + 4; // glyph height + a little breathing room
 	const int titleH = rowH;
@@ -295,6 +707,8 @@ void OsdMenu::render(uint8_t* pixels, int texW, int texH)
 	const char* title = "JASE MENU";
 	if (mode_ == Mode::FileBrowser)
 		title = (browseAction_ == Action::LoadTape) ? "LOAD TAPE" : "LOAD SNAPSHOT";
+	else if (mode_ == Mode::RemoteBrowser)
+		title = (activeProto_ == Proto::Gopher) ? "GOPHER" : "TNFS";
 	drawText(pixels, texW, texH, boxX + 2 * kFontScale, boxY + kFontScale, title, kOsdWhiteBri);
 
 	int textX = boxX + 2 * kFontScale, rowY0 = boxY + titleH;
@@ -306,6 +720,7 @@ void OsdMenu::render(uint8_t* pixels, int texW, int texH)
 			"LOAD TAPE (.TAP/.TZX)",
 			"SAVE SNAPSHOT AS .SNA",
 			"SAVE SNAPSHOT AS .Z80",
+			"NETWORK",
 			"CLOSE MENU",
 		};
 		for (int i = 0; i < kTopItemCount; i++)
@@ -323,7 +738,7 @@ void OsdMenu::render(uint8_t* pixels, int texW, int texH)
 			drawText(pixels, texW, texH, textX, rowY, status_, statusOk_ ? kOsdGreenBri : kOsdRedBri);
 		}
 	}
-	else // FileBrowser
+	else // FileBrowser or RemoteBrowser -- same Entry{name,isDir} shape, same scroll/cursor fields
 	{
 		int visible = std::min((int)entries_.size() - fileScroll_, kFileRows);
 		for (int row = 0; row < kFileRows; row++)
