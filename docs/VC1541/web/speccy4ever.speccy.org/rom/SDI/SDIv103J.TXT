@@ -1,0 +1,29 @@
+V 1.03J by Jane McKay
+
+- "read byte" and "write byte" routines from the Logitek and the port accesses to match the SDI.
+
+- "read the status channel" patched.
+
+- *CAT and *ERROR routines don't display their output on the bottom of the screen!
+
+- Intercepts 128 ROM at $3C04 and performs a USR 0
+
+- *COMMAND "string" which can be shorten to *CO "string"
+This lets you send a command directly to the drive (the string must not be larger than 255 characters).
+e.g.
+*COM "UI-"				(selects VIC-20 speed mode on a 1541 or clone drive)
+*COM "/partition"			(selects a partition on a 1581 disk)
+*COM "CD/directory/"		 	(changes directory on a SD2IEC)
+*COM "CD/directory/d64image.d64"	(mounts a D64 on the SD2IEC)
+
+- *DRIVE,drive - to select which drive is active (8-11) (NOTE: it needs the comma before the number!)
+Note that parsing is not very good, so you can't use a complicated numeric or string expression. 
+So *COM a$+STR$ x   won't work (but you can do *COM a$ by itself). 
+Similarly, *DR,x   won't work, it has to be a number, not a variable.
+
+- *C, *CA, or *CAT (typed letter-by-letter) can now be used to catalogue a disk. 
+(The old *CAT using the CAT keyword still works).
+
+- All of the commands work with either one or two letters as a shorthand (except for FORMAT and ERASE that still use the keywords).
+
+- Send the UI- command after every USR 16000 to increase ~20% with 1541 disk drive.
