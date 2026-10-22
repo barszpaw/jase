@@ -205,6 +205,16 @@ public:
 	// when bridgeFd_ < 0, same graceful-degradation convention as ZiFi.
 	bool connectBridge(const char* host, int port);
 
+	// Per-instruction IN/OUT logging to all four 8255 registers (PA/PB/
+	// PC/CONF), used throughout VC1541.md's investigation to trace real
+	// IEC bit timing instead of re-deriving it from static disassembly.
+	// Was a #ifdef SDI_IOTRACE compile-time flag (needed a separate
+	// rebuild to use); now a runtime toggle -- set from the command
+	// line (--debug-iotrace) or at runtime via the debug protocol
+	// ("SDI IOTRACE ON"/"SDI IOTRACE OFF", see debugCommand()).
+	void setIotraceEnabled(bool on) { iotraceEnabled_ = on; }
+	bool isIotraceEnabled() const { return iotraceEnabled_; }
+
 private:
 	void pageIn(MemoryMap& memory);
 	void pageOut(MemoryMap& memory);
@@ -217,6 +227,7 @@ private:
 	bool enabled_ = false;
 
 	uint16_t lastPC_ = 0; // updated every onInstructionFetch() -- for IOTRACE logging in in()/out()
+	bool iotraceEnabled_ = false; // runtime IOTRACE toggle -- see setIotraceEnabled() above
 
 	// 8255 PPI registers. PA/PB are raw latches (no IEC role). PC is where
 	// IEC lives -- portC_'s bits 0-3 are the real output latch (what we
@@ -341,6 +352,22 @@ private:
 	// following the exact same verified byte-handshake sequence
 	// (VC1541.md's sources) from the sender's side instead of the
 	// receiver's:
+	//   TalkTurnaround: one-shot "I've taken the bus" CLK grab, entered
+	//     unconditionally the instant we become WeAreListener (see
+	//     onSecondaryByte()) -- real-ROM-traced via $336F/$3142/$3145/
+	//     $3151-$3158 in VC1541.md: the Z80 waits for CLK to go
+	//     asserted (grabbed), THEN waits for that same CLK to release
+	//     again, with no DATA-based handshake in between. Exposed for
+	//     exactly one in() poll (one half-step), then unconditionally
+	//     moves on to WaitDataReady (if the bridge already has bytes
+	//     queued) or the parked Idle (if not) on the very next poll --
+	//     an earlier attempt made this permanent instead of transient,
+	//     which fixed the same hang but then broke the following
+	//     release-wait since nothing ever un-stuck it; reverted at the
+	//     time, now fixed properly as its own distinct one-shot state.
+	//   Idle: parked, nothing queued -- CLK released, no further state
+	//     changes until a fresh LOAD/CAT session restarts from
+	//     TalkTurnaround again.
 	//   WaitDataReady: release CLK ("ready to send"); wait for the Z80
 	//     (listener) to release its own DATA bit ("ready for data").
 	//   BitSetup/BitValid (x8, LSB first): assert CLK + set DATA to the
@@ -358,7 +385,7 @@ private:
 	//     EOI signalling, i.e. deliberately delaying before the FINAL
 	//     byte's WaitDataReady the way a real sender would -- this
 	//     encoder currently treats the last byte the same as any other).
-	enum class LoadEncState { Idle, WaitDataReady, BitSetup, BitValid, WaitAck };
+	enum class LoadEncState { TalkTurnaround, Idle, WaitDataReady, BitSetup, BitValid, WaitAck };
 	LoadEncState loadEncState_ = LoadEncState::Idle;
 	bool deviceClk_ = false; // our virtual-talker CLK drive (true=asserted/low, same convention as clkLine())
 	bool deviceDat_ = false; // our virtual-talker DATA drive, valid only during BitSetup/BitValid

@@ -229,6 +229,10 @@ static void printUsage(const char* argv0)
 		"                         --poke args)\n"
 		"  --out PORT=VALUE       write a port before execution starts (hex)\n"
 		"  --trace-port PORT      log every IN from this port when it changes\n"
+		"  --debug-iotrace        log every IN/OUT to SDI's 8255 (PA/PB/PC/CONF)\n"
+		"                         with the current PC, same as the old SDI_IOTRACE\n"
+		"                         compile flag but at runtime; toggle live via the\n"
+		"                         debug protocol too (\"SDI IOTRACE ON\"/\"OFF\")\n"
 		"\n"
 		"Window hotkeys:\n"
 		"  F1                     toggle the on-screen menu -- Storage (load/\n"
@@ -391,6 +395,8 @@ int main(int argc, char *argv[])
 			*colon = '\0';
 			minZX.getSDI()->connectBridge(arg, atoi(colon + 1));
 		}
+		else if (0 == strcmp(argv[i], "--debug-iotrace"))
+			minZX.getSDI()->setIotraceEnabled(true);
 	}
 
 	// FileMgr's load* functions already print exactly which path failed

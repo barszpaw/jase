@@ -101,15 +101,13 @@ bool SDI::in(uint16_t port, uint8_t& value)
 	switch ((port >> 5) & 3) {
 		case 0:
 			value = portA_;
-#ifdef SDI_IOTRACE
-			fprintf(stderr, "IOTRACE pc=%04x IN  PA -> %02x\n", lastPC_, value);
-#endif
+			if (iotraceEnabled_)
+				fprintf(stderr, "IOTRACE pc=%04x IN  PA -> %02x\n", lastPC_, value);
 			break;
 		case 1:
 			value = portB_;
-#ifdef SDI_IOTRACE
-			fprintf(stderr, "IOTRACE pc=%04x IN  PB -> %02x\n", lastPC_, value);
-#endif
+			if (iotraceEnabled_)
+				fprintf(stderr, "IOTRACE pc=%04x IN  PB -> %02x\n", lastPC_, value);
 			break;
 		case 2: {
 			// Bits 0-3: the real output latch (ATN/PC1/CLK/DAT as last
@@ -206,17 +204,15 @@ bool SDI::in(uint16_t port, uint8_t& value)
 			value = (uint8_t)((portC_ & 0x0F) | 0x30
 			                   | (clkIn ? 0x00 : 0x40)
 			                   | (datIn ? 0x00 : 0x80));
-#ifdef SDI_IOTRACE
-			fprintf(stderr, "IOTRACE pc=%04x IN  DF -> %02x  (atn=%d clkIn=%d datIn=%d role=%d)\n",
-			        lastPC_, value, atnLine() ? 1 : 0, clkIn ? 1 : 0, datIn ? 1 : 0, (int)iecRole_);
-#endif
+			if (iotraceEnabled_)
+				fprintf(stderr, "IOTRACE pc=%04x IN  DF -> %02x  (atn=%d clkIn=%d datIn=%d role=%d)\n",
+				        lastPC_, value, atnLine() ? 1 : 0, clkIn ? 1 : 0, datIn ? 1 : 0, (int)iecRole_);
 			break;
 		}
 		case 3:
 			value = control_;
-#ifdef SDI_IOTRACE
-			fprintf(stderr, "IOTRACE pc=%04x IN  CONF -> %02x\n", lastPC_, value);
-#endif
+			if (iotraceEnabled_)
+				fprintf(stderr, "IOTRACE pc=%04x IN  CONF -> %02x\n", lastPC_, value);
 			break;
 	}
 	return true;
@@ -230,15 +226,13 @@ bool SDI::out(uint16_t port, uint8_t value)
 	switch ((port >> 5) & 3) {
 		case 0:
 			portA_ = value;
-#ifdef SDI_IOTRACE
-			fprintf(stderr, "IOTRACE pc=%04x OUT PA <- %02x\n", lastPC_, value);
-#endif
+			if (iotraceEnabled_)
+				fprintf(stderr, "IOTRACE pc=%04x OUT PA <- %02x\n", lastPC_, value);
 			break;
 		case 1:
 			portB_ = value;
-#ifdef SDI_IOTRACE
-			fprintf(stderr, "IOTRACE pc=%04x OUT PB <- %02x\n", lastPC_, value);
-#endif
+			if (iotraceEnabled_)
+				fprintf(stderr, "IOTRACE pc=%04x OUT PB <- %02x\n", lastPC_, value);
 			break;
 		case 2: {
 			portC_ = value;
@@ -337,19 +331,17 @@ bool SDI::out(uint16_t port, uint8_t value)
 				awaitingInterByteRelease_ = true;
 			}
 
-#ifdef SDI_IOTRACE
-			fprintf(stderr, "IOTRACE pc=%04x OUT DF <- %02x  (atn=%d clk=%d dat=%d role=%d)\n",
-			        lastPC_, value, atn ? 1 : 0, clk ? 1 : 0, datLine() ? 1 : 0, (int)iecRole_);
-#endif
+			if (iotraceEnabled_)
+				fprintf(stderr, "IOTRACE pc=%04x OUT DF <- %02x  (atn=%d clk=%d dat=%d role=%d)\n",
+				        lastPC_, value, atn ? 1 : 0, clk ? 1 : 0, datLine() ? 1 : 0, (int)iecRole_);
 			lastAtnLine_ = atn;
 			lastClkOut_ = clk;
 			break;
 		}
 		case 3:
 			control_ = value;
-#ifdef SDI_IOTRACE
-			fprintf(stderr, "IOTRACE pc=%04x OUT CONF <- %02x\n", lastPC_, value);
-#endif
+			if (iotraceEnabled_)
+				fprintf(stderr, "IOTRACE pc=%04x OUT CONF <- %02x\n", lastPC_, value);
 			break;
 	}
 	return true;
@@ -430,33 +422,40 @@ void SDI::clockBit(bool clkRisingEdge, bool dataBit, bool fromAtnPhase)
 void SDI::onSecondaryByte(uint8_t b)
 {
 	dataBuf_.clear();
+	bool isClose = (b >= 0xE0 && b <= 0xEF);
 	if (b >= 0x60 && b <= 0x6F) {
 		secondaryCmd_ = SecondaryCmd::Open;
 		activeChannel_ = b & 0x0F;
-	} else if (b >= 0xE0 && b <= 0xEF) {
+	} else if (isClose) {
 		secondaryCmd_ = SecondaryCmd::Close;
 		activeChannel_ = b & 0x0F;
 	} else if (b >= 0xF0) {
 		secondaryCmd_ = SecondaryCmd::PlainSelect;
 		activeChannel_ = b & 0x0F;
-		if (iecRole_ == IecRole::WeAreListener) {
-			// LOAD: the device is about to send us this channel's data.
-			// Prefetch now, while still under ATN, so the bytes are
-			// ready BEFORE the Z80 starts polling for them once ATN
-			// releases -- not at session end like OPEN/CLOSE/SAVE below,
-			// see class comment for why this one has to be different.
-			loadChannel_ = activeChannel_;
-			bridgeRequestRead(loadChannel_, 254);
-			loadPos_ = 0;
-			loadBitIdx_ = 0;
-			deviceClk_ = false;
-			deviceDat_ = false;
-			loadEncState_ = pendingLoadData_.empty() ? LoadEncState::Idle
-			                                          : LoadEncState::WaitDataReady;
-		}
 	}
-	// Anything else here isn't a secondary address this decoder
-	// recognizes -- left as a no-op rather than guessed at.
+	// Live-tested finding (see VC1541.md): a TALK primary followed by a
+	// CHANNEL-15 OPEN secondary ($6F, not the $F0-$FF this was
+	// originally written for) is how the real ROM re-opens the command
+	// channel to read a response back -- iecRole_ is the only thing
+	// that actually determines who's about to drive CLK (the secondary
+	// byte's own 0x60/0xE0/0xF0 shape just says Open/Close/PlainSelect,
+	// nothing about direction), so the LOAD-encoder kickoff below has
+	// to fire for ANY non-Close secondary while we're WeAreListener, not
+	// just the 0xF0-0xFF form -- restricting it to PlainSelect only
+	// left Open+WeAreListener with no bus-grab at all, hanging forever
+	// in the real ROM's $3142/$3145 CLK-wait (confirmed live: PC stuck
+	// at $3025, return address $336F on the stack, iecRole_ correctly
+	// WeAreListener but loadEncState_ still sitting at its default Idle
+	// since nothing had ever kicked it into TalkTurnaround).
+	if (iecRole_ == IecRole::WeAreListener && !isClose) {
+		loadChannel_ = activeChannel_;
+		bridgeRequestRead(loadChannel_, 254);
+		loadPos_ = 0;
+		loadBitIdx_ = 0;
+		deviceClk_ = false;
+		deviceDat_ = false;
+		loadEncState_ = LoadEncState::TalkTurnaround; // always grab the bus first, data or not
+	}
 }
 
 // A data-phase byte -- either a filename character (while an OPEN is in
@@ -489,15 +488,29 @@ void SDI::finalizeSession()
 		secondaryCmd_ = SecondaryCmd::None;
 		activeChannel_ = -1;
 	} else if (secondaryCmd_ == SecondaryCmd::PlainSelect) {
-		// SAVE: we were the sender (WeAreTalker), so by now we already
-		// have the whole payload the Z80 wrote -- forward it. LOAD
-		// (WeAreListener) was already kicked off earlier, in
+		// LOAD (WeAreListener) was already kicked off earlier, in
 		// onSecondaryByte(), not here -- nothing to do for it at this
 		// point except leave dataBuf_/pendingLoadData_ alone for the
 		// debug protocol to inspect (the next secondary byte clears it
 		// when a new session starts).
-		if (iecRole_ == IecRole::WeAreTalker && activeChannel_ >= 0 && !dataBuf_.empty())
-			bridgeWrite(activeChannel_, dataBuf_, true);
+		//
+		// WeAreTalker + PlainSelect ($F0-$FF): real-ROM-traced (see
+		// VC1541.md's "Filename-send mechanism" section) -- the real
+		// SDI103J ROM's own *LOAD sends the filename this way, under
+		// channel 15, NOT via a textbook $60-$6F OPEN -- so treat this
+		// the same as an OPEN (filename to the bridge), not a raw SAVE
+		// write. The same ROM's *SAVE handler couldn't be confirmed to
+		// exist at all in this revision (its table entry decodes to
+		// dead/borrowed code, not a real implementation) -- so there's
+		// no confirmed real-world case this would misclassify yet. If
+		// a future ROM revision's SAVE turns out to use this same path
+		// for genuine binary payload, this will need a way to tell the
+		// two apart (e.g. a flag threaded through from whichever *
+		// command kicked the session off) -- not guessed at here.
+		if (iecRole_ == IecRole::WeAreTalker && activeChannel_ >= 0 && !dataBuf_.empty()) {
+			filenames_[activeChannel_] = dataBuf_;
+			bridgeOpen(activeChannel_, dataBuf_);
+		}
 	}
 }
 
@@ -659,23 +672,23 @@ void SDI::fetchMoreLoadData()
 void SDI::advanceLoadEncoder()
 {
 	switch (loadEncState_) {
-		case LoadEncState::Idle:
-			// Asserted, not released -- see the real protocol's own
-			// "Talk-Attention Turn Around" handshake: the moment the
-			// Z80 releases its OWN CLK (giving up being sender) and ATN
-			// releases, the NEWLY addressed talker (us, iecRole_ just
-			// became WeAreListener) must immediately grab CLK and hold
-			// it asserted -- a one-time "I've taken the bus" signal,
-			// BEFORE the Z80 ever sends a secondary/plain-select byte
-			// (which is what actually kicks off WaitDataReady below,
-			// whose own release is a PER-BYTE "ready to send", a
-			// different, later signal). Idle is exactly this
-			// "taken over, nothing queued yet" window -- found by an
-			// actual on-screen *CAT run hanging forever at exactly this
-			// real ROM wait loop (JP M on the CLK read-back), not a
-			// synthetic test; same category of gap as the earlier
-			// DEVICE NOT PRESENT fix.
+		case LoadEncState::TalkTurnaround:
+			// One-shot CLK grab -- see SDI.h's class comment. Exposed
+			// for exactly this one poll; the real ROM only needs to see
+			// CLK go asserted then released again, no DATA handshake in
+			// between, so there's nothing to wait ON here -- just move
+			// on unconditionally.
 			deviceClk_ = true;
+			deviceDat_ = false;
+			loadEncState_ = pendingLoadData_.empty() ? LoadEncState::Idle
+			                                          : LoadEncState::WaitDataReady;
+			break;
+
+		case LoadEncState::Idle:
+			// Parked -- bridge had nothing queued. CLK released; stays
+			// here until the next LOAD/CAT session restarts from
+			// TalkTurnaround (see onSecondaryByte()).
+			deviceClk_ = false;
 			deviceDat_ = false;
 			break;
 
@@ -732,6 +745,22 @@ std::string SDI::debugCommand(const std::vector<std::string>& toks)
 	static const char* kRoleNames[] = { "none", "weTalk", "weListen" };
 	static const char* kCmdNames[] = { "none", "open", "close", "plain" };
 
+	// "SDI IOTRACE ON"/"SDI IOTRACE OFF" -- runtime toggle for the
+	// per-instruction PA/PB/PC/CONF logging (see setIotraceEnabled()'s
+	// comment in SDI.h) -- same effect as the old SDI_IOTRACE compile
+	// flag, no rebuild needed. "SDI IOTRACE" alone reports the current
+	// state without changing it.
+	if (toks.size() >= 2 && toks[1] == "IOTRACE") {
+		if (toks.size() >= 3) {
+			if (toks[2] == "ON") iotraceEnabled_ = true;
+			else if (toks[2] == "OFF") iotraceEnabled_ = false;
+			else return "ERR expected ON or OFF";
+		}
+		char out[32];
+		snprintf(out, sizeof(out), "OK iotrace=%d", iotraceEnabled_ ? 1 : 0);
+		return out;
+	}
+
 	// "SDI FILES" -- channel/file state, kept separate from the main
 	// line-level status below so neither gets too cluttered to read.
 	if (toks.size() >= 2 && toks[1] == "FILES") {
@@ -761,7 +790,7 @@ std::string SDI::debugCommand(const std::vector<std::string>& toks)
 	// "SDI BRIDGE" -- TCP bridge connection + the most recent exchange +
 	// LOAD encoder state, kept separate for the same reason as FILES above.
 	if (toks.size() >= 2 && toks[1] == "BRIDGE") {
-		static const char* kEncNames[] = { "idle", "waitReady", "bitSetup", "bitValid", "waitAck" };
+		static const char* kEncNames[] = { "talkTurn", "idle", "waitReady", "bitSetup", "bitValid", "waitAck" };
 		char out[1536]; // pendingLoadData_ can be a full 254-byte chunk, worst-case all hex-escaped (4 chars/byte)
 		int n = snprintf(out, sizeof(out),
 		                  "OK connected=%d lastReply=%s pendingLoadLen=%zu pendingLoadEoi=%d "
