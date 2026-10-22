@@ -509,6 +509,7 @@ int main(int argc, char *argv[])
 	
 	while (running)
 	{
+		const Uint64 frameStart = SDL_GetPerformanceCounter();
 
 		SDL_SetRenderDrawColor(renderer, 0, 0, 0, SDL_ALPHA_OPAQUE);
 		SDL_RenderClear(renderer);
@@ -651,6 +652,26 @@ int main(int argc, char *argv[])
 		// spins the render loop as fast as the GPU allows for no reason.
 		if (osdMenu.isOpen())
 			SDL_Delay(10);
+
+		// Wall-clock fallback for when the audio device never opened at
+		// all (getQueuedAudioBytes() always returns 0 then, e.g. "ALSA:
+		// Couldn't open audio device" in a sandboxed/headless-ish
+		// environment) -- the queue-depth wait above has nothing to block
+		// on in that case, so the loop free-runs as fast as the GPU
+		// allows (observed ~16x real speed, 800+ FPS instead of ~50,
+		// which also runs every frame-counted thing in the Spectrum ROM
+		// itself that fast -- e.g. its own keyboard auto-repeat threshold
+		// gets hit from a single real keypress). Harmless when audio IS
+		// working: that path already lands close to the 20ms target, so
+		// this just clamps the rare remainder instead of actively pacing.
+		{
+			static const Uint64 freqForPacing = SDL_GetPerformanceFrequency();
+			const double frameSeconds =
+				(SDL_GetPerformanceCounter() - frameStart) / static_cast<double>(freqForPacing);
+			const double targetFrameSeconds = 1.0 / 50.0;
+			if (frameSeconds < targetFrameSeconds)
+				SDL_Delay((Uint32)((targetFrameSeconds - frameSeconds) * 1000.0));
+		}
 
 		frames++;
 		const Uint64 end = SDL_GetPerformanceCounter();
