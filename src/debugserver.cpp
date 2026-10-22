@@ -213,6 +213,34 @@ void DebugServer::handleLine(const std::string& line, MinZX& minZX)
             z80->isIFF1() ? 1 : 0, z80->isIFF2() ? 1 : 0, (int)z80->getIM());
         reply(out);
     }
+    else if (cmd == "SETREG" && toks.size() >= 3) {
+        // Direct CPU-state control (GDB-style "set $pc = 0x3e80" instead
+        // of typing through the keyboard/BASIC editor) -- the honest,
+        // supported way to e.g. jump straight to a USR address for a
+        // deterministic test, instead of hijacking a RET's return
+        // address on the stack by hand via POKE/MEM (done once, worked,
+        // but is a hack a real command should replace). AF/BC/DE/HL/
+        // AFx/BCx/DEx/HLx/IX/IY/SP/PC -- the same set REGS reports.
+        uint16_t val = (uint16_t)strtoul(toks[2].c_str(), nullptr, 16);
+        std::string reg = toks[1];
+        for (char& c : reg) c = (char)toupper((unsigned char)c);
+        bool ok = true;
+        if (reg == "AF") z80->setRegAF(val);
+        else if (reg == "BC") z80->setRegBC(val);
+        else if (reg == "DE") z80->setRegDE(val);
+        else if (reg == "HL") z80->setRegHL(val);
+        else if (reg == "AFX") z80->setRegAFx(val);
+        else if (reg == "BCX") z80->setRegBCx(val);
+        else if (reg == "DEX") z80->setRegDEx(val);
+        else if (reg == "HLX") z80->setRegHLx(val);
+        else if (reg == "IX") z80->setRegIX(val);
+        else if (reg == "IY") z80->setRegIY(val);
+        else if (reg == "SP") z80->setRegSP(val);
+        else if (reg == "PC") z80->setRegPC(val);
+        else ok = false;
+        if (ok) reply("OK");
+        else reply("ERR unknown register");
+    }
     else if (cmd == "MEM" && toks.size() >= 3) {
         uint16_t addr = (uint16_t)strtoul(toks[1].c_str(), nullptr, 16);
         long len = strtol(toks[2].c_str(), nullptr, 10);

@@ -274,20 +274,24 @@ private:
 	// fix, in both.
 	bool awaitingInterByteRelease_ = true;
 
-	// Virtual listener-ack driver for the WeAreTalker direction (OPEN
-	// filenames, SAVE payload) -- the inverse of advanceLoadEncoder()'s
-	// WaitAck/WaitDataReady states. There, WE drive CLK as the sender
-	// and wait for the Z80 (listener) to assert/release its own DATA;
-	// here, the Z80 drives CLK as the sender and WE (playing the
-	// addressed device, which has no other emulation backing it) must
-	// assert/release our own DATA, or the real SDI ROM -- which, per
-	// the same verified protocol, legitimately waits for this ack
-	// before sending the next byte -- would stall forever against an
-	// ack nothing ever sends. `listenerDat_` is only meaningful while
-	// awaitingInterByteRelease_ is true (our ack/not-ready window); in()
-	// exposes it then, datLine() (the Z80's own driven bit) otherwise --
-	// see in()'s port-C case, mirroring the LOAD path's own
-	// state-gated PC6/PC7 synthesis in reverse.
+	// Virtual listener-ack driver for both the ATN command phase AND the
+	// WeAreTalker data phase (OPEN filenames, SAVE payload) -- the
+	// inverse of advanceLoadEncoder()'s WaitAck/WaitDataReady states.
+	// There, WE drive CLK as the sender and wait for the Z80 (listener)
+	// to assert/release its own DATA; here, the Z80 drives CLK as the
+	// sender (always true under ATN; also true for WeAreTalker) and WE
+	// (playing the addressed device, which has no other emulation
+	// backing it) must assert/release our own DATA, or the real SDI ROM
+	// -- which, per the same verified protocol, legitimately waits for
+	// this ack before sending the next byte, AND for every device to
+	// respond to ATN itself within 1000us or report DEVICE NOT PRESENT
+	// -- would stall or error out against a response nothing ever
+	// gives. Defaults to true (asserted) specifically so it doubles as
+	// that very first ATN presence response for free. `listenerDat_` is
+	// only meaningful while awaitingInterByteRelease_ is true (our
+	// ack/not-ready window); in() exposes it then, datLine() (the Z80's
+	// own driven bit) otherwise -- see in()'s port-C case, mirroring the
+	// LOAD path's own state-gated PC6/PC7 synthesis in reverse.
 	bool listenerDat_ = true; // true = asserted/busy, released only once ready for the next byte's bits
 
 	// EOI approximation -- see class comment. Ticked once per

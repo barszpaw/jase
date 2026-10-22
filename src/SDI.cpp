@@ -119,7 +119,27 @@ bool SDI::in(uint16_t port, uint8_t& value)
 			// never read 6-7 back through a real IN), so this wasn't a
 			// regression in anything already confirmed working.
 			bool clkIn, datIn;
-			if (!atnLine() && iecRole_ == IecRole::WeAreListener) {
+			if (atnLine() && bridgeFd_ >= 0) {
+				// Real protocol: every device on the bus must respond to
+				// ATN by pulling DATA within 1000us ("device not present"
+				// otherwise), THEN release it ("ready for data") before
+				// the controller starts clocking the very first byte --
+				// the exact same assert-then-release-per-byte cycle
+				// listenerDat_ already implements for the WeAreTalker
+				// direction below, and listenerDat_ defaults to asserted
+				// (the presence response) for free. Reusing it here
+				// (rather than a separate hardcoded "always asserted")
+				// is what out()'s ATN branch's own edge tracking, added
+				// alongside this, keeps correctly updated -- a version of
+				// this that stayed asserted for ALL of ATN (tried first)
+				// fixed DEVICE NOT PRESENT but then hung waiting for the
+				// "ready for data" release every subsequent byte needs,
+				// caught by an actual on-screen run, not a synthetic
+				// test. No bridge: fall through to self-loopback, i.e.
+				// honestly "not present" -- nothing backs the device.
+				clkIn = clkLine();
+				datIn = listenerDat_;
+			} else if (!atnLine() && iecRole_ == IecRole::WeAreListener) {
 				// The device (our own LOAD encoder, see advanceLoadEncoder())
 				// is the sender in this role -- it drives CLK throughout,
 				// and DATA except during the Z80's own ready/ack handshake
@@ -212,7 +232,27 @@ bool SDI::out(uint16_t port, uint8_t value)
 				// being backwards -- never actually exercised against
 				// anything that varies DATA the way real hardware or
 				// this encoder does.)
-				clockBit(!clk && lastClkOut_, datLine(), true);
+				//
+				// Every addressed+unaddressed device must also respond
+				// to ATN itself (see in()'s port-C case) and release for
+				// "ready for data" before each byte, same as the
+				// WeAreTalker branch below -- same edge/listenerDat_
+				// tracking, since it's the identical per-byte handshake,
+				// just still under ATN rather than past it. Caught by an
+				// actual on-screen run: without this, in()'s presence
+				// response stayed asserted through the whole of ATN and
+				// the real ROM hung waiting for the release every byte
+				// after the first needs.
+				bool edge = !clk && lastClkOut_;
+				bool wasAwaitingRelease = awaitingInterByteRelease_;
+				bool completingByte = !wasAwaitingRelease && bitCount_ == 7;
+				clockBit(edge, datLine(), true);
+				if (edge) {
+					if (wasAwaitingRelease)
+						listenerDat_ = false; // ready for data -- this byte's bits can start
+					else if (completingByte)
+						listenerDat_ = true;  // ack -- byte received
+				}
 			} else if (iecRole_ == IecRole::WeAreTalker) {
 				// Data phase, and the last LISTEN we sent means WE keep
 				// sending -- exact same mechanism, just not gated on ATN
@@ -249,9 +289,11 @@ bool SDI::out(uint16_t port, uint8_t value)
 				// resets true since the very first byte of a fresh
 				// sequence gets the same inter-byte "ready to send" release
 				// as every byte after it (see clockBit()); listenerDat_
-				// resets to busy/not-ready, released only once that first
-				// release arrives (WeAreTalker only -- harmless to set
-				// otherwise, since in() only reads it in that role).
+				// resets to busy/not-ready here too, but it's the ATN
+				// branch above's own first edge that releases it for the
+				// post-ATN data phase's first byte -- same value, same
+				// reason, now shared by both the ATN and WeAreTalker
+				// in() reads.
 				bitCount_ = 0;
 				shiftByte_ = 0;
 				awaitingInterByteRelease_ = true;
@@ -579,7 +621,22 @@ void SDI::advanceLoadEncoder()
 {
 	switch (loadEncState_) {
 		case LoadEncState::Idle:
-			deviceClk_ = false; // released -- neutral/resting state
+			// Asserted, not released -- see the real protocol's own
+			// "Talk-Attention Turn Around" handshake: the moment the
+			// Z80 releases its OWN CLK (giving up being sender) and ATN
+			// releases, the NEWLY addressed talker (us, iecRole_ just
+			// became WeAreListener) must immediately grab CLK and hold
+			// it asserted -- a one-time "I've taken the bus" signal,
+			// BEFORE the Z80 ever sends a secondary/plain-select byte
+			// (which is what actually kicks off WaitDataReady below,
+			// whose own release is a PER-BYTE "ready to send", a
+			// different, later signal). Idle is exactly this
+			// "taken over, nothing queued yet" window -- found by an
+			// actual on-screen *CAT run hanging forever at exactly this
+			// real ROM wait loop (JP M on the CLK read-back), not a
+			// synthetic test; same category of gap as the earlier
+			// DEVICE NOT PRESENT fix.
+			deviceClk_ = true;
 			deviceDat_ = false;
 			break;
 
