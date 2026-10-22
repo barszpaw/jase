@@ -1,6 +1,7 @@
 #pragma once
 #include "Peripheral.h"
 #include <vector>
+#include <string>
 #include <cstdint>
 
 // JASE's ZiFi — a TCP client, not a serial port. The "ESP01" on the other
@@ -35,8 +36,9 @@
 //   OUT #FC3B, reg      -- select internal register (only 0xC6/0xC7 below)
 //   IN/OUT #FD3B        -- access the selected register:
 //     0xC6 (UART data): IN pulls next RX byte (0xFF if empty), OUT pushes a TX byte
-//     0xC7 (status):    IN returns bit0=RX_RECV (rx ring non-empty),
-//                        bit1=TX_BUSY (tx ring full)
+//     0xC7 (status):    IN returns bit7=RX_RECV (rx ring non-empty),
+//                        bit6=TX_BUSY (tx ring full) -- real ZX-Uno/divMMC
+//                        convention, polled via ADD A,A -> CF
 //     anything else (e.g. 0xC8/0xC9, UART2): IN returns 0xFF, OUT ignored
 class ZiFi : public Peripheral
 {
@@ -51,7 +53,16 @@ public:
 
 	// Connects (non-blocking) to the virtual-ESP01/socat endpoint. Safe to
 	// call even if host/port were never configured — just does nothing.
+	// Remembers host/port on success, for reconnect().
 	bool connectTo(const char* host, int port);
+
+	// Re-dials whatever connectTo() last succeeded with -- lets a running
+	// JASE recover from killing/restarting the bridge or mock process on
+	// the other end without restarting JASE itself. False if connectTo()
+	// was never called successfully. Also exposed as the debug protocol's
+	// "ZIFI RECONNECT" (and "ZIFI CONNECT host port" to dial a fresh
+	// target without needing --zifi at startup).
+	bool reconnect();
 
 	// Call once per emulated frame (50Hz): drains the TX ring to the
 	// socket and pulls any available bytes into the RX ring. Non-blocking
@@ -63,6 +74,8 @@ private:
 	std::vector<uint8_t> rxRing_;
 	std::vector<uint8_t> txRing_;
 	static const size_t kRingCap = 4096;
+	std::string lastHost_;
+	int lastPort_ = 0;
 
 	uint8_t unoSelectedReg_ = 0;
 };

@@ -29,6 +29,7 @@
 #include <fcntl.h>
 
 static int remoteFd = -1; // the "real" TCP connection AT+CIPSTART opened
+static bool wifiAnnounced = false; // already sent the unsolicited "WIFI GOT IP" this session?
 
 static void sendLine(int fd, const char* s)
 {
@@ -61,12 +62,21 @@ static void handleCommand(int clientFd, const std::string& line, std::string& li
 
 	printf("virtual_esp01: <- %s\n", cmd.c_str());
 
+	// Some drivers (NetManZX) send the classic modem escape "+++" stuck
+	// to the front of the next command, e.g. "+++AT" — not a real
+	// command in its own right, just answer OK like real ESP-AT does.
+	if (cmd.rfind("+++", 0) == 0) {
+		sendLine(clientFd, "\r\nOK\r\n");
+		return;
+	}
+
 	// Real ESP-AT prefixes EVERY response with a blank line — confirmed
 	// against a real Wemos D1 capture (socat -x), not guessed: a plain
 	// "AT" gets back "\r\nOK\r\n", not "OK\r\n". Missing this made every
 	// reply this daemon sent subtly wrong, even the ones that "worked".
 	if (cmd == "AT" || cmd.rfind("ATE", 0) == 0 || cmd.rfind("AT+CIPMUX=", 0) == 0
-	    || cmd.rfind("AT+CWMODE", 0) == 0) {
+	    || cmd.rfind("AT+CWMODE", 0) == 0 || cmd.rfind("AT+CWAUTOCONN=", 0) == 0
+	    || cmd == "AT+CWQAP") {
 		// ATE0/ATE1 (echo off/on) and AT+CIPMUX (single/multi-connection)
 		// are part of espat-zx's real init sequence (seen in the capture)
 		// and don't need real behaviour here — this daemon never echoes
@@ -95,9 +105,51 @@ static void handleCommand(int clientFd, const std::string& line, std::string& li
 			"+CWJAP:\"JASE-Virtual\",\"02:00:00:00:00:02\",1,-40\r\n"
 			"\r\nOK\r\n");
 	}
+	else if (cmd == "AT+CWLAP") {
+		// Fake scan result -- same fictitious AP AT+CWJAP?/AT+CIFSR already
+		// report as "joined", ecn=3 (WPA2_PSK), so network managers that
+		// list/pick an AP before joining have exactly one entry to pick.
+		sendLine(clientFd,
+			"+CWLAP:(3,\"JASE-Virtual\",-40,\"02:00:00:00:00:02\",1)\r\n"
+			"\r\nOK\r\n");
+	}
 	else if (cmd.rfind("AT+CWJAP=", 0) == 0) {
 		// A real join attempt — accept it, no real WiFi concept here.
 		sendLine(clientFd, "\r\nOK\r\n");
+	}
+	else if (cmd == "AT+RST") {
+		// Real ESP-AT gives no OK here -- the module just resets and the
+		// only deterministic response is "ready" once boot completes.
+		// Returning ERROR (this daemon's old fallback) makes a real
+		// driver that waits on AT+RST before continuing retry forever —
+		// confirmed against a real BRZX client as an infinite
+		// ATE0/AT+RST loop.
+		sendLine(clientFd, "\r\nready\r\n");
+	}
+	else if (cmd.rfind("AT+CIPCLOSE=", 0) == 0 || cmd.rfind("AT+CIPMODE=", 0) == 0
+	         || cmd.rfind("AT+CIPSERVER=", 0) == 0 || cmd.rfind("AT+CIPDINFO=", 0) == 0) {
+		// Standard driver init/cleanup boilerplate (close-all-links,
+		// passthrough-mode-off, server-off, per-link-IP-info-off) — real
+		// ESP-AT accepts all of these with OK even when there's nothing
+		// to do; this daemon used to only match bare "AT+CIPCLOSE" (no
+		// "="), falling through to ERROR for every one of these and
+		// never letting the driver's init sequence finish.
+		if (cmd.rfind("AT+CIPCLOSE=", 0) == 0 && remoteFd >= 0) { close(remoteFd); remoteFd = -1; }
+		sendLine(clientFd, "\r\nOK\r\n");
+
+		if (cmd.rfind("AT+CIPDINFO=", 0) == 0 && !wifiAnnounced) {
+			// Clients like Moon Rabbit never poll AT+CWJAP? -- they assume
+			// CWAUTOCONN already rejoined a saved AP during boot and just
+			// wait for this UNSOLICITED line real ESP-AT prints once that
+			// join completes. A module with no saved AP (fresh/never
+			// joined) never sends it -- confirmed hanging identically on
+			// real hardware, not just this mock -- so fake it here once,
+			// right after the standard init boilerplate finishes, so
+			// testing isn't stuck on the same real-hardware WiFi-
+			// provisioning prerequisite.
+			wifiAnnounced = true;
+			sendLine(clientFd, "\r\nWIFI CONNECTED\r\n\r\nWIFI GOT IP\r\n");
+		}
 	}
 	else if (cmd.rfind("AT+CIPSTART=", 0) == 0) {
 		std::string host; int port;
@@ -207,6 +259,7 @@ int main(int argc, char* argv[])
 		int clientFd = accept(listenFd, nullptr, nullptr);
 		if (clientFd < 0) continue;
 		printf("virtual_esp01: client connected\n");
+		wifiAnnounced = false; // new "boot" -- WIFI GOT IP not sent yet
 
 		std::string lineBuf;
 		for (;;) {
@@ -236,6 +289,17 @@ int main(int argc, char* argv[])
 				if (n <= 0) {
 					close(remoteFd);
 					remoteFd = -1;
+					// Real ESP-AT sends this UNSOLICITED when the remote end
+					// closes -- gopher (and plenty of other protocols) signal
+					// "response complete" purely by closing, with no length
+					// header at all, so a client has no other way to learn
+					// the transfer is done. Confirmed missing end-to-end
+					// against a real gopher server (vtrd.in:70): every byte
+					// of the response arrived via +IPD, but with no CLOSED
+					// notice Moon Rabbit waited forever for a completion
+					// signal that never came, even though it already had
+					// everything it needed.
+					sendLine(clientFd, "\r\nCLOSED\r\n");
 				} else {
 					char header[32];
 					snprintf(header, sizeof(header), "\r\n+IPD,%zd:", n);

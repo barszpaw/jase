@@ -2,6 +2,7 @@
 #include "OsdFont.h"
 #include "minzx.h"
 #include "filemgr.h"
+#include "ZiFi.h"
 #include <filesystem>
 #include <algorithm>
 #include <cstdio>
@@ -225,9 +226,17 @@ void OsdMenu::saveRemotes() const
 
 void OsdMenu::activateNetwork()
 {
-	// Only one row for now ("REMOTE") -- see networkMenuItemCount().
 	mode_ = Mode::NetworkMenu;
 	netSel_ = 0;
+}
+
+void OsdMenu::reconnectZiFi()
+{
+	ZiFi* zifi = minZX_->getZiFi();
+	if (zifi && zifi->reconnect())
+		setStatus("ZIFI: RECONNECTED", true);
+	else
+		setStatus("ZIFI: RECONNECT FAILED", false);
 }
 
 bool OsdMenu::connectActive(const RemoteConfig& rc)
@@ -560,6 +569,7 @@ void OsdMenu::handleKey(SDL_Scancode sc)
 		else if (sc == SDL_SCANCODE_RETURN || sc == SDL_SCANCODE_KP_ENTER)
 		{
 			if (netSel_ == 0) { loadRemotes(); mode_ = Mode::RemoteList; remoteSel_ = 0; }
+			else if (netSel_ == 1) reconnectZiFi();
 		}
 	}
 	else if (mode_ == Mode::RemoteList)
@@ -800,7 +810,8 @@ void OsdMenu::render(uint8_t* pixels, int texW, int texH)
 
 	if (mode_ == Mode::NetworkMenu)
 	{
-		renderSimpleList(pixels, texW, texH, "NETWORK", { "REMOTE" }, netSel_);
+		renderSimpleList(pixels, texW, texH, "NETWORK", { "REMOTE", "ZIFI RECONNECT" }, netSel_,
+			statusFramesLeft_ > 0 ? status_ : "", statusOk_);
 		return;
 	}
 	if (mode_ == Mode::RemoteList)

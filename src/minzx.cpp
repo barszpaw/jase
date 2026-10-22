@@ -6,6 +6,7 @@
 #include "ZiFi.h"
 #include "Multiface.h"
 #include "DivIde.h"
+#include "SDI.h"
 #include <SDL.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -162,6 +163,8 @@ void MinZX::init()
 	peripherals_.push_back(multiface_);
 	divide_ = new DivIde();
 	peripherals_.push_back(divide_);
+	sdi_ = new SDI();
+	peripherals_.push_back(sdi_);
 
 	reset();
 }
@@ -426,10 +429,15 @@ void MinZX::loadROM()
 	// 128K is two separate 16K files, not one 32K file -- matches how
 	// fusex ships them, /usr/share/fusex/128-0.rom + 128-1.rom).
 	for (size_t i = 0; i < romPaths_.size(); i++) {
-		FILE* pf = fopen(resolveAssetPath(romPaths_[i]).c_str(), "rb");
+		std::string resolved = resolveAssetPath(romPaths_[i]);
+		FILE* pf = fopen(resolved.c_str(), "rb");
 		if (pf == NULL) {
-			ERROR("Cannot load ROM from file\n");
-			continue;
+			// Without this ROM there is nothing to run -- silently
+			// continuing left the Z80 executing all-zero memory (an
+			// infinite NOP sled: a blank screen forever, indistinguishable
+			// from a real hang) instead of saying what's actually missing.
+			fprintf(stderr, "FATAL: cannot open ROM file: %s\n", resolved.c_str());
+			exit(1);
 		}
 		// Read into a scratch buffer first, not directly into the ROM
 		// banks: MemoryMap::Bank's two banks aren't guaranteed contiguous
@@ -558,7 +566,7 @@ void MinZX::generateScreen(uint8_t* screen)
 
 	uint32_t borderColor = zxColor(border, 0); // Timex hi-res override only; see below
 
-	uint8_t mode = (machine_ == MachineType::TimexTC2048) ? timexMode_ : 0;
+	uint8_t mode = (machine_ == MachineType::TimexTC2048 || timexVideoEnabled_) ? timexMode_ : 0;
 	bool hiRes = (mode == 6);
 
 	// Standard-mode (mode 0/1-fallback) screen source: 48K/TC2048 always
@@ -732,12 +740,64 @@ uint8_t MinZX::processInputPort(uint16_t port)
 		// returns 5 keys in bits 0-4, active low (0 = pressed).
 		const Uint8* ks = SDL_GetKeyboardState(NULL);
 
+		// --pc-keys: type the real Spectrum SYMBOL SHIFT punctuation table
+		// (same one the debug protocol's TYPE command already uses)
+		// straight from the matching PC key, instead of having to hold
+		// Symbol Shift yourself. Characters that need a shifted PC key
+		// (the US-layout !@#$...) use RIGHT shift specifically as the
+		// trigger -- LEFT shift keeps its normal job (real CAPS SHIFT,
+		// e.g. for uppercase letters), so the two never fight over the
+		// same physical key. pcClear[N] holds extra bits to clear in
+		// half-row N (0=SHIFT/Z/X/C/V .. 7=SPACE/SS/M/N/B, matching the
+		// hiport bit order below); pcSymShift forces SYMBOL SHIFT on.
+		uint8_t pcClear[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+		bool pcSymShift = false;
+		if (pcKeysEnabled_) {
+			bool rs = ks[SDL_SCANCODE_RSHIFT];
+			struct { bool held; int row; uint8_t bit; } m[] = {
+				// unshifted
+				{ (bool)ks[SDL_SCANCODE_PERIOD] && !rs,       7, 0x04 }, // M -> "."
+				{ (bool)ks[SDL_SCANCODE_COMMA] && !rs,        7, 0x08 }, // N -> ","
+				{ (bool)ks[SDL_SCANCODE_SLASH] && !rs,        0, 0x10 }, // V -> "/"
+				{ (bool)ks[SDL_SCANCODE_SEMICOLON] && !rs,    5, 0x02 }, // O -> ";"
+				{ (bool)ks[SDL_SCANCODE_APOSTROPHE] && !rs,   4, 0x08 }, // 7 -> "'"
+				{ (bool)ks[SDL_SCANCODE_MINUS] && !rs,        6, 0x08 }, // J -> "-"
+				{ (bool)ks[SDL_SCANCODE_EQUALS] && !rs,       6, 0x02 }, // L -> "="
+				{ (bool)ks[SDL_SCANCODE_LEFTBRACKET] && !rs,  5, 0x10 }, // Y -> "["
+				{ (bool)ks[SDL_SCANCODE_RIGHTBRACKET] && !rs, 5, 0x08 }, // U -> "]"
+				{ (bool)ks[SDL_SCANCODE_BACKSLASH] && !rs,    1, 0x04 }, // D -> "\"
+				// RIGHT SHIFT + key (US-layout shifted punctuation row)
+				{ rs && (bool)ks[SDL_SCANCODE_2],             3, 0x02 }, // 2 -> "@"
+				{ rs && (bool)ks[SDL_SCANCODE_4],              0, 0x04 }, // X -> "£" (PC '$' key)
+				{ rs && (bool)ks[SDL_SCANCODE_6],             6, 0x10 }, // H -> "^"
+				{ rs && (bool)ks[SDL_SCANCODE_8],              7, 0x10 }, // B -> "*"
+				{ rs && (bool)ks[SDL_SCANCODE_MINUS],          4, 0x01 }, // 0 -> "_"
+				{ rs && (bool)ks[SDL_SCANCODE_EQUALS],         6, 0x04 }, // K -> "+"
+				{ rs && (bool)ks[SDL_SCANCODE_COMMA],          2, 0x08 }, // R -> "<"
+				{ rs && (bool)ks[SDL_SCANCODE_PERIOD],         2, 0x10 }, // T -> ">"
+				{ rs && (bool)ks[SDL_SCANCODE_SLASH],          0, 0x08 }, // C -> "?"
+				{ rs && (bool)ks[SDL_SCANCODE_SEMICOLON],      0, 0x02 }, // Z -> ":"
+				{ rs && (bool)ks[SDL_SCANCODE_LEFTBRACKET],    1, 0x08 }, // F -> "{"
+				{ rs && (bool)ks[SDL_SCANCODE_RIGHTBRACKET],   1, 0x10 }, // G -> "}"
+				{ rs && (bool)ks[SDL_SCANCODE_BACKSLASH],      1, 0x02 }, // S -> "|"
+				{ rs && (bool)ks[SDL_SCANCODE_GRAVE],          1, 0x01 }, // A -> "~"
+			};
+			for (auto& e : m) {
+				if (e.held) { pcClear[e.row] |= e.bit; pcSymShift = true; }
+			}
+		}
+
 		if (!(hiport & 0x01)) { // 0xFEFE: SHIFT, Z, X, C, V
-			if (ks[SDL_SCANCODE_LSHIFT] || ks[SDL_SCANCODE_RSHIFT]) result &= ~0x01;
+			// With pc-keys on, only LEFT shift drives real CAPS SHIFT --
+			// RIGHT shift is reserved for the punctuation table above.
+			bool capsShift = pcKeysEnabled_ ? ks[SDL_SCANCODE_LSHIFT]
+			                                : (ks[SDL_SCANCODE_LSHIFT] || ks[SDL_SCANCODE_RSHIFT]);
+			if (capsShift) result &= ~0x01;
 			if (ks[SDL_SCANCODE_Z]) result &= ~0x02;
 			if (ks[SDL_SCANCODE_X]) result &= ~0x04;
 			if (ks[SDL_SCANCODE_C]) result &= ~0x08;
 			if (ks[SDL_SCANCODE_V]) result &= ~0x10;
+			result &= ~pcClear[0];
 		}
 		if (!(hiport & 0x02)) { // 0xFDFE: A, S, D, F, G
 			if (ks[SDL_SCANCODE_A]) result &= ~0x01;
@@ -745,6 +805,7 @@ uint8_t MinZX::processInputPort(uint16_t port)
 			if (ks[SDL_SCANCODE_D]) result &= ~0x04;
 			if (ks[SDL_SCANCODE_F]) result &= ~0x08;
 			if (ks[SDL_SCANCODE_G]) result &= ~0x10;
+			result &= ~pcClear[1];
 		}
 		if (!(hiport & 0x04)) { // 0xFBFE: Q, W, E, R, T
 			if (ks[SDL_SCANCODE_Q]) result &= ~0x01;
@@ -752,6 +813,7 @@ uint8_t MinZX::processInputPort(uint16_t port)
 			if (ks[SDL_SCANCODE_E]) result &= ~0x04;
 			if (ks[SDL_SCANCODE_R]) result &= ~0x08;
 			if (ks[SDL_SCANCODE_T]) result &= ~0x10;
+			result &= ~pcClear[2];
 		}
 		if (!(hiport & 0x08)) { // 0xF7FE: 1, 2, 3, 4, 5
 			if (ks[SDL_SCANCODE_1]) result &= ~0x01;
@@ -759,6 +821,7 @@ uint8_t MinZX::processInputPort(uint16_t port)
 			if (ks[SDL_SCANCODE_3]) result &= ~0x04;
 			if (ks[SDL_SCANCODE_4]) result &= ~0x08;
 			if (ks[SDL_SCANCODE_5]) result &= ~0x10;
+			result &= ~pcClear[3];
 		}
 		if (!(hiport & 0x10)) { // 0xEFFE: 0, 9, 8, 7, 6
 			if (ks[SDL_SCANCODE_0]) result &= ~0x01;
@@ -766,6 +829,7 @@ uint8_t MinZX::processInputPort(uint16_t port)
 			if (ks[SDL_SCANCODE_8]) result &= ~0x04;
 			if (ks[SDL_SCANCODE_7]) result &= ~0x08;
 			if (ks[SDL_SCANCODE_6]) result &= ~0x10;
+			result &= ~pcClear[4];
 		}
 		if (!(hiport & 0x20)) { // 0xDFFE: P, O, I, U, Y
 			if (ks[SDL_SCANCODE_P]) result &= ~0x01;
@@ -773,6 +837,7 @@ uint8_t MinZX::processInputPort(uint16_t port)
 			if (ks[SDL_SCANCODE_I]) result &= ~0x04;
 			if (ks[SDL_SCANCODE_U]) result &= ~0x08;
 			if (ks[SDL_SCANCODE_Y]) result &= ~0x10;
+			result &= ~pcClear[5];
 		}
 		if (!(hiport & 0x40)) { // 0xBFFE: ENTER, L, K, J, H
 			if (ks[SDL_SCANCODE_RETURN]) result &= ~0x01;
@@ -780,6 +845,7 @@ uint8_t MinZX::processInputPort(uint16_t port)
 			if (ks[SDL_SCANCODE_K]) result &= ~0x04;
 			if (ks[SDL_SCANCODE_J]) result &= ~0x08;
 			if (ks[SDL_SCANCODE_H]) result &= ~0x10;
+			result &= ~pcClear[6];
 		}
 		if (!(hiport & 0x80)) { // 0x7FFE: SPACE, SYM SHIFT, M, N, B
 			if (ks[SDL_SCANCODE_SPACE]) result &= ~0x01;
@@ -787,6 +853,8 @@ uint8_t MinZX::processInputPort(uint16_t port)
 			if (ks[SDL_SCANCODE_M]) result &= ~0x04;
 			if (ks[SDL_SCANCODE_N]) result &= ~0x08;
 			if (ks[SDL_SCANCODE_B]) result &= ~0x10;
+			if (pcSymShift) result &= ~0x02; // force SYMBOL SHIFT for the table above
+			result &= ~pcClear[7];
 		}
 
 		// pressKeys() override: forces specific keys down regardless of
@@ -881,10 +949,12 @@ void MinZX::processOutputPort(uint16_t port, uint8_t value)
 		case 0xFF: {
 			// Timex SCLD video mode register -- real hardware decodes this
 			// on all 8 low address bits regardless of the high byte
-			// (confirmed against spectrusty's scld.rs). Absent on real 48K
-			// hardware (no SCLD chip there), so gated on machine_ to leave
-			// other machines' behavior untouched.
-			if (machine_ != MachineType::TimexTC2048) break;
+			// (confirmed against spectrusty's scld.rs). Absent on real 48K/
+			// 128K hardware (no SCLD chip there), so gated to leave other
+			// machines' behavior untouched UNLESS timexVideoEnabled_ was
+			// explicitly requested (--timex-hires, independent of
+			// --machine -- see timexVideoEnabled_'s comment in minzx.h).
+			if (machine_ != MachineType::TimexTC2048 && !timexVideoEnabled_) break;
 			timexMode_ = value & 0x07;
 			timexInk_  = (value >> 3) & 0x07;
 			break;

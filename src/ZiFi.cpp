@@ -1,5 +1,6 @@
 #include "ZiFi.h"
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -50,8 +51,23 @@ bool ZiFi::connectTo(const char* host, int port)
 	fcntl(fd, F_SETFL, O_NONBLOCK);
 
 	sockFd_ = fd;
+	lastHost_ = host;
+	lastPort_ = port;
 	printf("ZiFi: connected to %s:%d\n", host, port);
 	return true;
+}
+
+bool ZiFi::reconnect()
+{
+	if (lastHost_.empty() || lastPort_ <= 0)
+		return false;
+	// Stale bytes from the dead connection would otherwise confuse the
+	// guest driver's own protocol framing on the new one (e.g. a half
+	// -written AT command, or leftover +IPD tail) -- start the new
+	// connection with a clean slate.
+	rxRing_.clear();
+	txRing_.clear();
+	return connectTo(lastHost_.c_str(), lastPort_);
 }
 
 bool ZiFi::in(uint16_t port, uint8_t& value)
@@ -90,8 +106,11 @@ bool ZiFi::in(uint16_t port, uint8_t& value)
 				value = rxRing_.front();
 				rxRing_.erase(rxRing_.begin());
 			}
-		} else if (unoSelectedReg_ == 0xC7) { // status: bit0 RX_RECV, bit1 TX_BUSY
-			value = (uint8_t)((rxRing_.empty() ? 0 : 1) | (txRing_.size() >= kRingCap ? 2 : 0));
+		} else if (unoSelectedReg_ == 0xC7) {
+			// Status: bit7 RX_RECV, bit6 TX_BUSY -- the real ZX-Uno/divMMC
+			// convention (divmmc_uart.asm etc. poll it via ADD A,A -> CF),
+			// not bit0/bit1. Same bug as pico-spec's own ZiFi.cpp had.
+			value = (uint8_t)((rxRing_.empty() ? 0 : 0x80) | (txRing_.size() >= kRingCap ? 0x40 : 0));
 		} else {
 			value = 0xFF; // UART2 (0xC8/0xC9) etc. — absent
 		}
@@ -136,6 +155,15 @@ std::string ZiFi::debugCommand(const std::vector<std::string>& toks)
 	if (toks.empty() || toks[0] != "ZIFI")
 		return std::string();
 
+	// "ZIFI RECONNECT" -- re-dial whatever connectTo()/--zifi last used,
+	// so a killed/restarted bridge or virtual_esp01 process can be picked
+	// back up without restarting JASE. "ZIFI CONNECT host port" dials a
+	// fresh target (also usable without --zifi at startup at all).
+	if (toks.size() >= 2 && toks[1] == "RECONNECT")
+		return reconnect() ? "OK" : "ERR no prior connectTo()";
+	if (toks.size() >= 4 && toks[1] == "CONNECT")
+		return connectTo(toks[2].c_str(), atoi(toks[3].c_str())) ? "OK" : "ERR connect failed";
+
 	char out[128];
 	snprintf(out, sizeof(out), "OK connected=%d rx=%zu tx=%zu",
 	         sockFd_ >= 0 ? 1 : 0, rxRing_.size(), txRing_.size());
@@ -160,7 +188,19 @@ void ZiFi::pump()
 	uint8_t buf[1024];
 	for (;;) {
 		ssize_t n = recv(sockFd_, buf, sizeof(buf), 0);
-		if (n <= 0)
+		if (n == 0) {
+			// Peer closed (e.g. the bridge/mock process was killed) --
+			// distinct from n<0 (EAGAIN, just no data yet on a non-
+			// blocking socket, completely normal). Without this, a dead
+			// peer left sockFd_ looking "connected" forever (debug
+			// protocol's ZIFI status never budged from connected=1),
+			// and reconnect()/connectTo() would have to discover the
+			// peer is gone the hard way instead of this being visible.
+			close(sockFd_);
+			sockFd_ = -1;
+			break;
+		}
+		if (n < 0)
 			break;
 		for (ssize_t i = 0; i < n && rxRing_.size() < kRingCap; i++)
 			rxRing_.push_back(buf[i]);

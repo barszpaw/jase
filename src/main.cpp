@@ -12,6 +12,7 @@
 #include "ZiFi.h"
 #include "Multiface.h"
 #include "DivIde.h"
+#include "SDI.h"
 #include "OsdMenu.h"
 #include <cstdlib>
 #include <cstring>
@@ -84,8 +85,10 @@ static int applyDebugArgs(int argc, char* argv[], MinZX& minZX)
 		}
 		else if (0 == strcmp(argv[i], "--dock-cartridge") && i + 1 < argc)
 		{
-			if (!minZX.loadDockCartridge(argv[++i]))
-				std::cerr << "--dock-cartridge: failed to load " << argv[i] << std::endl;
+			if (!minZX.loadDockCartridge(argv[++i])) {
+				std::cerr << "FATAL: --dock-cartridge: failed to load " << argv[i] << std::endl;
+				exit(1);
+			}
 		}
 		else if (0 == strcmp(argv[i], "--zifi") && i + 1 < argc)
 		{
@@ -131,6 +134,21 @@ static void printUsage(const char* argv0)
 		"                         0xFFFD to pick chip A/B -- see TurboSound.h).\n"
 		"                         Replaces the plain single-chip AY outright,\n"
 		"                         not an addition to it.\n"
+		"  --timex-hires          enables the Timex SCLD video mode register\n"
+		"                         (port 0xFF, modes 0-2/6) on ANY --machine,\n"
+		"                         not just tc2048 -- matches pico-spec's own\n"
+		"                         Config::timex_video, a toggle independent\n"
+		"                         of the machine model. DOCK paging (port\n"
+		"                         0xF4) stays tc2048-only; hi-res itself\n"
+		"                         only ever touches ordinary RAM banks 0/1.\n"
+		"  --pc-keys              type Spectrum punctuation directly from\n"
+		"                         the matching PC key, via SYMBOL SHIFT,\n"
+		"                         instead of having to hold Symbol Shift\n"
+		"                         yourself: , - . / ; = [ ] \\ ' unshifted;\n"
+		"                         RIGHT SHIFT + key for * + : < > ? @ ^ _\n"
+		"                         { | } ~ and $ (-> £). LEFT shift keeps\n"
+		"                         its normal job (off by default --\n"
+		"                         unmodified matrix matches real hardware).\n"
 		"\n"
 		"Media:\n"
 		"  --tape PATH            stage a .tap/.tzx; LOAD \"\" loads it normally\n"
@@ -181,6 +199,17 @@ static void printUsage(const char* argv0)
 		"  --divide-disk PATH     the \"hard disk\" backing store -- a raw\n"
 		"                         sector image or a standard .hdf (RS-IDE\n"
 		"                         signature), sniffed automatically.\n"
+		"  --sdi                  enable the SDI stand-in (ZX Spectrum <->\n"
+		"                         Commodore 1541 IEC disk interface; see\n"
+		"                         docs/VC1541/VC1541.md). ROM paging, port\n"
+		"                         I/O, and IEC ATN/TALK/LISTEN/OPEN/CLOSE\n"
+		"                         decode are done; LOAD's data phase isn't\n"
+		"                         driven back onto the bus yet.\n"
+		"  --sdi-rom PATH         the real SDI103J ROM (exactly 4096 bytes);\n"
+		"                         implies --sdi.\n"
+		"  --sdi-bridge HOST:PORT connect to tools/c64iec_fs/c64iec_fs_tcp.py\n"
+		"                         (or an equivalent companion) for OPEN/\n"
+		"                         CLOSE/SAVE; implies --sdi.\n"
 		"\n"
 		"Debugging:\n"
 		"  --debug-port PORT      listen for the line-based debug protocol:\n"
@@ -264,6 +293,14 @@ int main(int argc, char *argv[])
 		{
 			minZX.setTurboSound(true);
 		}
+		else if (0 == strcmp(argv[i], "--timex-hires"))
+		{
+			minZX.setTimexVideo(true);
+		}
+		else if (0 == strcmp(argv[i], "--pc-keys"))
+		{
+			minZX.setPcKeys(true);
+		}
 	}
 
 	minZX.init();
@@ -322,19 +359,51 @@ int main(int argc, char *argv[])
 			minZX.getDivIde()->setEnabled(true);
 		else if (0 == strcmp(argv[i], "--divide-rom") && i + 1 < argc) {
 			minZX.getDivIde()->setEnabled(true);
-			if (!minZX.getDivIde()->loadRom(argv[++i]))
-				std::cerr << "--divide-rom: failed to load" << std::endl;
+			if (!minZX.getDivIde()->loadRom(argv[++i])) {
+				std::cerr << "FATAL: --divide-rom: failed to load " << argv[i] << std::endl;
+				exit(1);
+			}
 		}
 		else if (0 == strcmp(argv[i], "--divide-disk") && i + 1 < argc) {
 			minZX.getDivIde()->setEnabled(true);
-			if (!minZX.getDivIde()->insertDisk(argv[++i]))
-				std::cerr << "--divide-disk: failed to load" << std::endl;
+			if (!minZX.getDivIde()->insertDisk(argv[++i])) {
+				std::cerr << "FATAL: --divide-disk: failed to load " << argv[i] << std::endl;
+				exit(1);
+			}
+		}
+		else if (0 == strcmp(argv[i], "--sdi"))
+			minZX.getSDI()->setEnabled(true);
+		else if (0 == strcmp(argv[i], "--sdi-rom") && i + 1 < argc) {
+			minZX.getSDI()->setEnabled(true);
+			if (!minZX.getSDI()->loadRom(argv[++i])) {
+				std::cerr << "FATAL: --sdi-rom: failed to load " << argv[i] << std::endl;
+				exit(1);
+			}
+		}
+		else if (0 == strcmp(argv[i], "--sdi-bridge") && i + 1 < argc) {
+			// HOST:PORT for tools/c64iec_fs/c64iec_fs_tcp.py (or an
+			// equivalent companion speaking the same wire protocol) --
+			// same "just a TCP byte pipe, backend is this process's own
+			// business" split as --zifi.
+			char* arg = argv[++i];
+			char* colon = strrchr(arg, ':');
+			if (!colon) { std::cerr << "--sdi-bridge expects HOST:PORT" << std::endl; continue; }
+			*colon = '\0';
+			minZX.getSDI()->connectBridge(arg, atoi(colon + 1));
 		}
 	}
 
+	// FileMgr's load* functions already print exactly which path failed
+	// (see filemgr.cpp's WARN calls) -- what was missing was main.cpp ever
+	// checking the bool they return. Silently continuing past a failed
+	// load left the machine running with whatever was already in memory
+	// (usually nothing), indistinguishable from a real hang.
 	if (autoTapePath)
 	{
-		loadTapeFile(fileMgr, autoTapePath, &minZX);
+		if (!loadTapeFile(fileMgr, autoTapePath, &minZX)) {
+			std::cerr << "FATAL: --load-tape: failed to load " << autoTapePath << std::endl;
+			exit(1);
+		}
 		fileMgr.loadSNA(MinZX::resolveAssetPath("assets/tape_load_point.sna").c_str(), &minZX);
 	}
 	else
@@ -343,24 +412,31 @@ int main(int argc, char *argv[])
 		// resume a captured "mid LD-BYTES call" snapshot with a tape
 		// staged so the fast-load hook is armed when it lands on 0x0556)
 		// — NOT an if/else chain like --load-tape's own exclusive path.
-		if (tapePath)
-			loadTapeFile(fileMgr, tapePath, &minZX);
-		if (snaPath)
-			fileMgr.loadSNA(snaPath, &minZX);
-		if (z80Path)
-			fileMgr.loadZ80(z80Path, &minZX);
+		if (tapePath && !loadTapeFile(fileMgr, tapePath, &minZX)) {
+			std::cerr << "FATAL: --tape: failed to load " << tapePath << std::endl;
+			exit(1);
+		}
+		if (snaPath && !fileMgr.loadSNA(snaPath, &minZX)) {
+			std::cerr << "FATAL: --load-sna: failed to load " << snaPath << std::endl;
+			exit(1);
+		}
+		if (z80Path && !fileMgr.loadZ80(z80Path, &minZX)) {
+			std::cerr << "FATAL: --load-z80: failed to load " << z80Path << std::endl;
+			exit(1);
+		}
 		if (!tapePath && !snaPath && !z80Path && argc > 1 && argv[1][0] != '-')
 		{
 			const char* path = argv[1];
 			size_t len = strlen(path);
 			bool isTape = len > 4 && (0 == strcasecmp(path + len - 4, ".tap") || 0 == strcasecmp(path + len - 4, ".tzx"));
 			bool isZ80 = len > 4 && 0 == strcasecmp(path + len - 4, ".z80");
-			if (isTape)
-				loadTapeFile(fileMgr, path, &minZX);
-			else if (isZ80)
-				fileMgr.loadZ80(path, &minZX);
-			else
-				fileMgr.loadSNA(path, &minZX);
+			bool ok = isTape ? loadTapeFile(fileMgr, path, &minZX)
+			        : isZ80 ? fileMgr.loadZ80(path, &minZX)
+			        : fileMgr.loadSNA(path, &minZX);
+			if (!ok) {
+				std::cerr << "FATAL: failed to load " << path << std::endl;
+				exit(1);
+			}
 		}
 	}
 

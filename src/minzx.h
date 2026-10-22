@@ -85,6 +85,30 @@ public:
 	// TurboSound.h) gets constructed as ay_. Off by default (plain AyPsg).
 	void setTurboSound(bool on) { turboSoundRequested_ = on; }
 
+	// Can be called any time (unlike setMachine()/setTurboSound(), this
+	// doesn't affect init()'s own setup) -- enables the Timex SCLD video
+	// mode register (port 0xFF, modes 0-2/6) regardless of --machine, same
+	// as pico-spec's Config::timex_video toggle. See timexVideoEnabled_'s
+	// comment for why DOCK paging (port 0xF4) isn't included.
+	void setTimexVideo(bool on) { timexVideoEnabled_ = on; }
+
+	// Opt-in "type punctuation like a PC keyboard": the live keyboard
+	// matrix scan normally only maps letters/digits/RETURN/SPACE/shifts
+	// 1:1 -- the real Spectrum's own SYMBOL SHIFT punctuation (same table
+	// printed on every real keycap, already used by the debug protocol's
+	// TYPE command) stays unmapped from a bare PC key, same as real
+	// hardware would (you'd have to hold Symbol Shift yourself). With
+	// this on, pressing the matching PC key directly produces the
+	// Spectrum's SS+letter combination instead: unshifted for
+	// , - . / ; = [ ] \ ' and RIGHT SHIFT + key for the rest
+	// (* + : < > ? @ ^ _ { | } ~ and $, which maps to £ instead of a
+	// literal dollar sign). RIGHT SHIFT is dedicated to this table so it
+	// never fights LEFT shift's normal job (real CAPS SHIFT, e.g. for
+	// uppercase letters). Off by default so the unmodified matrix
+	// behavior (some emulators' "Spectrum keyboard" mode, as opposed to
+	// this "PC keyboard" mode) is unaffected.
+	void setPcKeys(bool on) { pcKeysEnabled_ = on; }
+
 	// Opt-in: restores the old instant-delivery shortcut at PC==0x0556
 	// (checkFastLoad()) on top of the real pulse engine, same as JASE had
 	// before today's tape work. Default off, so the pure/no-shortcut
@@ -267,10 +291,23 @@ private:
 	// hardware there, matches Fuse). Modes 0/1/2/6 read from the standard
 	// $4000-$7FFF 16K (screen0 = RAM bank 0, screen1 = RAM bank 1 -- the
 	// renderer reads these two banks directly, bypassing whatever the CPU
-	// currently has paged there, same as real SCLD/ULA hardware). Modes
-	// 3/4/5/7 need a second physical bank ("bank 7") and aren't implemented;
-	// they fall back to mode 0, matching pico-spec's own "undefined ->
-	// standard" convention. Active only when machine_ == TimexTC2048.
+	// currently has paged there, same as real SCLD/ULA hardware -- on a
+	// 48K/128K machine this is just the ordinary screen memory, since
+	// hi-res is wired to specific physical RAM chips on real hardware,
+	// not bank-switched, regardless of what else the machine's own MMU
+	// is doing). Modes 3/4/5/7 need a second physical bank ("bank 7") and
+	// aren't implemented; they fall back to mode 0, matching pico-spec's
+	// own "undefined -> standard" convention.
+	//
+	// Active when machine_ == TimexTC2048 OR timexVideoEnabled_ is set --
+	// matching pico-spec's own Config::timex_video, which is a toggle
+	// independent of Config::arch (Pawel's request: this should work
+	// regardless of --machine, same as there). Port 0xF4 (DOCK paging,
+	// right below) stays TC2048-only: unlike hi-res video, DOCK paging
+	// genuinely needs the extra bank pool only TC2048's own memory map
+	// provides -- pico-spec doesn't gate that port on timex_video either.
+	bool timexVideoEnabled_ = false;
+	bool pcKeysEnabled_ = false;
 	uint8_t timexMode_ = 0;
 	uint8_t timexInk_ = 0;
 
@@ -434,10 +471,15 @@ public:
 	// this after init() constructs it, for --divide/--divide-rom/
 	// --divide-disk.
 	class DivIde* getDivIde() const { return divide_; }
+
+	// Same idea: main.cpp calls setEnabled()/loadRom() on this after
+	// init() constructs it, for --sdi/--sdi-rom.
+	class SDI* getSDI() const { return sdi_; }
 private:
 	class ZiFi* zifi_ = nullptr;
 	class Multiface* multiface_ = nullptr;
 	class DivIde* divide_ = nullptr;
+	class SDI* sdi_ = nullptr;
 };
 
 #endif // _MINZX_H_

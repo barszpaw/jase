@@ -162,7 +162,12 @@ private:
 
 	void loadRemotes();
 	void saveRemotes() const;
-	int networkMenuItemCount() const { return 1; }
+	int networkMenuItemCount() const { return 2; } // "REMOTE", "ZIFI RECONNECT"
+
+	// Re-dials ZiFi's last --zifi target -- lets killing/restarting the
+	// bridge or virtual_esp01 mock on the other end be recovered from
+	// without restarting JASE. Sets status_/statusOk_ with the result.
+	void reconnectZiFi();
 
 	// Add-Remote wizard: ProtoPicker picks pendingProto_, then TextInput
 	// walks Host -> Port -> Path -> Alias (pendingField_ tracks which),
