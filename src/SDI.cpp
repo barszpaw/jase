@@ -69,6 +69,7 @@ void SDI::pageOut(MemoryMap& memory)
 
 void SDI::onInstructionFetch(uint16_t pc, MemoryMap& memory)
 {
+	lastPC_ = pc; // for IOTRACE logging in in()/out(), regardless of enabled_/romLoaded_
 	if (!enabled_ || !romLoaded_) return;
 
 	// Initial trigger is the NARROWER $3C00-$3FFF (not the full 4K ROM
@@ -98,8 +99,18 @@ bool SDI::in(uint16_t port, uint8_t& value)
 	if ((port & 0xFF & 0x9F) != 0x9F) return false;
 
 	switch ((port >> 5) & 3) {
-		case 0: value = portA_; break;
-		case 1: value = portB_; break;
+		case 0:
+			value = portA_;
+#ifdef SDI_IOTRACE
+			fprintf(stderr, "IOTRACE pc=%04x IN  PA -> %02x\n", lastPC_, value);
+#endif
+			break;
+		case 1:
+			value = portB_;
+#ifdef SDI_IOTRACE
+			fprintf(stderr, "IOTRACE pc=%04x IN  PB -> %02x\n", lastPC_, value);
+#endif
+			break;
 		case 2: {
 			// Bits 0-3: the real output latch (ATN/PC1/CLK/DAT as last
 			// driven) -- read back as the LATCH value, matching real
@@ -195,9 +206,18 @@ bool SDI::in(uint16_t port, uint8_t& value)
 			value = (uint8_t)((portC_ & 0x0F) | 0x30
 			                   | (clkIn ? 0x00 : 0x40)
 			                   | (datIn ? 0x00 : 0x80));
+#ifdef SDI_IOTRACE
+			fprintf(stderr, "IOTRACE pc=%04x IN  DF -> %02x  (atn=%d clkIn=%d datIn=%d role=%d)\n",
+			        lastPC_, value, atnLine() ? 1 : 0, clkIn ? 1 : 0, datIn ? 1 : 0, (int)iecRole_);
+#endif
 			break;
 		}
-		case 3: value = control_; break;
+		case 3:
+			value = control_;
+#ifdef SDI_IOTRACE
+			fprintf(stderr, "IOTRACE pc=%04x IN  CONF -> %02x\n", lastPC_, value);
+#endif
+			break;
 	}
 	return true;
 }
@@ -208,8 +228,18 @@ bool SDI::out(uint16_t port, uint8_t value)
 	if ((port & 0xFF & 0x9F) != 0x9F) return false;
 
 	switch ((port >> 5) & 3) {
-		case 0: portA_ = value; break;
-		case 1: portB_ = value; break;
+		case 0:
+			portA_ = value;
+#ifdef SDI_IOTRACE
+			fprintf(stderr, "IOTRACE pc=%04x OUT PA <- %02x\n", lastPC_, value);
+#endif
+			break;
+		case 1:
+			portB_ = value;
+#ifdef SDI_IOTRACE
+			fprintf(stderr, "IOTRACE pc=%04x OUT PB <- %02x\n", lastPC_, value);
+#endif
+			break;
 		case 2: {
 			portC_ = value;
 			bool atn = atnLine();
@@ -307,11 +337,20 @@ bool SDI::out(uint16_t port, uint8_t value)
 				awaitingInterByteRelease_ = true;
 			}
 
+#ifdef SDI_IOTRACE
+			fprintf(stderr, "IOTRACE pc=%04x OUT DF <- %02x  (atn=%d clk=%d dat=%d role=%d)\n",
+			        lastPC_, value, atn ? 1 : 0, clk ? 1 : 0, datLine() ? 1 : 0, (int)iecRole_);
+#endif
 			lastAtnLine_ = atn;
 			lastClkOut_ = clk;
 			break;
 		}
-		case 3: control_ = value; break;
+		case 3:
+			control_ = value;
+#ifdef SDI_IOTRACE
+			fprintf(stderr, "IOTRACE pc=%04x OUT CONF <- %02x\n", lastPC_, value);
+#endif
+			break;
 	}
 	return true;
 }

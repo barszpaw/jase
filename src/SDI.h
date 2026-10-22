@@ -216,6 +216,8 @@ private:
 	bool active_ = false;      // currently overriding page 1 + ROMCS
 	bool enabled_ = false;
 
+	uint16_t lastPC_ = 0; // updated every onInstructionFetch() -- for IOTRACE logging in in()/out()
+
 	// 8255 PPI registers. PA/PB are raw latches (no IEC role). PC is where
 	// IEC lives -- portC_'s bits 0-3 are the real output latch (what we
 	// last drove for ATN/PC1/CLK/DAT); bits 4-7 are synthesized on read by
