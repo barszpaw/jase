@@ -37,7 +37,7 @@ public:
 	const char* name() const override { return "DIVIDE"; }
 	bool in(uint16_t port, uint8_t& value) override;
 	bool out(uint16_t port, uint8_t value) override;
-	void onInstructionFetch(uint16_t pc, MemoryMap& memory) override;
+	void onInstructionFetch(uint16_t pc, MemoryMap& memory, uint32_t tstates) override;
 	std::string debugCommand(const std::vector<std::string>& toks) override;
 
 	// --divide on the command line -- off by default, same convention as

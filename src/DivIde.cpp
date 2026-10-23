@@ -207,8 +207,9 @@ bool DivIde::out(uint16_t port, uint8_t value)
 // makes a trap address's own opcode still come from the pre-trap
 // mapping, matching pico-spec-drewpo's DivMMC::preOpcFetch()/
 // postOpcFetch() split (same facts, no code copied, GPL).
-void DivIde::onInstructionFetch(uint16_t pc, MemoryMap& memory)
+void DivIde::onInstructionFetch(uint16_t pc, MemoryMap& memory, uint32_t tstates)
 {
+	(void)tstates;
 	if (!enabled_) return;
 
 	if (trapAfter_) { trapAfter_ = false; automapActive_ = true; }

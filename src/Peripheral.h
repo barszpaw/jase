@@ -55,8 +55,14 @@ public:
 	// 128K paging already use internally, now available to any
 	// peripheral. `memory` is handed over each call rather than stored,
 	// so the device only ever needs this one type from MinZX's internals,
-	// never a standing reference to MinZX itself.
-	virtual void onInstructionFetch(uint16_t pc, MemoryMap& memory) { (void)pc; (void)memory; }
+	// never a standing reference to MinZX itself. `tstates` is MinZX's
+	// own frame-relative T-state counter (resets to 0 each frame, see
+	// MinZX::update()) — a device that needs to time something against
+	// the Z80's own clock (not wall-clock) computes its own deltas from
+	// this across calls, handling the per-frame reset itself (see
+	// IecProtocolDecoder for the pattern: treat a decrease as "new frame
+	// started", not as a negative delta).
+	virtual void onInstructionFetch(uint16_t pc, MemoryMap& memory, uint32_t tstates) { (void)pc; (void)memory; (void)tstates; }
 
 	// Called when the machine's /NMI line is pulled (see MinZX::
 	// triggerNMI()). The generic Z80 signal always fires on the CPU

@@ -100,8 +100,9 @@ void Multiface::onNMI()
 // address's opcode is fetched); the window-exit half only fires for
 // that same NMI path (autoUnpage_), never for a page-in that came from
 // a direct IN A,(0x9F) instead.
-void Multiface::onInstructionFetch(uint16_t pc, MemoryMap& memory)
+void Multiface::onInstructionFetch(uint16_t pc, MemoryMap& memory, uint32_t tstates)
 {
+	(void)tstates;
 	if (!enabled_) return;
 
 	// Port-triggered paging, deferred one step from in() -- see the

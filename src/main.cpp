@@ -205,6 +205,8 @@ static void printUsage(const char* argv0)
 		"                         IEC bus protocol yet.\n"
 		"  --sdi8255-rom PATH     the real SDI103J ROM (exactly 4096 bytes);\n"
 		"                         implies --sdi8255.\n"
+		"  --sdi8255-bridge HOST:PORT connect to tools/c64iec_fs/c64iec_fs_tcp.py\n"
+		"                         (or an equivalent companion) for OPEN/CLOSE.\n"
 		"\n"
 		"Debugging:\n"
 		"  --debug-port PORT      listen for the line-based debug protocol:\n"
@@ -374,6 +376,13 @@ int main(int argc, char *argv[])
 				std::cerr << "FATAL: --sdi8255-rom: failed to load " << argv[i] << std::endl;
 				exit(1);
 			}
+		}
+		else if (0 == strcmp(argv[i], "--sdi8255-bridge") && i + 1 < argc) {
+			char* arg = argv[++i];
+			char* colon = strrchr(arg, ':');
+			if (!colon) { std::cerr << "--sdi8255-bridge expects HOST:PORT" << std::endl; continue; }
+			*colon = '\0';
+			minZX.getSDI8255()->connectBridge(arg, atoi(colon + 1));
 		}
 	}
 

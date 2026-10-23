@@ -293,7 +293,7 @@ void MinZX::update(uint8_t* screen)
 		// falling edge (a peripheral just released pages 0/1) is caught
 		// right here and reapplied immediately -- see reapplyMachinePaging().
 		bool romcsWasUp = memory_.isRomcsAsserted();
-		for (Peripheral* p : peripherals_) p->onInstructionFetch(z80->getRegPC(), memory_);
+		for (Peripheral* p : peripherals_) p->onInstructionFetch(z80->getRegPC(), memory_, tstates);
 		if (romcsWasUp && !memory_.isRomcsAsserted())
 			reapplyMachinePaging();
 		// Check AFTER executing, not before: if we're resuming from a
@@ -375,7 +375,7 @@ void MinZX::step(int n)
 			tapeArmOnLoadEntry(z80->getRegPC());
 		}
 		bool romcsWasUp = memory_.isRomcsAsserted();
-		for (Peripheral* p : peripherals_) p->onInstructionFetch(z80->getRegPC(), memory_);
+		for (Peripheral* p : peripherals_) p->onInstructionFetch(z80->getRegPC(), memory_, tstates);
 		if (romcsWasUp && !memory_.isRomcsAsserted())
 			reapplyMachinePaging();
 		z80->execute();
