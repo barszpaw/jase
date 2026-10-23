@@ -137,11 +137,13 @@ std::string SDI_8255::debugCommand(const std::vector<std::string>& toks)
 		// so it can be polled while the emulator keeps running.
 		char out[256];
 		snprintf(out, sizeof(out),
-		         "OK atn=%d clk=%d dat=%d ctrlClk=%d ctrlDat=%d devClk=%d devDat=%d rxPhase=%d txPhase=%d role=%d",
+		         "OK atn=%d clk=%d dat=%d ctrlClk=%d ctrlDat=%d devClk=%d devDat=%d rxPhase=%d txPhase=%d role=%d "
+		         "bitCount=%d shiftByte=%02x lastByte=%02x secCmd=%d",
 		         bus_.atn() ? 1 : 0, bus_.clk() ? 1 : 0, bus_.dat() ? 1 : 0,
 		         bus_.controllerClk() ? 1 : 0, bus_.controllerDat() ? 1 : 0,
 		         bus_.deviceClk() ? 1 : 0, bus_.deviceDat() ? 1 : 0,
-		         iec_.rxPhase(), iec_.txPhase(), iec_.role());
+		         iec_.rxPhase(), iec_.txPhase(), iec_.role(),
+		         iec_.bitCount(), iec_.shiftByte(), iec_.lastByte(), iec_.secondaryCmd());
 		return out;
 	}
 

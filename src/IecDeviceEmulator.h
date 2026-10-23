@@ -52,10 +52,14 @@ public:
 	int rxPhase() const { return (int)rxPhase_; }
 	int txPhase() const { return (int)txPhase_; }
 	int role() const { return (int)role_; }
+	int bitCount() const { return bitCount_; }
+	uint8_t shiftByte() const { return shiftByte_; }
+	uint8_t lastByte() const { return lastByte_; }
+	int secondaryCmd() const { return (int)secondaryCmd_; }
 
 private:
 	enum class RxPhase {
-		Idle, WaitReadyToSend, EoiAckPulse, WaitReadyToSendNoEoi, Receiving, AckHold,
+		Idle, AtnPresenceAck, WaitReadyToSend, EoiAckPulse, WaitReadyToSendNoEoi, Receiving, AckHold,
 	};
 	enum class TxPhase {
 		Idle, ClaimBus, BitSetup, BitValid, Done,
@@ -66,6 +70,7 @@ private:
 	void advanceTime(uint32_t tstates);
 	void enterRxPhase(RxPhase p);
 	void enterTxPhase(TxPhase p);
+	void enterAtnPresenceAck(IecBus& bus);
 	void checkRxTimeouts(IecBus& bus);
 	void checkTxTimeouts(IecBus& bus);
 	void onByteReceived(uint8_t byte, bool eoi);
