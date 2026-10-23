@@ -6,6 +6,7 @@
 #include "ZiFi.h"
 #include "Multiface.h"
 #include "DivIde.h"
+#include "SDI_8255.h"
 #include <SDL.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -162,6 +163,8 @@ void MinZX::init()
 	peripherals_.push_back(multiface_);
 	divide_ = new DivIde();
 	peripherals_.push_back(divide_);
+	sdi8255_ = new SDI_8255();
+	peripherals_.push_back(sdi8255_);
 
 	reset();
 }

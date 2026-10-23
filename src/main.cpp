@@ -12,6 +12,7 @@
 #include "ZiFi.h"
 #include "Multiface.h"
 #include "DivIde.h"
+#include "SDI_8255.h"
 #include "OsdMenu.h"
 #include <cstdlib>
 #include <cstring>
@@ -198,6 +199,12 @@ static void printUsage(const char* argv0)
 		"  --divide-disk PATH     the \"hard disk\" backing store -- a raw\n"
 		"                         sector image or a standard .hdf (RS-IDE\n"
 		"                         signature), sniffed automatically.\n"
+		"  --sdi8255              enable the SDI board's 8255 PPI + ROM/ROMCS\n"
+		"                         decode layer (see docs/VC1541/VC1541.md) --\n"
+		"                         just the hardware-decode layer so far, no\n"
+		"                         IEC bus protocol yet.\n"
+		"  --sdi8255-rom PATH     the real SDI103J ROM (exactly 4096 bytes);\n"
+		"                         implies --sdi8255.\n"
 		"\n"
 		"Debugging:\n"
 		"  --debug-port PORT      listen for the line-based debug protocol:\n"
@@ -356,6 +363,15 @@ int main(int argc, char *argv[])
 			minZX.getDivIde()->setEnabled(true);
 			if (!minZX.getDivIde()->insertDisk(argv[++i])) {
 				std::cerr << "FATAL: --divide-disk: failed to load " << argv[i] << std::endl;
+				exit(1);
+			}
+		}
+		else if (0 == strcmp(argv[i], "--sdi8255"))
+			minZX.getSDI8255()->setEnabled(true);
+		else if (0 == strcmp(argv[i], "--sdi8255-rom") && i + 1 < argc) {
+			minZX.getSDI8255()->setEnabled(true);
+			if (!minZX.getSDI8255()->loadRom(argv[++i])) {
+				std::cerr << "FATAL: --sdi8255-rom: failed to load " << argv[i] << std::endl;
 				exit(1);
 			}
 		}
