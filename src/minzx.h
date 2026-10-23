@@ -472,14 +472,10 @@ public:
 	// --divide-disk.
 	class DivIde* getDivIde() const { return divide_; }
 
-	// Same idea: main.cpp calls setEnabled()/loadRom() on this after
-	// init() constructs it, for --sdi/--sdi-rom.
-	class SDI* getSDI() const { return sdi_; }
 private:
 	class ZiFi* zifi_ = nullptr;
 	class Multiface* multiface_ = nullptr;
 	class DivIde* divide_ = nullptr;
-	class SDI* sdi_ = nullptr;
 };
 
 #endif // _MINZX_H_

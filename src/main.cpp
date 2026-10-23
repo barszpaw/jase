@@ -12,7 +12,6 @@
 #include "ZiFi.h"
 #include "Multiface.h"
 #include "DivIde.h"
-#include "SDI.h"
 #include "OsdMenu.h"
 #include <cstdlib>
 #include <cstring>
@@ -199,17 +198,6 @@ static void printUsage(const char* argv0)
 		"  --divide-disk PATH     the \"hard disk\" backing store -- a raw\n"
 		"                         sector image or a standard .hdf (RS-IDE\n"
 		"                         signature), sniffed automatically.\n"
-		"  --sdi                  enable the SDI stand-in (ZX Spectrum <->\n"
-		"                         Commodore 1541 IEC disk interface; see\n"
-		"                         docs/VC1541/VC1541.md). ROM paging, port\n"
-		"                         I/O, and IEC ATN/TALK/LISTEN/OPEN/CLOSE\n"
-		"                         decode are done; LOAD's data phase isn't\n"
-		"                         driven back onto the bus yet.\n"
-		"  --sdi-rom PATH         the real SDI103J ROM (exactly 4096 bytes);\n"
-		"                         implies --sdi.\n"
-		"  --sdi-bridge HOST:PORT connect to tools/c64iec_fs/c64iec_fs_tcp.py\n"
-		"                         (or an equivalent companion) for OPEN/\n"
-		"                         CLOSE/SAVE; implies --sdi.\n"
 		"\n"
 		"Debugging:\n"
 		"  --debug-port PORT      listen for the line-based debug protocol:\n"
@@ -229,10 +217,6 @@ static void printUsage(const char* argv0)
 		"                         --poke args)\n"
 		"  --out PORT=VALUE       write a port before execution starts (hex)\n"
 		"  --trace-port PORT      log every IN from this port when it changes\n"
-		"  --debug-iotrace        log every IN/OUT to SDI's 8255 (PA/PB/PC/CONF)\n"
-		"                         with the current PC, same as the old SDI_IOTRACE\n"
-		"                         compile flag but at runtime; toggle live via the\n"
-		"                         debug protocol too (\"SDI IOTRACE ON\"/\"OFF\")\n"
 		"\n"
 		"Window hotkeys:\n"
 		"  F1                     toggle the on-screen menu -- Storage (load/\n"
@@ -375,28 +359,6 @@ int main(int argc, char *argv[])
 				exit(1);
 			}
 		}
-		else if (0 == strcmp(argv[i], "--sdi"))
-			minZX.getSDI()->setEnabled(true);
-		else if (0 == strcmp(argv[i], "--sdi-rom") && i + 1 < argc) {
-			minZX.getSDI()->setEnabled(true);
-			if (!minZX.getSDI()->loadRom(argv[++i])) {
-				std::cerr << "FATAL: --sdi-rom: failed to load " << argv[i] << std::endl;
-				exit(1);
-			}
-		}
-		else if (0 == strcmp(argv[i], "--sdi-bridge") && i + 1 < argc) {
-			// HOST:PORT for tools/c64iec_fs/c64iec_fs_tcp.py (or an
-			// equivalent companion speaking the same wire protocol) --
-			// same "just a TCP byte pipe, backend is this process's own
-			// business" split as --zifi.
-			char* arg = argv[++i];
-			char* colon = strrchr(arg, ':');
-			if (!colon) { std::cerr << "--sdi-bridge expects HOST:PORT" << std::endl; continue; }
-			*colon = '\0';
-			minZX.getSDI()->connectBridge(arg, atoi(colon + 1));
-		}
-		else if (0 == strcmp(argv[i], "--debug-iotrace"))
-			minZX.getSDI()->setIotraceEnabled(true);
 	}
 
 	// FileMgr's load* functions already print exactly which path failed
