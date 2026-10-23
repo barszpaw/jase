@@ -292,6 +292,7 @@ void MinZX::update(uint8_t* screen)
 		// the generic Peripheral hook -- see Peripheral.h. romcs's
 		// falling edge (a peripheral just released pages 0/1) is caught
 		// right here and reapplied immediately -- see reapplyMachinePaging().
+		traceInstructionIfEnabled();
 		bool romcsWasUp = memory_.isRomcsAsserted();
 		for (Peripheral* p : peripherals_) p->onInstructionFetch(z80->getRegPC(), memory_);
 		if (romcsWasUp && !memory_.isRomcsAsserted())
@@ -331,6 +332,29 @@ void MinZX::update(uint8_t* screen)
 	// underflow this unsigned counter into a huge garbage value.
 	if (!justHitBreakpoint_)
 		tstates -= cycleTstates;
+}
+
+// See MinZX.h's class comment on setInstrTraceEnabled() for why this
+// deliberately doesn't decode a mnemonic itself -- raw bytes only, offline
+// decode via tools/instrtrace_decode.py. Register snapshot is taken BEFORE
+// this instruction executes (same convention debugserver.cpp's REGS uses).
+void MinZX::traceInstructionIfEnabled()
+{
+	if (!instrTraceEnabled_) return;
+	uint16_t pc = z80->getRegPC();
+	if (pc < instrTraceLow_ || pc > instrTraceHigh_) return;
+	// Same ts= convention as SDI.cpp's IOTRACE (seconds.microseconds since
+	// SDL init) -- lets a window around one *command be cut out of a long
+	// trace by timestamp instead of hunting for a line number, and lets
+	// the two trace streams be correlated against each other directly.
+	double ts = (double)SDL_GetPerformanceCounter() / (double)SDL_GetPerformanceFrequency();
+	fprintf(stderr,
+	        "INSTRTRACE ts=%.6f pc=%04x bytes=%02x%02x%02x%02x af=%04x bc=%04x de=%04x hl=%04x "
+	        "ix=%04x iy=%04x sp=%04x afx=%04x bcx=%04x dex=%04x hlx=%04x\n",
+	        ts, pc, memory_.peek8(pc), memory_.peek8(pc + 1), memory_.peek8(pc + 2), memory_.peek8(pc + 3),
+	        z80->getRegAF(), z80->getRegBC(), z80->getRegDE(), z80->getRegHL(),
+	        z80->getRegIX(), z80->getRegIY(), z80->getRegSP(),
+	        z80->getRegAFx(), z80->getRegBCx(), z80->getRegDEx(), z80->getRegHLx());
 }
 
 bool MinZX::isBreakpoint(uint16_t pc) const
@@ -374,6 +398,7 @@ void MinZX::step(int n)
 		} else {
 			tapeArmOnLoadEntry(z80->getRegPC());
 		}
+		traceInstructionIfEnabled();
 		bool romcsWasUp = memory_.isRomcsAsserted();
 		for (Peripheral* p : peripherals_) p->onInstructionFetch(z80->getRegPC(), memory_);
 		if (romcsWasUp && !memory_.isRomcsAsserted())

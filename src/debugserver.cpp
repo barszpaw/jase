@@ -277,6 +277,26 @@ void DebugServer::handleLine(const std::string& line, MinZX& minZX)
         minZX.outPort(addr, val);
         reply("OK");
     }
+    else if (cmd == "INSTRTRACE") {
+        // See MinZX.h's setInstrTraceEnabled() comment. Optional third
+        // token is a hex "LOW-HIGH" range (e.g. "INSTRTRACE ON 3000-3fff");
+        // bare "INSTRTRACE" just reports current state without changing it.
+        if (toks.size() >= 2) {
+            if (toks[1] == "ON") minZX.setInstrTraceEnabled(true);
+            else if (toks[1] == "OFF") minZX.setInstrTraceEnabled(false);
+            else { reply("ERR expected ON or OFF"); return; }
+            if (toks.size() >= 3) {
+                size_t dash = toks[2].find('-');
+                if (dash != std::string::npos) {
+                    uint16_t lo = (uint16_t)strtoul(toks[2].substr(0, dash).c_str(), nullptr, 16);
+                    uint16_t hi = (uint16_t)strtoul(toks[2].substr(dash + 1).c_str(), nullptr, 16);
+                    minZX.setInstrTraceRange(lo, hi);
+                }
+            }
+        }
+        snprintf(out, sizeof(out), "OK instrtrace=%d", minZX.isInstrTraceEnabled() ? 1 : 0);
+        reply(out);
+    }
     else if (cmd == "STATE") {
         char tapeInfo[160];
         snprintf(tapeInfo, sizeof(tapeInfo), " tapepos=%zu/%zu tapephase=%d tapebyte=%zu tapepilot=%u",

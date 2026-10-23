@@ -17,6 +17,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <strings.h>
+#include <cctype>
 
 bool isLittleEndian()
 {
@@ -233,6 +234,12 @@ static void printUsage(const char* argv0)
 		"                         with the current PC, same as the old SDI_IOTRACE\n"
 		"                         compile flag but at runtime; toggle live via the\n"
 		"                         debug protocol too (\"SDI IOTRACE ON\"/\"OFF\")\n"
+		"  --debug-instrtrace [LOW-HIGH]\n"
+		"                         log every instruction (raw bytes + registers,\n"
+		"                         not decoded -- see tools/instrtrace_decode.py)\n"
+		"                         while PC is in [LOW,HIGH] hex, default SDI's ROM\n"
+		"                         window ($3000-$3FFF); toggle live via \"INSTRTRACE\n"
+		"                         ON\"/\"OFF\" over the debug protocol\n"
 		"\n"
 		"Window hotkeys:\n"
 		"  F1                     toggle the on-screen menu -- Storage (load/\n"
@@ -397,6 +404,29 @@ int main(int argc, char *argv[])
 		}
 		else if (0 == strcmp(argv[i], "--debug-iotrace"))
 			minZX.getSDI()->setIotraceEnabled(true);
+		else if (0 == strcmp(argv[i], "--debug-instrtrace")) {
+			minZX.setInstrTraceEnabled(true);
+			// Optional "LOW-HIGH" hex range right after the flag (e.g.
+			// "3000-3fff"); without it, defaults to SDI's own ROM window
+			// (see MinZX.h). Only consume the next arg if it actually
+			// looks like a range, so a bare --debug-instrtrace followed
+			// by some other flag doesn't accidentally eat it.
+			// A real range looks like "3000-3fff": starts with a hex
+			// digit, not "--" (every other flag's own leading dashes
+			// otherwise false-positive as a "range" argument here --
+			// found live when --debug-iotrace right after this flag got
+			// misparsed as a 0000-0000 range instead of being treated as
+			// the next, separate flag).
+			if (i + 1 < argc && isxdigit((unsigned char)argv[i + 1][0])) {
+				char* dash = strchr(argv[i + 1], '-');
+				if (dash) {
+					uint16_t lo = (uint16_t)strtoul(argv[i + 1], nullptr, 16);
+					uint16_t hi = (uint16_t)strtoul(dash + 1, nullptr, 16);
+					minZX.setInstrTraceRange(lo, hi);
+					++i;
+				}
+			}
+		}
 	}
 
 	// FileMgr's load* functions already print exactly which path failed

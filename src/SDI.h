@@ -85,12 +85,16 @@
 // legible enough on its own:
 //   PC0 (0x01) -> U1A -> ATN   (output, driven by us -- we're always the
 //                               IEC controller, like a real C64 would be)
-//   PC1 (0x02)    separate signal, not part of the IEC bus at all (not
-//                  yet understood -- possibly EPROM-related, unused here)
+//   PC1 (0x02)    NOT part of the IEC bus -- drives A12 on the 2764 EPROM,
+//                  paging between its two 4K halves. Confirmed irrelevant
+//                  to IEC emulation: the SDI manual documents the second
+//                  4K half as free space reserved for the user's own code,
+//                  not alternate firmware -- our 4K ROM dump is the whole
+//                  active program, nothing is paged out from under it.
 //   PC2 (0x04) -> U1B -> CLK   (output)
 //   PC3 (0x08) -> U1C -> DAT   (output)
-//   PC4 (0x10)    unused for IEC
-//   PC5 (0x20)    unused for IEC
+//   PC4 (0x10)    pulled up 1K to 5V, unused for IEC
+//   PC5 (0x20)    pulled up 1K to 5V, unused for IEC
 //   PC6 (0x40) <- U1B's own output net (CLK), pulled up 1K to 5V -- reads
 //                  the ACTUAL combined bus state, not just what we drove
 //   PC7 (0x80) <- U1C's own output net (DAT), same idea
@@ -306,6 +310,27 @@ private:
 	// own driven bit) otherwise -- see in()'s port-C case, mirroring the
 	// LOAD path's own state-gated PC6/PC7 synthesis in reverse.
 	bool listenerDat_ = true; // true = asserted/busy, released only once ready for the next byte's bits
+
+	// Auto-release countdown for listenerDat_ -- see exposedListenerDat()
+	// below. Live-traced finding (VC1541.md): the real ROM's own "wait
+	// for ready"/"wait for ack" checks ($30f7 before a byte, $312f after
+	// one) are PURE READ loops (IN/.../JP, no OUT in between) -- nothing
+	// we ever WRITE can trigger an edge-reactive release while the ROM
+	// is sitting in one of those, so listenerDat_ needs to transition on
+	// its own after a short, fixed number of polls instead.
+	//
+	// Must survive at least the 2 immediately-adjacent polls $30d4's own
+	// body always does right after asserting this ($30d8 then $30de,
+	// re-checking "is it still asserted" with no real wait in between) --
+	// a first attempt at exactly 2 exhausted on that very 2nd poll,
+	// returning false right as $30de's own check ran, which the real ROM
+	// reads as "device not present" and reports as such. 8 comfortably
+	// clears that pair while still resolving quickly (a handful of tight
+	// loop iterations, not wall-clock time) once the ROM moves on to the
+	// genuine $30f7 busy-wait that needs the eventual release.
+	static const int kListenerDatReadyPolls = 8;
+	int listenerDatCountdown_ = kListenerDatReadyPolls;
+	bool exposedListenerDat(); // ticks the countdown above, returns the (possibly just-released) value
 
 	// EOI approximation -- see class comment. Ticked once per
 	// onInstructionFetch() while waiting for the next bit (bitCount_==0

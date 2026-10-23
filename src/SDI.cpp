@@ -8,6 +8,18 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <poll.h>
+#include <SDL.h>
+
+// Microsecond-resolution timestamp (seconds.microseconds since SDL init) for
+// IOTRACE/INSTRTRACE lines -- added so a long-running trace can be cut down
+// to just "the window around this *command" by timestamp instead of hunting
+// for the right line number by eye (IOTRACE's own line count alone grows
+// into the millions within seconds whenever the real ROM is spinning in a
+// tight wait loop, which is exactly when you need to find a precise window).
+static double traceTimestamp()
+{
+	return (double)SDL_GetPerformanceCounter() / (double)SDL_GetPerformanceFrequency();
+}
 
 SDI::SDI()
 {
@@ -102,12 +114,12 @@ bool SDI::in(uint16_t port, uint8_t& value)
 		case 0:
 			value = portA_;
 			if (iotraceEnabled_)
-				fprintf(stderr, "IOTRACE pc=%04x IN  PA -> %02x\n", lastPC_, value);
+				fprintf(stderr, "IOTRACE ts=%.6f pc=%04x IN  PA -> %02x\n", traceTimestamp(), lastPC_, value);
 			break;
 		case 1:
 			value = portB_;
 			if (iotraceEnabled_)
-				fprintf(stderr, "IOTRACE pc=%04x IN  PB -> %02x\n", lastPC_, value);
+				fprintf(stderr, "IOTRACE ts=%.6f pc=%04x IN  PB -> %02x\n", traceTimestamp(), lastPC_, value);
 			break;
 		case 2: {
 			// Bits 0-3: the real output latch (ATN/PC1/CLK/DAT as last
@@ -136,18 +148,24 @@ bool SDI::in(uint16_t port, uint8_t& value)
 				// the exact same assert-then-release-per-byte cycle
 				// listenerDat_ already implements for the WeAreTalker
 				// direction below, and listenerDat_ defaults to asserted
-				// (the presence response) for free. Reusing it here
-				// (rather than a separate hardcoded "always asserted")
-				// is what out()'s ATN branch's own edge tracking, added
-				// alongside this, keeps correctly updated -- a version of
-				// this that stayed asserted for ALL of ATN (tried first)
-				// fixed DEVICE NOT PRESENT but then hung waiting for the
-				// "ready for data" release every subsequent byte needs,
-				// caught by an actual on-screen run, not a synthetic
-				// test. No bridge: fall through to self-loopback, i.e.
-				// honestly "not present" -- nothing backs the device.
+				// (the presence response) for free. No bridge: fall
+				// through to self-loopback, i.e. honestly "not present"
+				// -- nothing backs the device.
+				//
+				// NOT gated on awaitingInterByteRelease_ here (tried,
+				// reverted -- see VC1541.md): that flag also controls
+				// edge-consumption/bit-counting (see the ATN-just-
+				// asserted reset below), and the two concerns don't
+				// actually coincide -- gating on it fixed the real ROM's
+				// mid-byte sanity check ($310c) but broke the earlier
+				// pre-send presence check ($30d8/$30de), which needs
+				// exposedListenerDat() at a point where that same flag
+				// is already false for unrelated (correct) reasons.
+				// Staying ungated and tuning kListenerDatReadyPolls so
+				// the countdown naturally finishes releasing by the time
+				// $310c's own poll happens is the right fix instead.
 				clkIn = clkLine();
-				datIn = listenerDat_;
+				datIn = exposedListenerDat();
 			} else if (!atnLine() && iecRole_ == IecRole::WeAreListener) {
 				// The device (our own LOAD encoder, see advanceLoadEncoder())
 				// is the sender in this role -- it drives CLK throughout,
@@ -195,7 +213,7 @@ bool SDI::in(uint16_t port, uint8_t& value)
 				// driven bit is what a real bus would show, same as the
 				// non-IEC-active else branch.
 				clkIn = clkLine();
-				datIn = awaitingInterByteRelease_ ? listenerDat_ : datLine();
+				datIn = awaitingInterByteRelease_ ? exposedListenerDat() : datLine();
 			} else {
 				clkIn = clkLine();
 				datIn = datLine();
@@ -205,14 +223,14 @@ bool SDI::in(uint16_t port, uint8_t& value)
 			                   | (clkIn ? 0x00 : 0x40)
 			                   | (datIn ? 0x00 : 0x80));
 			if (iotraceEnabled_)
-				fprintf(stderr, "IOTRACE pc=%04x IN  DF -> %02x  (atn=%d clkIn=%d datIn=%d role=%d)\n",
-				        lastPC_, value, atnLine() ? 1 : 0, clkIn ? 1 : 0, datIn ? 1 : 0, (int)iecRole_);
+				fprintf(stderr, "IOTRACE ts=%.6f pc=%04x IN  DF -> %02x  (atn=%d clkIn=%d datIn=%d role=%d)\n",
+				        traceTimestamp(), lastPC_, value, atnLine() ? 1 : 0, clkIn ? 1 : 0, datIn ? 1 : 0, (int)iecRole_);
 			break;
 		}
 		case 3:
 			value = control_;
 			if (iotraceEnabled_)
-				fprintf(stderr, "IOTRACE pc=%04x IN  CONF -> %02x\n", lastPC_, value);
+				fprintf(stderr, "IOTRACE ts=%.6f pc=%04x IN  CONF -> %02x\n", traceTimestamp(), lastPC_, value);
 			break;
 	}
 	return true;
@@ -227,12 +245,12 @@ bool SDI::out(uint16_t port, uint8_t value)
 		case 0:
 			portA_ = value;
 			if (iotraceEnabled_)
-				fprintf(stderr, "IOTRACE pc=%04x OUT PA <- %02x\n", lastPC_, value);
+				fprintf(stderr, "IOTRACE ts=%.6f pc=%04x OUT PA <- %02x\n", traceTimestamp(), lastPC_, value);
 			break;
 		case 1:
 			portB_ = value;
 			if (iotraceEnabled_)
-				fprintf(stderr, "IOTRACE pc=%04x OUT PB <- %02x\n", lastPC_, value);
+				fprintf(stderr, "IOTRACE ts=%.6f pc=%04x OUT PB <- %02x\n", traceTimestamp(), lastPC_, value);
 			break;
 		case 2: {
 			portC_ = value;
@@ -322,6 +340,7 @@ bool SDI::out(uint16_t port, uint8_t value)
 				shiftByte_ = 0;
 				awaitingInterByteRelease_ = true;
 				listenerDat_ = true;
+				listenerDatCountdown_ = kListenerDatReadyPolls;
 			} else if (!atn && iecRole_ == IecRole::None) {
 				// Idle (no data phase active, e.g. after UNLISTEN/
 				// UNTALK) -- keep the shifter clean so stray CLK/DAT
@@ -329,11 +348,34 @@ bool SDI::out(uint16_t port, uint8_t value)
 				bitCount_ = 0;
 				shiftByte_ = 0;
 				awaitingInterByteRelease_ = true;
+			} else if (!lastAtnLine_ && atn) {
+				// ATN just asserted -- a fresh command sequence is
+				// starting. Live-traced bug (see VC1541.md): the real
+				// ROM's own $30d4 sender already waits for the listener's
+				// DAT line to release via an explicit busy-poll ($30f7)
+				// BEFORE a byte's 8-bit loop even starts -- that's a
+				// separate, DATA-level mechanism, not a CLK edge to be
+				// counted. With awaitingInterByteRelease_ left at its
+				// default/leftover true, the very FIRST byte's own first
+				// real CLK-release edge got silently eaten as a phantom
+				// "inter-byte" release instead of counting as bit 0 --
+				// bitCount_ then never reached 8, so iecRole_ never left
+				// None even though all 8 bits decoded correctly
+				// (confirmed live: a traced TALK primary of $48 clocked
+				// perfectly, role stayed "none" forever, hanging the real
+				// ROM at $336F waiting for a bus-grab that never came
+				// because nothing had ever become WeAreListener). No such
+				// phantom edge for the FIRST byte of a fresh ATN.
+				bitCount_ = 0;
+				shiftByte_ = 0;
+				awaitingInterByteRelease_ = false;
+				listenerDat_ = true; // presence response
+				listenerDatCountdown_ = kListenerDatReadyPolls;
 			}
 
 			if (iotraceEnabled_)
-				fprintf(stderr, "IOTRACE pc=%04x OUT DF <- %02x  (atn=%d clk=%d dat=%d role=%d)\n",
-				        lastPC_, value, atn ? 1 : 0, clk ? 1 : 0, datLine() ? 1 : 0, (int)iecRole_);
+				fprintf(stderr, "IOTRACE ts=%.6f pc=%04x OUT DF <- %02x  (atn=%d clk=%d dat=%d role=%d)\n",
+				        traceTimestamp(), lastPC_, value, atn ? 1 : 0, clk ? 1 : 0, datLine() ? 1 : 0, (int)iecRole_);
 			lastAtnLine_ = atn;
 			lastClkOut_ = clk;
 			break;
@@ -341,10 +383,23 @@ bool SDI::out(uint16_t port, uint8_t value)
 		case 3:
 			control_ = value;
 			if (iotraceEnabled_)
-				fprintf(stderr, "IOTRACE pc=%04x OUT CONF <- %02x\n", lastPC_, value);
+				fprintf(stderr, "IOTRACE ts=%.6f pc=%04x OUT CONF <- %02x\n", traceTimestamp(), lastPC_, value);
 			break;
 	}
 	return true;
+}
+
+// See SDI.h's listenerDat_/listenerDatCountdown_ comments. Called every
+// time in() exposes listenerDat_ (not datLine()) to the Z80 -- ticks the
+// countdown while still asserted/true, auto-releasing to false once it
+// reaches zero. A poll that reads it already-false is a no-op here.
+bool SDI::exposedListenerDat()
+{
+	if (listenerDat_ && listenerDatCountdown_ > 0) {
+		if (--listenerDatCountdown_ == 0)
+			listenerDat_ = false;
+	}
+	return listenerDat_;
 }
 
 // Rising-edge-of-CLK bit clocker -- see SDI.h's class comment for the
@@ -392,6 +447,17 @@ void SDI::clockBit(bool clkRisingEdge, bool dataBit, bool fromAtnPhase)
 		bitCount_ = 0;
 		shiftByte_ = 0;
 		awaitingInterByteRelease_ = true; // next edge is the inter-byte release, not bit 0
+		// Ack the just-completed byte (asserted = true) -- live-traced
+		// against the real ROM's own post-byte check ($312f: IN/RLA/RET
+		// NC, i.e. "return once DAT reads asserted"): an earlier version
+		// of this line released instead of asserting, which is backwards
+		// -- it happened to look plausible in isolation but broke this
+		// exact check. exposedListenerDat() (see in()) auto-releases this
+		// again after a couple of polls, readying it for the NEXT byte's
+		// own pre-send wait ($30f7) without needing a reactive CLK edge
+		// that a pure read-poll loop like that one never produces.
+		listenerDat_ = true;
+		listenerDatCountdown_ = kListenerDatReadyPolls;
 
 		if (fromAtnPhase) {
 			// A PRIMARY address decides who sends once ATN releases;

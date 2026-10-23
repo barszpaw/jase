@@ -221,6 +221,22 @@ public:
 	bool justHitBreakpoint() const { return justHitBreakpoint_; }
 	uint16_t lastBreakpointPC() const { return lastBreakpointPC_; }
 
+	// Per-instruction trace logger -- the thing SDI_IOTRACE (SDI.cpp)
+	// couldn't give us: IOTRACE only sees port I/O, so it's blind to
+	// everything a ROM does between one IN/OUT and the next (exactly
+	// the kind of conditional branch on an untracked flag that kept
+	// tripping up static disassembly of the SDI ROM -- see VC1541.md).
+	// Logs every instruction while PC is inside [lo,hi] to stderr as
+	// raw "pc bytes registers", not decoded mnemonics -- decoding happens
+	// offline (tools/instrtrace_decode.py, reusing the same z80dis this
+	// project already validated for the SDI ROM disassembly) rather than
+	// risking a hand-rolled Z80 disassembler's own bugs inside the
+	// emulator. Default range is SDI's own ROM window ($3000-$3FFF);
+	// --debug-instrtrace / the INSTRTRACE debug command can narrow it.
+	void setInstrTraceEnabled(bool on) { instrTraceEnabled_ = on; }
+	bool isInstrTraceEnabled() const { return instrTraceEnabled_; }
+	void setInstrTraceRange(uint16_t lo, uint16_t hi) { instrTraceLow_ = lo; instrTraceHigh_ = hi; }
+
 	// Stages tape blocks for playback -- either via the real pulse engine
 	// (tapeArmOnLoadEntry(), the default) or the --tape-fastload shortcut.
 	// FileMgr::loadTAP() fills in plain-TAP blocks with the standard ROM
@@ -376,6 +392,11 @@ private:
 	bool justHitBreakpoint_ = false;
 	uint16_t lastBreakpointPC_ = 0;
 	bool isBreakpoint(uint16_t pc) const;
+
+	bool instrTraceEnabled_ = false;
+	uint16_t instrTraceLow_ = 0x3000;
+	uint16_t instrTraceHigh_ = 0x3FFF;
+	void traceInstructionIfEnabled(); // see setInstrTraceEnabled()'s comment
 
 	bool tapeFastloadEnabled_ = false;
 	std::vector<TapeBlock> tapBlocks_;
