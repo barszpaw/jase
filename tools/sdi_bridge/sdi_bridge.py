@@ -54,11 +54,13 @@
 import argparse
 import os
 import socket
+import struct
 import sys
 
 VERSION = "0.1"
 
-d64_image = None  # None = loose .prg dir; else [(name, bytes), ...] on-disk order
+d64_image = None  # None = loose .prg dir; else [(name, bytes, blocks), ...] on-disk order
+d64_header = None  # (disk_name16, disk_id2, dos_type2) raw bytes from the BAM, or None
 
 
 # ---------------------------------------------------------------------------
@@ -81,9 +83,20 @@ def _d64_ts_offset(track: int, sector: int) -> int:
     return offset + sector * 256
 
 
-def load_d64_image(path: str) -> list:
+def load_d64_image(path: str):
+    """Returns ([(name, bytes, blocks), ...], (disk_name16, disk_id2, dos_type2))."""
     with open(path, 'rb') as f:
         data = f.read()
+
+    # BAM (Block Availability Map) is always track 18 sector 0 -- disk
+    # name/ID/DOS-type live at fixed offsets within it, and the first
+    # byte of each track's 4-byte BAM entry (offset 4, tracks 1-35) is
+    # that track's free-sector count -- summing them is the standard
+    # "blocks free" figure. Raw name/id/type bytes kept as-is (not
+    # decoded) -- see build_catalog() for how they're used.
+    bam = data[_d64_ts_offset(18, 0): _d64_ts_offset(18, 0) + 256]
+    free_blocks = sum(bam[4 + t * 4] for t in range(35))
+    header = (bam[0x90:0x90 + 16], bam[0xA2:0xA2 + 2], bam[0xA5:0xA5 + 2], free_blocks)
 
     entries = []
     track, sector = 18, 1
@@ -99,10 +112,15 @@ def load_d64_image(path: str) -> list:
                 continue
             name = entry[3:19].rstrip(b'\xa0').decode('latin1')
             start_track, start_sector = entry[1], entry[2]
-            entries.append((name, _d64_extract_chain(data, start_track, start_sector)))
+            # Block count is the directory's OWN stored value (offset
+            # 28-29, 16-bit LE) -- the authoritative number a real 1541
+            # displays, not something to re-derive from the file's byte
+            # length (which would only be an approximation).
+            blocks = entry[28] | (entry[29] << 8)
+            entries.append((name, _d64_extract_chain(data, start_track, start_sector), blocks))
         track, sector = next_track, next_sector
 
-    return entries
+    return entries, header
 
 
 def _d64_extract_chain(data: bytes, track: int, sector: int) -> bytes:
@@ -125,39 +143,84 @@ def _d64_extract_chain(data: bytes, track: int, sector: int) -> bytes:
 
 
 def list_entries(base_dir: str) -> list:
-    """[(name, bytes), ...] -- from d64_image if mounted (on-disk order),
-    otherwise loose .prg files in base_dir (alphabetical)."""
+    """[(name, bytes, blocks), ...] -- from d64_image if mounted (on-disk
+    order), otherwise loose .prg files in base_dir (alphabetical, block
+    count approximated from file size -- there's no real directory to
+    read it from)."""
     if d64_image is not None:
         return d64_image
     out = []
     for f in sorted(os.scandir(base_dir), key=lambda f: f.name.lower()):
         if f.is_file() and f.name.lower().endswith('.prg'):
             with open(f.path, 'rb') as fh:
-                out.append((os.path.splitext(f.name)[0], fh.read()))
+                content = fh.read()
+                out.append((os.path.splitext(f.name)[0], content, max(1, (len(content) + 253) // 254)))
     return out
 
 
 # ---------------------------------------------------------------------------
-# SDI-native catalog format -- see top-of-file comment for the trace this
-# is built from. Status line first (ASCII "ddtext\r", d=digit -- SDI's own
-# $33a6/$339c branch decides print-vs-discard on the SECOND digit), then
-# one plain CR-terminated name per file. The exact per-file framing past
-# the status line is a first hypothesis, not yet confirmed against the
-# ROM as thoroughly as the status line itself -- expect to iterate this
-# function based on what the real ROM does with it.
+# SDI-native catalog format.
+#
+# An earlier hypothesis here (two-ASCII-digit-prefixed, CR-terminated
+# text lines, mimicking the 1541 ERROR-CHANNEL status-line convention)
+# got the real filenames printing correctly but left the screen filling
+# with a spurious repeating "LIST" after the real entries -- traced
+# (see project memory) to the SDI ROM reading past the end of our data
+# into uninitialized RAM, because that text-line format has no
+# terminator the ROM's own catalog loop recognizes. It also could never
+# have matched the real SDI hardware's actual display (confirmed via a
+# photo Pawel supplied): block counts shown as plain right-padded
+# numbers, names in quotes, a type suffix, a disk-name header line, and
+# a final "quote-count free." line -- exactly the standard CBM "$"
+# directory format (the same one any real 1541 or SD2IEC emits), not
+# an SDI-specific convention. SDI being designed for real IEC/1541
+# interop, its ROM almost certainly parses this like any CBM-compatible
+# catalog reader would -- the earlier status-line theory most likely
+# only ever applied to a preceding drive-status check, not the catalog
+# body itself.
+#
+# Structure (a real CBM BASIC "program" -- link-pointer-chained lines):
+#   load address (2 bytes, 01 08)
+#   per line: link-to-next (2 bytes) + block-count (2 bytes, LE) +
+#             text + 0x00
+#   terminated by a final link pointer of 0x0000 (no more bytes after
+#   the footer line's own 0x00).
+# Padding uses plain ASCII spaces (0x20), not PETSCII shifted-space
+# (0xA0) -- this stream is printed through the Spectrum ROM's own
+# character printer (confirmed bare RST $10, zero transformation), and
+# 0xA0 isn't a normal printable glyph there.
 # ---------------------------------------------------------------------------
 
 def build_catalog(base_dir: str) -> bytes:
-    out = bytearray(b"00,OK,00,00\r")
-    for name, content in list_entries(base_dir):
+    out = bytearray(b"\x01\x08")
+    link_addr = 0x0801
+
+    def emit_line(linenum: int, text: bytes) -> None:
+        nonlocal link_addr
+        body = struct.pack('<H', linenum & 0xFFFF) + text + b"\x00"
+        link_addr += 2 + len(body)
+        out.extend(struct.pack('<H', link_addr & 0xFFFF))
+        out.extend(body)
+
+    if d64_header is not None:
+        disk_name, disk_id, dos_type, free_blocks = d64_header
+    else:
+        disk_name, disk_id, dos_type, free_blocks = b' ' * 16, b'  ', b'2A', 0
+    # PETSCII shifted-space (0xA0) padding -> plain ASCII space: same
+    # reasoning as the per-file name padding below, this stream prints
+    # through a bare RST $10 with no PETSCII awareness.
+    disk_name = bytes(0x20 if b == 0xA0 else b for b in disk_name)
+    disk_id = bytes(0x20 if b == 0xA0 else b for b in disk_id)
+    emit_line(0, b'"' + disk_name + b'" ' + disk_id + b' ' + dos_type)
+
+    for name, content, blocks in list_entries(base_dir):
         clean = ''.join(c for c in name.upper() if 0x20 <= ord(c) <= 0x7E)
-        # Test hypothesis: every line (not just the status line) goes
-        # through the same two-ASCII-digit print/skip check -- without a
-        # prefix, the filename's OWN first two characters were being
-        # consumed as if they were that prefix, desyncing everything
-        # after. "99," forces the print branch (second digit '9' >= '2')
-        # unconditionally.
-        out += b"99," + clean.encode('ascii', errors='replace') + b"\r"
+        padded = clean.ljust(16)[:16]
+        line = ('"' + padded + '" PRG').encode('ascii', errors='replace')
+        emit_line(blocks, line)
+
+    emit_line(free_blocks, b"BLOCKS FREE.")
+    out += b"\x00\x00"  # end of program -- the real catalog terminator
     return bytes(out)
 
 
@@ -209,7 +272,7 @@ def handle_open(sock: socket.socket, fields: list, channels: dict, base_dir: str
         print(" ".join(f"{b:02x}" for b in content) + " | " + "".join(chr(b) if 32 <= b <= 126 else "." for b in content) + "\n", end="")
 
     else:
-        match = next((c for n, c in list_entries(base_dir) if n.upper() == name.upper()), None)
+        match = next((c for n, c, _b in list_entries(base_dir) if n.upper() == name.upper()), None)
         if match is None:
             print(f"[OPEN] ch={channel} '{name}' -> FAIL (not found)")
             send_line(sock, "ERR not found")
@@ -251,7 +314,7 @@ def handle_write(sock: socket.socket, fields: list, channels: dict, base_dir: st
 
 
 def main() -> None:
-    global d64_image
+    global d64_image, d64_header
 
     parser = argparse.ArgumentParser(description="SDI-native file bridge for JASE's SDI_8255 peripheral")
     parser.add_argument('--tcp-port', type=int, default=9700)
@@ -260,7 +323,7 @@ def main() -> None:
 
     base_dir = args.basedir
     if os.path.isfile(base_dir) and base_dir.lower().endswith('.d64'):
-        d64_image = load_d64_image(base_dir)
+        d64_image, d64_header = load_d64_image(base_dir)
         print(f"=== SDI Bridge V{VERSION} ===")
         print(f"Disk: {base_dir} (mounted .d64, {len(d64_image)} file(s))")
     else:
