@@ -51,16 +51,18 @@ public:
 
 private:
 	enum class SubState {
-		Idle, ClaimClk, WaitListenerReady, BitSetup, BitValid, WaitAck,
+		Idle, ClaimClk, WaitListenerReady, EoiNotify, BitSetup, BitValid, WaitAck,
 	};
 
 	void enterSubState(SubState s);
 	void checkTransitions(IecDeviceEmulator& ctx, IecBus& bus);
+	void beginBits(IecBus& bus);
 
 	SubState subState_ = SubState::Idle;
 	uint32_t elapsed_ = 0;
 	uint8_t currentByte_ = 0x00; // current byte being shifted out, from requestRead()
 	int bitIndex_ = 0;
+	bool eoi_ = false; // this is the last byte of the stream -- see EoiNotify
 
 	// requestRead() is called once per byte, not on every tick -- see
 	// the Idle case. Reset wherever a fresh read attempt makes sense

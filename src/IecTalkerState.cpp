@@ -15,6 +15,15 @@ static constexpr uint32_t kBitValidTstates = 245; // ~70us, Tv
 // bounded ~20-iteration poll (see $3148-3158, ~25 T-states/iteration)
 // to definitely observe the assert before we release it again.
 static constexpr uint32_t kClaimClkTstates = 280;
+// EOI notify hold (Step 2's "do nothing" branch, Butterfield's article
+// + the reference table's section 4): withholding the CLK-assert that
+// would normally start Step 3 for >200us is what tells the listener
+// "this is the last byte" -- it notices the timeout, sends its own
+// 60-80us DAT ack pulse, then we proceed with the byte normally. No
+// edge-detection of that ack pulse here (same fixed-timer style as the
+// listener side's own EoiAckPulse) -- just a hold comfortably past
+// 200us + the ack pulse width.
+static constexpr uint32_t kEoiNotifyTstates = 1050; // ~300us
 
 void IecTalkerState::enterSubState(SubState s)
 {
@@ -49,6 +58,14 @@ void IecTalkerState::onTick(IecDeviceEmulator& ctx, IecBus& bus, uint32_t deltaT
 	checkTransitions(ctx, bus);
 }
 
+void IecTalkerState::beginBits(IecBus& bus)
+{
+	bus.setDeviceClk(true); // Step 3 begins
+	bitIndex_ = 0;
+	bus.setDeviceDat((currentByte_ & 1) == 0); // bit 0, LSB-first
+	enterSubState(SubState::BitSetup);
+}
+
 void IecTalkerState::checkTransitions(IecDeviceEmulator& ctx, IecBus& bus)
 {
 	switch (subState_) {
@@ -64,6 +81,7 @@ void IecTalkerState::checkTransitions(IecDeviceEmulator& ctx, IecBus& bus)
 				bool eoi = false;
 				if (ctx.device() && ctx.device()->requestRead(ctx.activeChannel_, 1, data, eoi) && !data.empty()) {
 					currentByte_ = (uint8_t)data[0];
+					eoi_ = eoi;
 					// Claim the clock first ("Przejecie Zegara") -- see
 					// class comment. Asserting here, while the
 					// controller's own CLK may still be up, is the
@@ -82,14 +100,21 @@ void IecTalkerState::checkTransitions(IecDeviceEmulator& ctx, IecBus& bus)
 			break;
 		case SubState::WaitListenerReady:
 			// Step 2 ("ready for data"): wait for the listener to
-			// release its DAT line. No fixed time limit on our side --
-			// EOI/timeout handling here belongs to the listener, not us.
+			// release its DAT line. No fixed time limit on our side.
+			// For the LAST byte of the stream, this is also where EOI
+			// gets signalled: instead of immediately starting Step 3,
+			// withhold the CLK-assert for a while (EoiNotify) -- see its
+			// own comment.
 			if (!bus.controllerDat()) {
-				bus.setDeviceClk(true); // Step 3 begins
-				bitIndex_ = 0;
-				bus.setDeviceDat((currentByte_ & 1) == 0); // bit 0, LSB-first
-				enterSubState(SubState::BitSetup);
+				if (eoi_)
+					enterSubState(SubState::EoiNotify);
+				else
+					beginBits(bus);
 			}
+			break;
+		case SubState::EoiNotify:
+			if (elapsed_ >= kEoiNotifyTstates)
+				beginBits(bus);
 			break;
 		case SubState::BitSetup:
 			if (elapsed_ >= kBitSetupTstates) {
