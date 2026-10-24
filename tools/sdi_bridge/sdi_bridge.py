@@ -59,8 +59,9 @@ import sys
 
 VERSION = "0.1"
 
-d64_image = None  # None = loose .prg dir; else [(name, bytes, blocks), ...] on-disk order
-d64_header = None  # (disk_name16, disk_id2, dos_type2) raw bytes from the BAM, or None
+d64_image = None  # None = loose .prg dir; else [(name, bytes, blocks, raw_name16), ...] on-disk order
+d64_header = None  # (disk_name16, disk_id2, dos_type2, free_blocks) raw bytes from the BAM, or None
+charcode_mode = 'ASCII'  # 'ASCII' (default) or 'PETASCII' -- see build_catalog()
 
 
 # ---------------------------------------------------------------------------
@@ -84,7 +85,7 @@ def _d64_ts_offset(track: int, sector: int) -> int:
 
 
 def load_d64_image(path: str):
-    """Returns ([(name, bytes, blocks), ...], (disk_name16, disk_id2, dos_type2))."""
+    """Returns ([(name, bytes, blocks, raw_name16), ...], (disk_name16, disk_id2, dos_type2, free_blocks))."""
     with open(path, 'rb') as f:
         data = f.read()
 
@@ -110,14 +111,15 @@ def load_d64_image(path: str):
             file_type = entry[0]
             if file_type == 0:
                 continue
-            name = entry[3:19].rstrip(b'\xa0').decode('latin1')
+            raw_name16 = bytes(entry[3:19])  # exact on-disk field, PETSCII, 0xA0-padded to 16
+            name = raw_name16.rstrip(b'\xa0').decode('latin1')
             start_track, start_sector = entry[1], entry[2]
             # Block count is the directory's OWN stored value (offset
             # 28-29, 16-bit LE) -- the authoritative number a real 1541
             # displays, not something to re-derive from the file's byte
             # length (which would only be an approximation).
             blocks = entry[28] | (entry[29] << 8)
-            entries.append((name, _d64_extract_chain(data, start_track, start_sector), blocks))
+            entries.append((name, _d64_extract_chain(data, start_track, start_sector), blocks, raw_name16))
         track, sector = next_track, next_sector
 
     return entries, header
@@ -143,10 +145,11 @@ def _d64_extract_chain(data: bytes, track: int, sector: int) -> bytes:
 
 
 def list_entries(base_dir: str) -> list:
-    """[(name, bytes, blocks), ...] -- from d64_image if mounted (on-disk
-    order), otherwise loose .prg files in base_dir (alphabetical, block
-    count approximated from file size -- there's no real directory to
-    read it from)."""
+    """[(name, bytes, blocks, raw_name16), ...] -- from d64_image if
+    mounted (on-disk order), otherwise loose .prg files in base_dir
+    (alphabetical, block count approximated from file size -- there's
+    no real directory to read it from, raw_name16 synthesized PETSCII-
+    style from the ASCII name since there's no real on-disk field)."""
     if d64_image is not None:
         return d64_image
     out = []
@@ -154,7 +157,9 @@ def list_entries(base_dir: str) -> list:
         if f.is_file() and f.name.lower().endswith('.prg'):
             with open(f.path, 'rb') as fh:
                 content = fh.read()
-                out.append((os.path.splitext(f.name)[0], content, max(1, (len(content) + 253) // 254)))
+                name = os.path.splitext(f.name)[0]
+                raw_name16 = name.upper().encode('ascii', errors='replace').ljust(16, b'\xa0')[:16]
+                out.append((name, content, max(1, (len(content) + 253) // 254), raw_name16))
     return out
 
 
@@ -185,10 +190,16 @@ def list_entries(base_dir: str) -> list:
 #             text + 0x00
 #   terminated by a final link pointer of 0x0000 (no more bytes after
 #   the footer line's own 0x00).
-# Padding uses plain ASCII spaces (0x20), not PETSCII shifted-space
-# (0xA0) -- this stream is printed through the Spectrum ROM's own
-# character printer (confirmed bare RST $10, zero transformation), and
-# 0xA0 isn't a normal printable glyph there.
+# Padding/charset: controlled by --charcode (module global
+# charcode_mode). 'ASCII' (default) converts PETSCII shifted-space
+# (0xA0) to plain ASCII space (0x20) and re-pads names with it -- this
+# stream prints through the Spectrum ROM's own character printer
+# (confirmed bare RST $10, zero transformation, no PETSCII awareness),
+# and 0xA0 lands in the Spectrum's UDG range (144-163), which is NOT
+# guaranteed blank (an uninitialized UDG table could show garbage).
+# 'PETASCII' sends the real on-disk bytes completely unmodified --
+# Pawel's own hypothesis that SDI's ROM might handle PETSCII itself,
+# worth testing directly rather than assuming either way.
 # ---------------------------------------------------------------------------
 
 def build_catalog(base_dir: str) -> bytes:
@@ -206,18 +217,20 @@ def build_catalog(base_dir: str) -> bytes:
         disk_name, disk_id, dos_type, free_blocks = d64_header
     else:
         disk_name, disk_id, dos_type, free_blocks = b' ' * 16, b'  ', b'2A', 0
-    # PETSCII shifted-space (0xA0) padding -> plain ASCII space: same
-    # reasoning as the per-file name padding below, this stream prints
-    # through a bare RST $10 with no PETSCII awareness.
-    disk_name = bytes(0x20 if b == 0xA0 else b for b in disk_name)
-    disk_id = bytes(0x20 if b == 0xA0 else b for b in disk_id)
-    emit_line(0, b'"' + disk_name + b'" ' + disk_id + b' ' + dos_type)
 
-    for name, content, blocks in list_entries(base_dir):
-        clean = ''.join(c for c in name.upper() if 0x20 <= ord(c) <= 0x7E)
-        padded = clean.ljust(16)[:16]
-        line = ('"' + padded + '" PRG').encode('ascii', errors='replace')
-        emit_line(blocks, line)
+    if charcode_mode == 'PETASCII':
+        emit_line(0, b'"' + disk_name + b'" ' + disk_id + b' ' + dos_type)
+        for name, content, blocks, raw_name16 in list_entries(base_dir):
+            emit_line(blocks, b'"' + raw_name16 + b'" PRG')
+    else:
+        disk_name = bytes(0x20 if b == 0xA0 else b for b in disk_name)
+        disk_id = bytes(0x20 if b == 0xA0 else b for b in disk_id)
+        emit_line(0, b'"' + disk_name + b'" ' + disk_id + b' ' + dos_type)
+        for name, content, blocks, raw_name16 in list_entries(base_dir):
+            clean = ''.join(c for c in name.upper() if 0x20 <= ord(c) <= 0x7E)
+            padded = clean.ljust(16)[:16]
+            line = ('"' + padded + '" PRG').encode('ascii', errors='replace')
+            emit_line(blocks, line)
 
     emit_line(free_blocks, b"BLOCKS FREE.")
     out += b"\x00\x00"  # end of program -- the real catalog terminator
@@ -272,7 +285,7 @@ def handle_open(sock: socket.socket, fields: list, channels: dict, base_dir: str
         print(" ".join(f"{b:02x}" for b in content) + " | " + "".join(chr(b) if 32 <= b <= 126 else "." for b in content) + "\n", end="")
 
     else:
-        match = next((c for n, c, _b in list_entries(base_dir) if n.upper() == name.upper()), None)
+        match = next((c for n, c, _b, _r in list_entries(base_dir) if n.upper() == name.upper()), None)
         if match is None:
             print(f"[OPEN] ch={channel} '{name}' -> FAIL (not found)")
             send_line(sock, "ERR not found")
@@ -314,18 +327,24 @@ def handle_write(sock: socket.socket, fields: list, channels: dict, base_dir: st
 
 
 def main() -> None:
-    global d64_image, d64_header
+    global d64_image, d64_header, charcode_mode
 
     parser = argparse.ArgumentParser(description="SDI-native file bridge for JASE's SDI_8255 peripheral")
     parser.add_argument('--tcp-port', type=int, default=9700)
     parser.add_argument('--basedir', required=True, help="directory of loose .prg files, or a .d64 image")
+    parser.add_argument('--charcode', choices=['ASCII', 'PETASCII'], default='ASCII',
+                         help="catalog charset: ASCII (default, converts 0xA0 padding to a plain "
+                              "space for safe display on the Spectrum charset) or PETASCII "
+                              "(send real on-disk bytes unmodified, testing whether SDI's own ROM "
+                              "handles the translation itself)")
     args = parser.parse_args()
+    charcode_mode = args.charcode
 
     base_dir = args.basedir
     if os.path.isfile(base_dir) and base_dir.lower().endswith('.d64'):
         d64_image, d64_header = load_d64_image(base_dir)
         print(f"=== SDI Bridge V{VERSION} ===")
-        print(f"Disk: {base_dir} (mounted .d64, {len(d64_image)} file(s))")
+        print(f"Disk: {base_dir} (mounted .d64, {len(d64_image)} file(s), charcode={charcode_mode})")
     else:
         print(f"=== SDI Bridge V{VERSION} ===")
         print(f"Dir: {base_dir}")
