@@ -11,15 +11,14 @@ static constexpr uint32_t kAckHoldTstates = 245;      // 70us
 // that measured value for margin.
 static constexpr uint32_t kAtnAckTstates = 4200;
 
-// Transmit (talker) per-bit timing -- same per-bit scale as receive. Not
-// tied to a specific measured controller delay like kAtnAckTstates: the
-// controller's own per-bit loop ($3177-$318c) is a tight, undelayed spin
-// waiting on CLK edges, so these just need to be comfortably longer than
-// its "two consecutive reads must agree" stability check in $3025 (5
-// iterations, ~65 T-states) for it to reliably see a settled read.
-static constexpr uint32_t kTxClaimTstates = 245;      // 70us
-static constexpr uint32_t kTxBitSetupTstates = 280;   // 80us
-static constexpr uint32_t kTxBitValidTstates = 245;   // 70us
+// Transmit (talker) per-bit timing -- Ts/Tv from the real, documented
+// CBM serial-bus protocol (Jim Butterfield, "How The VIC/64 Serial Bus
+// Works", Compute! July 1983; Pawel supplied the original doc). Values
+// from its own timing table: Ts (bit set-up, talker) typ 70us/max
+// unspecified, Tv (data valid hold) min/typ 20us. Held a bit past
+// minimum for margin, same as the RX side's own timings.
+static constexpr uint32_t kTxBitSetupTstates = 280;   // ~80us, Ts
+static constexpr uint32_t kTxBitValidTstates = 245;   // ~70us, Tv
 
 void IecDeviceEmulator::advanceTime(uint32_t tstates)
 {
@@ -50,6 +49,22 @@ void IecDeviceEmulator::enterTxPhase(TxPhase p)
 
 void IecDeviceEmulator::checkRxTimeouts(IecBus& bus)
 {
+	// While actively transmitting bits, RX has no business touching the
+	// bus -- live-traced and confirmed: a stale RX timer (left ticking
+	// from the LAST byte received under ATN, e.g. an AtnPresenceAck
+	// hold that hadn't yet expired) fired mid-byte during TX and
+	// stomped bus.setDeviceDat() right in the middle of a bit we were
+	// holding stable, corrupting it. This was the actual cause of every
+	// "garbled catalog text" symptom chased earlier as a TX timing
+	// problem -- it wasn't. Gated on txPhase_, NOT role_==WeAreTalker:
+	// role_ flips to WeAreTalker as soon as the TALK primary byte
+	// decodes, but the secondary (channel/open) byte still has to
+	// arrive via normal RX, under the same ATN, before any bit gets
+	// sent -- txPhase_ only leaves Idle once that's done and the first
+	// bit actually starts going out.
+	if (txPhase_ != TxPhase::Idle)
+		return;
+
 	switch (rxPhase_) {
 		case RxPhase::AtnPresenceAck:
 			if (rxElapsed_ >= kAtnAckTstates) {
@@ -101,34 +116,48 @@ void IecDeviceEmulator::checkTxTimeouts(IecBus& bus)
 {
 	switch (txPhase_) {
 		case TxPhase::Idle:
-			// Real trigger, read off the ROM's own $3365-$3372 ("release
-			// our CLK, then spin waiting for CLK to read asserted"): we
-			// are the talker and the bus's CLK is currently released --
-			// that IS the controller's "go ahead" state, no separate
-			// signal needed. requestRead() is blocking (real network
-			// round-trip to the bridge) but only called once per byte,
-			// right here, not on every idle tick.
-			if (role_ == IecRole::WeAreTalker && !bus.clk() && !txAttempted_) {
+			// Step 1 ("ready to send"), per the real protocol doc: the
+			// talker releases CLK and waits -- NO fixed time limit --
+			// for the listener to signal "ready for data". We fetch the
+			// byte up front (requestRead() is a blocking network call,
+			// done once per byte, not on every tick) and release CLK
+			// the instant we have one; the actual wait for the
+			// listener happens in WaitListenerReady below.
+			if (role_ == IecRole::WeAreTalker && !txAttempted_) {
 				txAttempted_ = true;
 				std::string data;
 				bool eoi = false;
 				if (device_ && device_->requestRead(activeChannel_, 1, data, eoi) && !data.empty()) {
 					txByte_ = (uint8_t)data[0];
-					txBitIndex_ = 0;
-					bus.setDeviceClk(true);
-					enterTxPhase(TxPhase::ClaimBus);
+					bus.setDeviceClk(false); // Step 1: ready-to-send
+					enterTxPhase(TxPhase::WaitListenerReady);
 				}
 			}
 			break;
-		case TxPhase::ClaimBus:
-			if (txElapsed_ >= kTxClaimTstates) {
-				bus.setDeviceDat((txByte_ & 1) == 0); // asserted=bit0, released=bit1
+		case TxPhase::WaitListenerReady:
+			// Step 2 ("ready for data"): wait for the LISTENER (the
+			// real ROM's own $314a-$314f, "AND 0xf7" clearing its own
+			// DAT drive) to release its DAT line. This is the exact
+			// handshake this project's own earlier reading of fox20io/
+			// c64-fdemu's transmitIECByte() already flagged as
+			// essential ("wait indefinitely... the receiver starts
+			// counting the EOI timeout the instant DATA goes high") --
+			// and then wasn't actually implemented until live-tracing
+			// against a real documented timing diagram (Jim
+			// Butterfield, "How The VIC/64 Serial Bus Works") made the
+			// cost of skipping it undeniable: every byte after the
+			// first decoded as garbage because we started clocking
+			// bits on a blind timer instead of this real signal.
+			if (!bus.controllerDat()) {
+				bus.setDeviceClk(true); // Step 3 begins
+				txBitIndex_ = 0;
+				bus.setDeviceDat((txByte_ & 1) == 0); // bit 0, asserted=0/released=1, LSB-first
 				enterTxPhase(TxPhase::BitSetup);
 			}
 			break;
 		case TxPhase::BitSetup:
 			if (txElapsed_ >= kTxBitSetupTstates) {
-				bus.setDeviceClk(false); // release -> valid, controller samples
+				bus.setDeviceClk(false); // release -> "data ready", controller samples
 				enterTxPhase(TxPhase::BitValid);
 			}
 			break;
@@ -136,16 +165,31 @@ void IecDeviceEmulator::checkTxTimeouts(IecBus& bus)
 			if (txElapsed_ >= kTxBitValidTstates) {
 				txBitIndex_++;
 				if (txBitIndex_ >= 8) {
-					bus.setDeviceClk(false);
+					// Step 4 ("frame handshake") starts with CLK true,
+					// DATA false -- explicitly force DAT released here
+					// regardless of what bit 7's value happened to be.
 					bus.setDeviceDat(false);
-					txAttempted_ = false; // byte done -- let the next one be requested
-					enterTxPhase(TxPhase::Idle);
+					bus.setDeviceClk(true);
+					enterTxPhase(TxPhase::WaitAck);
 				} else {
 					txByte_ >>= 1; // LSB-first, same convention as receive
 					bus.setDeviceClk(true);
 					bus.setDeviceDat((txByte_ & 1) == 0);
 					enterTxPhase(TxPhase::BitSetup);
 				}
+			}
+			break;
+		case TxPhase::WaitAck:
+			// Step 4: the listener acknowledges the byte by pulling its
+			// own DAT true. Once seen, release our CLK and go back to
+			// Idle -- the NEXT byte's WaitListenerReady will correctly
+			// keep waiting until the listener releases this same ack
+			// (its own Step 5, "back where we started"), so no extra
+			// state is needed here for that.
+			if (bus.controllerDat()) {
+				bus.setDeviceClk(false);
+				txAttempted_ = false; // byte done -- let the next one be requested
+				enterTxPhase(TxPhase::Idle);
 			}
 			break;
 		default:
@@ -200,6 +244,7 @@ void IecDeviceEmulator::onControllerChanged(IecBus& bus, uint32_t tstates)
 		if (txPhase_ != TxPhase::Idle) {
 			bus.setDeviceClk(false);
 			bus.setDeviceDat(false);
+			txAttempted_ = false;
 			enterTxPhase(TxPhase::Idle);
 		}
 		role_ = IecRole::None;

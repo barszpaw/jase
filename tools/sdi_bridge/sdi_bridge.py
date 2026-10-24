@@ -206,6 +206,8 @@ def handle_open(sock: socket.socket, fields: list, channels: dict, base_dir: str
     if name in ('$', '$0', '$1'):
         content = build_catalog(base_dir)
         print(f"[OPEN] ch={channel} '$' -> catalog, {len(content)} bytes")
+        print(" ".join(f"{b:02x}" for b in content) + " | " + "".join(chr(b) if 32 <= b <= 126 else "." for b in content) + "\n", end="")
+
     else:
         match = next((c for n, c in list_entries(base_dir) if n.upper() == name.upper()), None)
         if match is None:

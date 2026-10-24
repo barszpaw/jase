@@ -62,13 +62,15 @@ public:
 	int secondaryCmd() const { return (int)secondaryCmd_; }
 	const std::string& nameBuf() const { return nameBuf_; }
 	int activeChannel() const { return activeChannel_; }
+	int txBitIndex() const { return txBitIndex_; }
+	uint8_t txByte() const { return txByte_; }
 
 private:
 	enum class RxPhase {
 		Idle, AtnPresenceAck, WaitReadyToSend, EoiAckPulse, WaitReadyToSendNoEoi, Receiving, AckHold,
 	};
 	enum class TxPhase {
-		Idle, ClaimBus, BitSetup, BitValid,
+		Idle, WaitListenerReady, BitSetup, BitValid, WaitAck,
 	};
 	enum class IecRole { None, WeAreTalker, WeAreListener };
 	enum class SecondaryCmd { None, Open, Close, PlainSelect };
