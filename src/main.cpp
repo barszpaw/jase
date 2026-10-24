@@ -233,6 +233,10 @@ static void printUsage(const char* argv0)
 		"                         while PC is in [LOW,HIGH] hex, default SDI's ROM\n"
 		"                         window ($3000-$3FFF); toggle live via \"INSTRTRACE\n"
 		"                         ON\"/\"OFF\" over the debug protocol\n"
+		"  --debug-iectrace       log every access to SDI's 8255 Port C (the IEC\n"
+		"                         bus lines) with the resolved bus state (atn/clk/\n"
+		"                         dat per side, role, rxPhase/txPhase) and the\n"
+		"                         current PC; toggle live via \"IECTRACE ON\"/\"OFF\"\n"
 		"\n"
 		"Window hotkeys:\n"
 		"  F1                     toggle the on-screen menu -- Storage (load/\n"
@@ -413,6 +417,9 @@ int main(int argc, char *argv[])
 					++i;
 				}
 			}
+		}
+		else if (0 == strcmp(argv[i], "--debug-iectrace")) {
+			minZX.getSDI8255()->setIectraceEnabled(true);
 		}
 	}
 

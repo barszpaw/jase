@@ -1167,17 +1167,19 @@ void MinZX::loadTapeBlocks(const std::vector<TapeBlock>& blocks)
 	tapeEarBit_ = false;
 }
 
-// 15 frames held / 10 released per chord (300ms/200ms at 50Hz): long
-// enough for the ROM's interrupt-driven keyboard scan to register it,
-// comfortably under its ~35-frame REPDEL auto-repeat threshold (a
-// 100-frame hold was tested and DID trigger real ROM auto-repeat,
-// corrupting the line with repeated characters — don't go that long).
+// 30 frames held / 20 released per chord (600ms/400ms at 50Hz) -- 2x
+// the original 15/10 (Pawel's own request, after repeated TYPE/PRESSKEYS
+// pacing issues this session: premature ENTERs landing mid-sequence and
+// garbling the input line). Still comfortably under the ~35-frame
+// REPDEL auto-repeat threshold (a 100-frame hold was tested earlier and
+// DID trigger real ROM auto-repeat, corrupting the line with repeated
+// characters -- don't go anywhere near that long).
 void MinZX::pressKeys(const std::vector<std::vector<SDL_Scancode>>& chords)
 {
 	autoTypeSeq_.clear();
 	for (const auto& chord : chords) {
-		autoTypeSeq_.push_back({ chord, 15 });
-		autoTypeSeq_.push_back({ {}, 10 });
+		autoTypeSeq_.push_back({ chord, 30 });
+		autoTypeSeq_.push_back({ {}, 20 });
 	}
 	autoTypeIdx_ = 0;
 	autoTypeFrameCounter_ = 0;

@@ -86,11 +86,24 @@ public:
 
 	I8255& chip() { return chip_; }
 
+	// Per-access IEC bus state logger -- what the project's earlier
+	// SDI_IOTRACE (on the now-deleted single-class SDI.cpp) did for raw
+	// PA/PB/PC/CONF bytes, but logging the RESOLVED IEC bus state
+	// (atn/clk/dat per side, role, rxPhase/txPhase) instead -- that
+	// register-level view is what you actually need to see WHY a
+	// handshake edge got missed, not just that a byte was written.
+	// Lost during the i8255-ppi-emulation merge (the old flag called
+	// the no-longer-existing SDI class's own method) and rebuilt here,
+	// Pawel's own request, alongside --debug-instrtrace.
+	void setIectraceEnabled(bool on) { iectraceEnabled_ = on; }
+	bool isIectraceEnabled() const { return iectraceEnabled_; }
+
 private:
 	void pageIn(MemoryMap& memory);
 	void pageOut(MemoryMap& memory);
 	void onPortCChanged(uint8_t value);
 	void rebuildRomWindows();
+	void logIectrace(const char* direction, uint8_t value);
 
 	I8255 chip_;
 	IecBus bus_;
@@ -114,4 +127,7 @@ private:
 	// (it's a generic chip, doesn't know about Z80 clocks) -- stashed
 	// here from onInstructionFetch so they can hand it to iec_.
 	uint32_t lastTstates_ = 0;
+	uint16_t lastPc_ = 0; // same stash, for logIectrace()'s own PC column
+
+	bool iectraceEnabled_ = false;
 };

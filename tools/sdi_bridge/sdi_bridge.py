@@ -18,16 +18,13 @@
 # code downstream of that eventually raises a genuine Sinclair BASIC error
 # ("B Integer out of range") -- confirmed live, not a guess.
 #
-# D64 parsing (load_d64_image/_d64_sectors_per_track/_d64_ts_offset/
-# _d64_extract_chain) is copied from tools/c64iec_fs/c64iec_fs_tcp.py
-# (itself adapted from fox20io/c64-fdemu's c64iec_fs.py, GPLv3 -- see
-# LICENSE in this directory, same license, same reason: this directory is
-# its own separate process, never linked into the `jase` binary). That
-# part is a correct, protocol-independent fact about the .d64 file format
-# and is reused verbatim. Everything else here -- the wire protocol and
-# the catalog/status-line formatting -- is new, written specifically
-# against what SDI's own ROM was traced wanting, not against real-C64/
-# real-1541 conventions.
+# D64 reading uses the `d64` PyPI package (pip install d64) instead of a
+# hand-rolled track/sector walker -- Pawel's own call: "dobrze korzystać z
+# bibliotek... będzie to bardziej spójne niż własna procedura". Confirmed
+# more correct too, not just more consistent: the library's
+# bam.total_free() gives the right "blocks free" figure (148, matching
+# Pawel's own reference listing for this exact disk) where this file's
+# earlier hand-rolled BAM-sum got 164 -- a real bug the library sidesteps.
 #
 # Wire protocol (line-based ASCII, one TCP connection per JASE run):
 #   -> OPEN <ch_hex> <name>\n     <- OK <len>\n<len raw bytes>   (success)
@@ -42,6 +39,7 @@
 # time-critical, a TCP round-trip per byte is not something to risk it on.
 #
 # Usage:
+#   pip install d64
 #   python3 sdi_bridge.py --tcp-port 9700 --basedir /path/to/loose/prgs
 #   python3 sdi_bridge.py --tcp-port 9700 --basedir /path/to/disk.d64
 # -----------------------------------------------------------------------------
@@ -57,110 +55,83 @@ import socket
 import struct
 import sys
 
-VERSION = "0.1"
+from d64 import DiskImage
 
-d64_image = None  # None = loose .prg dir; else [(name, bytes, blocks, raw_name16), ...] on-disk order
-d64_header = None  # (disk_name16, disk_id2, dos_type2, free_blocks) raw bytes from the BAM, or None
+VERSION = "0.2"
+
+disk_image = None  # open d64.DiskImage, or None in loose-.prg-dir mode
 charcode_mode = 'ASCII'  # 'ASCII' (default) or 'PETASCII' -- see build_catalog()
 
 
 # ---------------------------------------------------------------------------
-# D64 parsing -- copied from tools/c64iec_fs/c64iec_fs_tcp.py, same facts,
-# same license (GPLv3), see top-of-file comment.
+# Catalog source abstraction -- same shape (name/blocks/raw_name16/read())
+# whether backed by a real .d64 (via the `d64` library) or a loose directory
+# of .prg files, so build_catalog()/handle_open() don't care which.
 # ---------------------------------------------------------------------------
 
-def _d64_sectors_per_track(track: int) -> int:
-    if track <= 17:
-        return 21
-    if track <= 24:
-        return 19
-    if track <= 30:
-        return 18
-    return 17
+class CatalogEntry:
+    __slots__ = ('name', 'blocks', 'raw_name16', '_read')
 
+    def __init__(self, name: str, blocks: int, raw_name16: bytes, read_fn):
+        self.name = name
+        self.blocks = blocks
+        self.raw_name16 = raw_name16
+        self._read = read_fn
 
-def _d64_ts_offset(track: int, sector: int) -> int:
-    offset = sum(_d64_sectors_per_track(t) for t in range(1, track)) * 256
-    return offset + sector * 256
-
-
-def load_d64_image(path: str):
-    """Returns ([(name, bytes, blocks, raw_name16), ...], (disk_name16, disk_id2, dos_type2, free_blocks))."""
-    with open(path, 'rb') as f:
-        data = f.read()
-
-    # BAM (Block Availability Map) is always track 18 sector 0 -- disk
-    # name/ID/DOS-type live at fixed offsets within it, and the first
-    # byte of each track's 4-byte BAM entry (offset 4, tracks 1-35) is
-    # that track's free-sector count -- summing them is the standard
-    # "blocks free" figure. Raw name/id/type bytes kept as-is (not
-    # decoded) -- see build_catalog() for how they're used.
-    bam = data[_d64_ts_offset(18, 0): _d64_ts_offset(18, 0) + 256]
-    free_blocks = sum(bam[4 + t * 4] for t in range(35))
-    header = (bam[0x90:0x90 + 16], bam[0xA2:0xA2 + 2], bam[0xA5:0xA5 + 2], free_blocks)
-
-    entries = []
-    track, sector = 18, 1
-    visited = set()
-    while track != 0 and (track, sector) not in visited:
-        visited.add((track, sector))
-        block = data[_d64_ts_offset(track, sector): _d64_ts_offset(track, sector) + 256]
-        next_track, next_sector = block[0], block[1]
-        for i in range(8):
-            entry = block[2 + i * 32: 2 + i * 32 + 32]
-            file_type = entry[0]
-            if file_type == 0:
-                continue
-            raw_name16 = bytes(entry[3:19])  # exact on-disk field, PETSCII, 0xA0-padded to 16
-            name = raw_name16.rstrip(b'\xa0').decode('latin1')
-            start_track, start_sector = entry[1], entry[2]
-            # Block count is the directory's OWN stored value (offset
-            # 28-29, 16-bit LE) -- the authoritative number a real 1541
-            # displays, not something to re-derive from the file's byte
-            # length (which would only be an approximation).
-            blocks = entry[28] | (entry[29] << 8)
-            entries.append((name, _d64_extract_chain(data, start_track, start_sector), blocks, raw_name16))
-        track, sector = next_track, next_sector
-
-    return entries, header
-
-
-def _d64_extract_chain(data: bytes, track: int, sector: int) -> bytes:
-    out = bytearray()
-    visited = set()
-    while track != 0:
-        if (track, sector) in visited:
-            break
-        visited.add((track, sector))
-        off = _d64_ts_offset(track, sector)
-        block = data[off: off + 256]
-        next_track, next_sector = block[0], block[1]
-        if next_track == 0:
-            last_used = next_sector
-            out += block[2:2 + max(0, last_used - 1)]
-        else:
-            out += block[2:256]
-        track, sector = next_track, next_sector
-    return bytes(out)
+    def read(self) -> bytes:
+        return self._read()
 
 
 def list_entries(base_dir: str) -> list:
-    """[(name, bytes, blocks, raw_name16), ...] -- from d64_image if
-    mounted (on-disk order), otherwise loose .prg files in base_dir
-    (alphabetical, block count approximated from file size -- there's
-    no real directory to read it from, raw_name16 synthesized PETSCII-
-    style from the ASCII name since there's no real on-disk field)."""
-    if d64_image is not None:
-        return d64_image
+    """[CatalogEntry, ...] -- from the open .d64 if mounted (on-disk
+    order), otherwise loose .prg files in base_dir (alphabetical, block
+    count approximated from file size -- there's no real directory to
+    read it from, raw_name16 synthesized PETSCII-style since there's no
+    real on-disk field to read back)."""
+    if disk_image is not None:
+        out = []
+        for p in disk_image.iterdir():
+            name = p.name.decode('latin1') if isinstance(p.name, bytes) else p.name
+            raw16 = name.upper().encode('ascii', errors='replace').ljust(16, b'\xa0')[:16]
+            out.append(CatalogEntry(name, p.size_blocks, raw16, p.open().read))
+        return out
     out = []
     for f in sorted(os.scandir(base_dir), key=lambda f: f.name.lower()):
         if f.is_file() and f.name.lower().endswith('.prg'):
-            with open(f.path, 'rb') as fh:
-                content = fh.read()
-                name = os.path.splitext(f.name)[0]
-                raw_name16 = name.upper().encode('ascii', errors='replace').ljust(16, b'\xa0')[:16]
-                out.append((name, content, max(1, (len(content) + 253) // 254), raw_name16))
+            name = os.path.splitext(f.name)[0]
+            raw16 = name.upper().encode('ascii', errors='replace').ljust(16, b'\xa0')[:16]
+            size = f.stat().st_size
+            blocks = max(1, (size + 253) // 254)
+            out.append(CatalogEntry(name, blocks, raw16, lambda path=f.path: open(path, 'rb').read()))
     return out
+
+
+def disk_header():
+    """(disk_name16, disk_id2, dos_type_byte, dos_version_byte, free_blocks)
+    -- raw bytes/ints as the BAM stores them, or blank defaults in
+    loose-dir mode (no real BAM to read)."""
+    if disk_image is not None:
+        name = disk_image.name if isinstance(disk_image.name, bytes) else disk_image.name.encode('latin1')
+        disk_id = disk_image.id if isinstance(disk_image.id, bytes) else disk_image.id.encode('latin1')
+        return (
+            name.ljust(16, b'\xa0')[:16],
+            disk_id.ljust(2, b'\xa0')[:2],
+            disk_image.dos_type,
+            disk_image.dos_version,
+            disk_image.bam.total_free(),
+        )
+    return b' ' * 16, b'  ', ord('2'), ord('A'), 0
+
+
+def hex_preview(data: bytes, limit: int = 96) -> str:
+    """Short hex+ASCII dump for logging -- truncated for anything bigger
+    than a screenful so a multi-KB file open doesn't flood the log the
+    way the full catalog dump intentionally still does (it's small)."""
+    shown = data[:limit]
+    hexs = " ".join(f"{b:02x}" for b in shown)
+    asc = "".join(chr(b) if 32 <= b <= 126 else "." for b in shown)
+    suffix = f" ... (+{len(data) - limit} more bytes)" if len(data) > limit else ""
+    return f"{hexs} | {asc}{suffix}"
 
 
 # ---------------------------------------------------------------------------
@@ -196,10 +167,11 @@ def list_entries(base_dir: str) -> list:
 # stream prints through the Spectrum ROM's own character printer
 # (confirmed bare RST $10, zero transformation, no PETSCII awareness),
 # and 0xA0 lands in the Spectrum's UDG range (144-163), which is NOT
-# guaranteed blank (an uninitialized UDG table could show garbage).
-# 'PETASCII' sends the real on-disk bytes completely unmodified --
-# Pawel's own hypothesis that SDI's ROM might handle PETSCII itself,
-# worth testing directly rather than assuming either way.
+# guaranteed blank (an uninitialized UDG table could show garbage --
+# confirmed live: it shows a repeating "0" glyph, not a space).
+# 'PETASCII' sends 0xA0-padded bytes unmodified -- Pawel's own
+# hypothesis that SDI's ROM might handle PETSCII itself, tested and
+# disproven, kept as a diagnostic option.
 # ---------------------------------------------------------------------------
 
 def build_catalog(base_dir: str) -> bytes:
@@ -213,24 +185,21 @@ def build_catalog(base_dir: str) -> bytes:
         out.extend(struct.pack('<H', link_addr & 0xFFFF))
         out.extend(body)
 
-    if d64_header is not None:
-        disk_name, disk_id, dos_type, free_blocks = d64_header
-    else:
-        disk_name, disk_id, dos_type, free_blocks = b' ' * 16, b'  ', b'2A', 0
+    disk_name, disk_id, dos_type, dos_version, free_blocks = disk_header()
 
     if charcode_mode == 'PETASCII':
-        emit_line(0, b'"' + disk_name + b'" ' + disk_id + b' ' + dos_type)
-        for name, content, blocks, raw_name16 in list_entries(base_dir):
-            emit_line(blocks, b'"' + raw_name16 + b'" PRG')
+        emit_line(0, b'"' + disk_name + b'" ' + disk_id + b' ' + bytes([dos_version, dos_type]))
+        for e in list_entries(base_dir):
+            emit_line(e.blocks, b'"' + e.raw_name16 + b'" PRG')
     else:
         disk_name = bytes(0x20 if b == 0xA0 else b for b in disk_name)
         disk_id = bytes(0x20 if b == 0xA0 else b for b in disk_id)
-        emit_line(0, b'"' + disk_name + b'" ' + disk_id + b' ' + dos_type)
-        for name, content, blocks, raw_name16 in list_entries(base_dir):
-            clean = ''.join(c for c in name.upper() if 0x20 <= ord(c) <= 0x7E)
+        emit_line(0, b'"' + disk_name + b'" ' + disk_id + b' ' + bytes([dos_version, dos_type]))
+        for e in list_entries(base_dir):
+            clean = ''.join(c for c in e.name.upper() if 0x20 <= ord(c) <= 0x7E)
             padded = clean.ljust(16)[:16]
             line = ('"' + padded + '" PRG').encode('ascii', errors='replace')
-            emit_line(blocks, line)
+            emit_line(e.blocks, line)
 
     emit_line(free_blocks, b"BLOCKS FREE.")
     out += b"\x00\x00"  # end of program -- the real catalog terminator
@@ -268,66 +237,87 @@ def read_exact(sock: socket.socket, count: int) -> bytes:
     return bytes(buf)
 
 
-def handle_open(sock: socket.socket, fields: list, channels: dict, base_dir: str) -> None:
-    if len(fields) < 3:
+def handle_open(sock: socket.socket, line: str, channels: dict, base_dir: str) -> None:
+    # Split on the first two spaces only -- "OPEN <ch_hex> <name>" where
+    # <name> is everything after that second space, embedded spaces and
+    # all (real CBM filenames routinely contain them, e.g. "BUGGY BOY" --
+    # the generic comma-or-space field split main()'s read loop uses for
+    # dispatch would otherwise chop a space-containing name into several
+    # fields and lose everything after the first word).
+    parts = line.split(' ', 2)
+    if len(parts) < 3:
+        print(f"[OPEN] malformed request: {line!r}")
         send_line(sock, "ERR malformed")
         return
     try:
-        channel = int(fields[1], 16)
+        channel = int(parts[1], 16)
     except ValueError:
+        print(f"[OPEN] invalid channel field: {parts[1]!r}")
         send_line(sock, "ERR invalid channel")
         return
-    name = fields[2]
+    name = parts[2]
 
     if name in ('$', '$0', '$1'):
         content = build_catalog(base_dir)
-        print(f"[OPEN] ch={channel} '$' -> catalog, {len(content)} bytes")
-        print(" ".join(f"{b:02x}" for b in content) + " | " + "".join(chr(b) if 32 <= b <= 126 else "." for b in content) + "\n", end="")
+        print(f"[OPEN] ch={channel} name='$' -> CATALOG, {len(content)} bytes, "
+              f"{len(list_entries(base_dir))} file(s)")
+        print(f"       {hex_preview(content, limit=len(content))}")
 
     else:
-        match = next((c for n, c, _b, _r in list_entries(base_dir) if n.upper() == name.upper()), None)
+        match = next((e for e in list_entries(base_dir) if e.name.upper() == name.upper()), None)
         if match is None:
-            print(f"[OPEN] ch={channel} '{name}' -> FAIL (not found)")
+            print(f"[OPEN] ch={channel} name='{name}' -> NOT FOUND")
             send_line(sock, "ERR not found")
             return
-        content = match
-        print(f"[OPEN] ch={channel} '{name}' -> OK, {len(content)} bytes")
+        content = match.read()
+        print(f"[OPEN] ch={channel} name='{name}' -> FILE, {len(content)} bytes "
+              f"({match.blocks} block(s) on disk)")
+        print(f"       {hex_preview(content)}")
 
     channels[channel] = content
     send_line(sock, f"OK {len(content)}")
     sock.sendall(content)
+    print(f"[OPEN] ch={channel} -> sent {len(content)} bytes to JASE")
 
 
 def handle_close(sock: socket.socket, fields: list, channels: dict) -> None:
     if len(fields) >= 2:
         try:
-            channels.pop(int(fields[1], 16), None)
+            channel = int(fields[1], 16)
+            had = channels.pop(channel, None)
+            print(f"[CLOSE] ch={channel} ({'was open' if had is not None else 'was not open'})")
         except ValueError:
-            pass
+            print(f"[CLOSE] invalid channel field: {fields[1]!r}")
+    else:
+        print("[CLOSE] malformed request:", fields)
     send_line(sock, "OK")
 
 
 def handle_write(sock: socket.socket, fields: list, channels: dict, base_dir: str) -> None:
     if len(fields) < 4:
+        print("[WRITE] malformed request:", fields)
         send_line(sock, "ERR malformed")
         return
     try:
         channel = int(fields[1], 16)
         length = int(fields[2])
     except ValueError:
+        print("[WRITE] malformed request:", fields)
         send_line(sock, "ERR malformed")
         return
+    eoi = fields[3] if len(fields) > 3 else '?'
     data = read_exact(sock, length)
     # SAVE support is intentionally minimal for now -- not what this
     # rewrite is chasing (the catalog-format bug is). Accept and drop,
     # same honest-stub convention as leaving something unimplemented
     # elsewhere in this project rather than half-faking it.
-    print(f"[WRITE] ch={channel} {length} bytes (discarded -- SAVE not implemented yet)")
+    print(f"[WRITE] ch={channel} {length} bytes, eoi={eoi} (discarded -- SAVE not implemented yet)")
+    print(f"        {hex_preview(data)}")
     send_line(sock, "OK")
 
 
 def main() -> None:
-    global d64_image, d64_header, charcode_mode
+    global disk_image, charcode_mode
 
     parser = argparse.ArgumentParser(description="SDI-native file bridge for JASE's SDI_8255 peripheral")
     parser.add_argument('--tcp-port', type=int, default=9700)
@@ -336,18 +326,29 @@ def main() -> None:
                          help="catalog charset: ASCII (default, converts 0xA0 padding to a plain "
                               "space for safe display on the Spectrum charset) or PETASCII "
                               "(send real on-disk bytes unmodified, testing whether SDI's own ROM "
-                              "handles the translation itself)")
+                              "handles the translation itself -- confirmed it doesn't, kept as a "
+                              "diagnostic option)")
     args = parser.parse_args()
     charcode_mode = args.charcode
 
     base_dir = args.basedir
+    print(f"=== SDI Bridge V{VERSION} ===")
     if os.path.isfile(base_dir) and base_dir.lower().endswith('.d64'):
-        d64_image, d64_header = load_d64_image(base_dir)
-        print(f"=== SDI Bridge V{VERSION} ===")
-        print(f"Disk: {base_dir} (mounted .d64, {len(d64_image)} file(s), charcode={charcode_mode})")
+        disk_image = DiskImage(base_dir).open()
+        entries = list_entries(base_dir)
+        name, disk_id, dos_type, dos_version, free_blocks = disk_header()
+        clean_name = bytes(0x20 if b == 0xA0 else b for b in name).decode('ascii', errors='replace')
+        clean_id = bytes(0x20 if b == 0xA0 else b for b in disk_id).decode('ascii', errors='replace')
+        print(f"Disk: {base_dir} (mounted .d64 via the 'd64' library, charcode={charcode_mode})")
+        print(f"      name=\"{clean_name}\" id=\"{clean_id}\" "
+              f"dos={chr(dos_version)}{chr(dos_type)} free={free_blocks} blocks")
+        print(f"      {len(entries)} file(s):")
+        for e in entries:
+            print(f"        {e.blocks:>3} block(s)  \"{e.name}\"")
     else:
-        print(f"=== SDI Bridge V{VERSION} ===")
-        print(f"Dir: {base_dir}")
+        print(f"Dir: {base_dir} (loose .prg files, charcode={charcode_mode})")
+        for e in list_entries(base_dir):
+            print(f"        {e.blocks:>3} block(s)  \"{e.name}\"")
 
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -356,8 +357,8 @@ def main() -> None:
     print(f"Listening on 127.0.0.1:{args.tcp_port}. Waiting for JASE's SDI peripheral... (Ctrl+C to stop)")
 
     while True:
-        conn, _ = srv.accept()
-        print("\n*** Client connected.")
+        conn, addr = srv.accept()
+        print(f"\n*** Client connected from {addr}.")
         channels: dict = {}
         try:
             while True:
@@ -366,8 +367,9 @@ def main() -> None:
                 if not fields or not fields[0]:
                     continue
                 cmd = fields[0]
+                print(f"[RECV] {line!r}")
                 if cmd == "OPEN":
-                    handle_open(conn, fields, channels, base_dir)
+                    handle_open(conn, line, channels, base_dir)
                 elif cmd == "CLOSE":
                     handle_close(conn, fields, channels)
                 elif cmd == "WRITE":

@@ -1,5 +1,6 @@
 #include "SDI_8255.h"
 #include <cstring>
+#include <SDL2/SDL.h>
 
 SDI_8255::SDI_8255()
 {
@@ -10,14 +11,34 @@ SDI_8255::SDI_8255()
 		bus_.setControllerClk((v & 0x04) != 0);
 		bus_.setControllerDat((v & 0x08) != 0);
 		iec_.onControllerChanged(bus_, lastTstates_);
+		if (iectraceEnabled_) logIectrace("OUT", v);
 	};
 	chip_.inC = [this]() {
 		// Bits this doesn't drive (0-5, and 6/7 themselves when
 		// released) read back as 1 -- floating/pulled-up, matching
 		// real unconnected-TTL-input behavior.
-		return (uint8_t)(0xff & ~((bus_.clk() ? 0x40 : 0) | (bus_.dat() ? 0x80 : 0)));
+		uint8_t v = (uint8_t)(0xff & ~((bus_.clk() ? 0x40 : 0) | (bus_.dat() ? 0x80 : 0)));
+		if (iectraceEnabled_) logIectrace("IN ", v);
+		return v;
 	};
 	iec_.setDevice(&bridge_);
+}
+
+// See setIectraceEnabled()'s comment in the header -- logs the
+// RESOLVED bus state (not just the raw Port C byte) on every access,
+// timestamped the same way INSTRTRACE is (seconds.microseconds since
+// SDL init) so the two trace streams can be correlated directly.
+void SDI_8255::logIectrace(const char* direction, uint8_t value)
+{
+	double ts = (double)SDL_GetPerformanceCounter() / (double)SDL_GetPerformanceFrequency();
+	fprintf(stderr,
+	        "IECTRACE ts=%.6f pc=%04x %s pc_byte=%02x atn=%d ctrlClk=%d ctrlDat=%d devClk=%d devDat=%d "
+	        "rxPhase=%d txPhase=%d role=%d bitCount=%d shiftByte=%02x secCmd=%d chan=%d txBitIndex=%d txByte=%02x\n",
+	        ts, lastPc_, direction, value,
+	        bus_.atn() ? 1 : 0, bus_.controllerClk() ? 1 : 0, bus_.controllerDat() ? 1 : 0,
+	        bus_.deviceClk() ? 1 : 0, bus_.deviceDat() ? 1 : 0,
+	        iec_.rxPhase(), iec_.txPhase(), iec_.role(), iec_.bitCount(), iec_.shiftByte(),
+	        iec_.secondaryCmd(), iec_.activeChannel(), iec_.txBitIndex(), iec_.txByte());
 }
 
 bool SDI_8255::in(uint16_t port, uint8_t& value)
@@ -40,6 +61,7 @@ void SDI_8255::onInstructionFetch(uint16_t pc, MemoryMap& memory, uint32_t tstat
 {
 	if (!enabled_) return;
 	lastTstates_ = tstates;
+	lastPc_ = pc;
 	iec_.tick(bus_, tstates); // time-driven transitions (EOI timeout, ack release, idle-offer) need this even with no port write
 
 	if (!romLoaded_) return;
@@ -157,6 +179,21 @@ std::string SDI_8255::debugCommand(const std::vector<std::string>& toks)
 		         "OK channel=%d connected=%d name=\"%s\" lastReply=\"%s\"",
 		         iec_.activeChannel(), bridge_.isConnected() ? 1 : 0,
 		         iec_.nameBuf().c_str(), bridge_.lastReply().c_str());
+		return out;
+	}
+
+	if (toks[0] == "IECTRACE") {
+		// Same ON/OFF convention as INSTRTRACE (minzx.cpp) -- see
+		// setIectraceEnabled()'s header comment for what this logs and
+		// why it was worth rebuilding. No address range here (unlike
+		// INSTRTRACE): every Port C access IS the thing worth tracing,
+		// there's no "outside the window of interest" to exclude.
+		if (toks.size() >= 2) {
+			if (toks[1] == "ON") setIectraceEnabled(true);
+			else if (toks[1] == "OFF") setIectraceEnabled(false);
+		}
+		char out[64];
+		snprintf(out, sizeof(out), "OK iectrace=%d", isIectraceEnabled() ? 1 : 0);
 		return out;
 	}
 
