@@ -4,7 +4,7 @@
 
 // What the (future) IEC protocol layer needs from "whatever's at the
 // other end of the bus" -- today that's IecBridgeClient (a TCP
-// connection to tools/c64iec_fs/c64iec_fs_tcp.py or an equivalent
+// connection to tools/sdi_bridge/sdi_bridge.py or an equivalent
 // companion); later it can be a native 1541 emulation living entirely
 // inside this process, implementing the same four calls, with nothing
 // else in the codebase needing to change. Same split as IAySound/AyPsg

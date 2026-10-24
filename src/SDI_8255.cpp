@@ -147,5 +147,17 @@ std::string SDI_8255::debugCommand(const std::vector<std::string>& toks)
 		return out;
 	}
 
+	if (toks[0] == "IECNAME") {
+		// Diagnostic-only (not a stable API): what OPEN actually saw,
+		// and the bridge's own last reply line -- for tracing why
+		// requestRead() isn't producing data.
+		char out[320];
+		snprintf(out, sizeof(out),
+		         "OK channel=%d connected=%d name=\"%s\" lastReply=\"%s\"",
+		         iec_.activeChannel(), bridge_.isConnected() ? 1 : 0,
+		         iec_.nameBuf().c_str(), bridge_.lastReply().c_str());
+		return out;
+	}
+
 	return std::string();
 }

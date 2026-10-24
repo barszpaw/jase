@@ -205,7 +205,7 @@ static void printUsage(const char* argv0)
 		"                         IEC bus protocol yet.\n"
 		"  --sdi8255-rom PATH     the real SDI103J ROM (exactly 4096 bytes);\n"
 		"                         implies --sdi8255.\n"
-		"  --sdi8255-bridge HOST:PORT connect to tools/c64iec_fs/c64iec_fs_tcp.py\n"
+		"  --sdi8255-bridge HOST:PORT connect to tools/sdi_bridge/sdi_bridge.py\n"
 		"                         (or an equivalent companion) for OPEN/CLOSE.\n"
 		"\n"
 		"Debugging:\n"

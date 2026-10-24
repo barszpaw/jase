@@ -1,28 +1,33 @@
 #pragma once
 #include "IIecDevice.h"
 #include <cstdint>
+#include <string>
+#include <map>
 
-// TCP transport to tools/c64iec_fs/c64iec_fs_tcp.py (or an equivalent
-// companion speaking the same wire protocol) -- the "bridge" this
-// project's been calling it. Wire format read directly from upstream
-// fox20io/c64-fdemu's IECSerialFile.cpp (GPLv3, not copied -- see
-// docs/VC1541/VC1541.md's "Bridging to a real/virtual 1541" section for
-// the licensing reasoning: this is a fact about an interoperability
-// format, reused the same way this project already reused pico-spec's
-// port numbers and ZEsarUX's debug-protocol shape):
+// TCP transport to tools/sdi_bridge/sdi_bridge.py -- a purpose-built
+// companion for SDI specifically (replaces the earlier tools/c64iec_fs/
+// c64iec_fs_tcp.py, an fdemu-derived real-C64-protocol bridge: live-traced
+// against the real SDI103J ROM, its *CAT does NOT read a "$" directory the
+// way a real C64/1541 does -- see sdi_bridge.py's own top-of-file comment
+// for the full trace. Rather than keep forcing real-CBM wire semantics
+// onto a peripheral that doesn't follow them, this bridge/client pair
+// speaks a protocol written directly against what SDI was traced wanting).
 //
-//   -> O,<ch_hex>,<name>\n          <- OK...\n (or anything else = fail)
-//   -> R,<ch_hex>,<chunksize>\n     <- <M|L|E>,<n>\n + n raw bytes
-//   -> W,<ch_hex>,<n>,<E|C>\n + n raw bytes   <- OK...\n (or fail)
-//   -> C,<ch_hex>\n                 <- (one line, ignored)
+//   -> OPEN <ch_hex> <name>\n   <- OK <len>\n<len raw bytes>  (success)
+//                                <- ERR <reason>\n             (failure)
+//   -> CLOSE <ch_hex>\n         <- OK\n
+//   -> WRITE <ch_hex> <len> <E|C>\n<len raw bytes>  <- OK\n / ERR <reason>\n
 //
-// Blocking line/byte I/O throughout -- deliberately, not async: the IEC
-// protocol layer calling this already has to block the emulated bus
-// waiting for a response anyway (real IEC is a slow serial bus, not
-// something the Z80 side can race ahead of), so there's no benefit to
-// a non-blocking design here, only complexity. Every call is also a
-// no-op/false/empty-safe when not connected, so callers work whether or
-// not a bridge was ever configured, same convention ZiFi's pump() uses.
+// Deliberately pre-fetch at OPEN, not per-byte: the whole channel's
+// content comes back in one round-trip and is buffered here; requestRead()
+// drains the LOCAL buffer with no further network I/O. The IEC bit-banging
+// this feeds is time-critical (SDI_8255/IecDeviceEmulator's TX state
+// machine) -- a TCP round-trip per byte was never something to risk that
+// on, pre-fetching removes the question entirely.
+//
+// Every call is a no-op/false/empty-safe when not connected, so callers
+// work whether or not a bridge was ever configured, same convention
+// ZiFi's pump() uses.
 class IecBridgeClient : public IIecDevice
 {
 public:
@@ -48,4 +53,12 @@ private:
 
 	int fd_ = -1;
 	std::string lastReply_;
+
+	// Whole-channel content fetched at open(), drained locally by
+	// requestRead(). pos_ tracks how much of data_ has been consumed.
+	struct ChannelBuffer {
+		std::string data;
+		size_t pos = 0;
+	};
+	std::map<int, ChannelBuffer> buffers_;
 };

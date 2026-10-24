@@ -11,12 +11,15 @@ static constexpr uint32_t kAckHoldTstates = 245;      // 70us
 // that measured value for margin.
 static constexpr uint32_t kAtnAckTstates = 4200;
 
-// Idle-offer transmit cycle (see class comment -- an inference, not a
-// confirmed protocol fact): same per-bit timing scale as receive.
+// Transmit (talker) per-bit timing -- same per-bit scale as receive. Not
+// tied to a specific measured controller delay like kAtnAckTstates: the
+// controller's own per-bit loop ($3177-$318c) is a tight, undelayed spin
+// waiting on CLK edges, so these just need to be comfortably longer than
+// its "two consecutive reads must agree" stability check in $3025 (5
+// iterations, ~65 T-states) for it to reliably see a settled read.
 static constexpr uint32_t kTxClaimTstates = 245;      // 70us
 static constexpr uint32_t kTxBitSetupTstates = 280;   // 80us
 static constexpr uint32_t kTxBitValidTstates = 245;   // 70us
-static constexpr uint32_t kTxIdleGapTstates = 3500;   // ~1ms between offers
 
 void IecDeviceEmulator::advanceTime(uint32_t tstates)
 {
@@ -74,13 +77,16 @@ void IecDeviceEmulator::checkRxTimeouts(IecBus& bus)
 			if (rxElapsed_ >= kAckHoldTstates) {
 				datWeDrive_ = false;
 				bus.setDeviceDat(false);
-				// Still under ATN -- the real ROM repeats its own
+				// The real byte-sender ($30d4) repeats its own
 				// release-and-check dance ($30d8-$30e1) before EVERY
-				// byte, not just the first, so re-ack presence rather
-				// than silently waiting in WaitReadyToSend for a CLK
-				// edge that might already be sitting asserted from the
-				// next byte's own early preamble (see $30ab).
-				if (bus.atn())
+				// byte it sends, under ATN or not -- it's generic,
+				// used for addressing bytes and plain data bytes
+				// alike. Re-ack rather than silently waiting in
+				// WaitReadyToSend for a CLK edge that might already be
+				// sitting asserted from the next byte's own early
+				// preamble (see $30ab). Only stop once nothing more is
+				// expected (role_ reset to None, e.g. after UNLISTEN).
+				if (bus.atn() || role_ == IecRole::WeAreListener)
 					enterAtnPresenceAck(bus);
 				else
 					enterRxPhase(RxPhase::WaitReadyToSend);
@@ -93,26 +99,25 @@ void IecDeviceEmulator::checkRxTimeouts(IecBus& bus)
 
 void IecDeviceEmulator::checkTxTimeouts(IecBus& bus)
 {
-	// DISABLED (see class comment and VC1541.md): the periodic idle-offer
-	// was an unprincipled guess at what the controller's pre-ATN receive
-	// loop ($3142-$318c in the real ROM) wants. That loop's own timeout
-	// (D=0x14, bounded) is almost certainly designed to resolve FAST and
-	// cleanly when nothing answers -- the normal, correct behavior for a
-	// genuinely idle/quiet bus -- and the unsynchronized periodic offer
-	// most likely made things WORSE (partial, misaligned CLK transitions
-	// confusing that bounded wait into retrying) rather than better.
-	// Reverted to "drive nothing" pending a real understanding of what
-	// that probe wants, if anything, once idle alone is confirmed to
-	// resolve the bounded wait cleanly.
-	bool busIdle = false; (void)busIdle;
-
 	switch (txPhase_) {
 		case TxPhase::Idle:
-			if (busIdle && txElapsed_ >= kTxIdleGapTstates) {
-				txByte_ = 0x00; // placeholder -- see class comment
-				txBitIndex_ = 0;
-				bus.setDeviceClk(true);
-				enterTxPhase(TxPhase::ClaimBus);
+			// Real trigger, read off the ROM's own $3365-$3372 ("release
+			// our CLK, then spin waiting for CLK to read asserted"): we
+			// are the talker and the bus's CLK is currently released --
+			// that IS the controller's "go ahead" state, no separate
+			// signal needed. requestRead() is blocking (real network
+			// round-trip to the bridge) but only called once per byte,
+			// right here, not on every idle tick.
+			if (role_ == IecRole::WeAreTalker && !bus.clk() && !txAttempted_) {
+				txAttempted_ = true;
+				std::string data;
+				bool eoi = false;
+				if (device_ && device_->requestRead(activeChannel_, 1, data, eoi) && !data.empty()) {
+					txByte_ = (uint8_t)data[0];
+					txBitIndex_ = 0;
+					bus.setDeviceClk(true);
+					enterTxPhase(TxPhase::ClaimBus);
+				}
 			}
 			break;
 		case TxPhase::ClaimBus:
@@ -133,6 +138,7 @@ void IecDeviceEmulator::checkTxTimeouts(IecBus& bus)
 				if (txBitIndex_ >= 8) {
 					bus.setDeviceClk(false);
 					bus.setDeviceDat(false);
+					txAttempted_ = false; // byte done -- let the next one be requested
 					enterTxPhase(TxPhase::Idle);
 				} else {
 					txByte_ >>= 1; // LSB-first, same convention as receive
@@ -189,7 +195,7 @@ void IecDeviceEmulator::onControllerChanged(IecBus& bus, uint32_t tstates)
 	bool atnJustReleased = !atn && lastAtn_;
 
 	if (atnJustAsserted) {
-		// Abort any in-progress idle offer -- the controller takes
+		// Abort any in-progress talker byte -- the controller takes
 		// priority the instant it asserts ATN.
 		if (txPhase_ != TxPhase::Idle) {
 			bus.setDeviceClk(false);
@@ -198,7 +204,16 @@ void IecDeviceEmulator::onControllerChanged(IecBus& bus, uint32_t tstates)
 		}
 		role_ = IecRole::None;
 		enterAtnPresenceAck(bus);
-	} else if (atnJustReleased) {
+	} else if (atnJustReleased && rxPhase_ != RxPhase::AtnPresenceAck) {
+		// A presence ack in progress is left alone here -- its own
+		// timeout (checkRxTimeouts) already releases DAT and advances
+		// to WaitReadyToSend on its own schedule, which is tied to the
+		// controller's own internal delay ($30b1-$30b9), NOT to
+		// whenever ATN happens to drop. Cutting the hold short here
+		// just reintroduces the original premature-CLK-edge bug for
+		// whichever byte is in flight when ATN releases mid-ack.
+		datWeDrive_ = false;
+		bus.setDeviceDat(false);
 		if (role_ == IecRole::WeAreListener || role_ == IecRole::None)
 			enterRxPhase(RxPhase::WaitReadyToSend);
 		else
@@ -264,7 +279,8 @@ void IecDeviceEmulator::onAtnByteReceived(uint8_t byte)
 	} else if (byte >= 0x20 && byte <= 0x3e) {
 		role_ = IecRole::WeAreListener;        // LISTEN: we keep receiving
 	} else if (byte >= 0x40 && byte <= 0x5e) {
-		role_ = IecRole::WeAreTalker;          // TALK: we should send -- not implemented yet
+		role_ = IecRole::WeAreTalker;
+		txAttempted_ = false; // fresh TALK -- allow a read attempt
 	} else {
 		onSecondaryByte(byte);
 	}
@@ -277,6 +293,17 @@ void IecDeviceEmulator::onSecondaryByte(uint8_t b)
 		secondaryCmd_ = SecondaryCmd::Open;
 		activeChannel_ = b & 0x0f;
 		nameBuf_.clear();
+		txAttempted_ = false; // new/changed channel -- allow a fresh read attempt
+		// Under TALK there's no data phase to collect a filename from
+		// (that only happens under LISTEN, terminated by UNLISTEN --
+		// see finalizeSession()) -- live-traced against the real SDI
+		// ROM's own *C (catalog) command: it addresses TALK, opens
+		// channel 0, and starts clocking bits WITHOUT ever sending a
+		// name at all. Channel 0 defaults to "$" (the standard CBM
+		// directory pseudo-file), matching the bridge's own special
+		// case for it and the SDI manual's documented SD2IEC workflow.
+		if (role_ == IecRole::WeAreTalker && activeChannel_ == 0 && device_)
+			device_->open(activeChannel_, "$");
 	} else if (isClose) {
 		secondaryCmd_ = SecondaryCmd::Close;
 		activeChannel_ = b & 0x0f;
@@ -284,6 +311,7 @@ void IecDeviceEmulator::onSecondaryByte(uint8_t b)
 	} else if (b >= 0xf0) {
 		secondaryCmd_ = SecondaryCmd::PlainSelect;
 		activeChannel_ = b & 0x0f;
+		txAttempted_ = false;
 	}
 }
 
