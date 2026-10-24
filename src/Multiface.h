@@ -44,7 +44,7 @@ public:
 
 	const char* name() const override { return "MULTIFACE1"; }
 	bool in(uint16_t port, uint8_t& value) override;
-	void onInstructionFetch(uint16_t pc, MemoryMap& memory) override;
+	void onInstructionFetch(uint16_t pc, MemoryMap& memory, uint32_t tstates) override;
 	void onNMI() override;
 	std::string debugCommand(const std::vector<std::string>& toks) override;
 

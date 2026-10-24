@@ -494,13 +494,14 @@ public:
 	class DivIde* getDivIde() const { return divide_; }
 
 	// Same idea: main.cpp calls setEnabled()/loadRom() on this after
-	// init() constructs it, for --sdi/--sdi-rom.
-	class SDI* getSDI() const { return sdi_; }
+	// init() constructs it, for --sdi8255/--sdi8255-rom.
+	class SDI_8255* getSDI8255() const { return sdi8255_; }
+
 private:
 	class ZiFi* zifi_ = nullptr;
 	class Multiface* multiface_ = nullptr;
 	class DivIde* divide_ = nullptr;
-	class SDI* sdi_ = nullptr;
+	class SDI_8255* sdi8255_ = nullptr;
 };
 
 #endif // _MINZX_H_

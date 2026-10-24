@@ -291,9 +291,16 @@ def build_directory_listing(base_dir: str) -> bytes:
 
         offset += LINE_SIZE
 
-    next_off = LOAD_ADDRESS + offset + LINE_SIZE
-    buf[offset + 0] = next_off & 0xFF
-    buf[offset + 1] = (next_off >> 8) & 0xFF
+    # Footer line's link pointer stays 0x0000 (end-of-BASIC-program marker,
+    # already zero from bytearray()) -- upstream's own comment here says
+    # exactly this, but the code used to overwrite it with a real address
+    # anyway (copy-paste from the per-file loop above, where a real link
+    # pointer IS wanted). Real SDI firmware parses these link pointers
+    # directly while streaming the catalog in (it has no IEC-level EOI
+    # detection of its own for this read), and keeps asking for more bytes
+    # past the end of the listing when it never sees the zero terminator --
+    # confirmed live: that's what was producing a stray "B Integer out of
+    # range" once the underlying byte stream ran out from under it.
     buf[offset + 2: offset + 2 + len(DIR_LIST_FOOTER)] = DIR_LIST_FOOTER
     return bytes(buf)
 

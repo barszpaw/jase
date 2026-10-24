@@ -6,7 +6,7 @@
 #include "ZiFi.h"
 #include "Multiface.h"
 #include "DivIde.h"
-#include "SDI.h"
+#include "SDI_8255.h"
 #include <SDL.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -163,8 +163,8 @@ void MinZX::init()
 	peripherals_.push_back(multiface_);
 	divide_ = new DivIde();
 	peripherals_.push_back(divide_);
-	sdi_ = new SDI();
-	peripherals_.push_back(sdi_);
+	sdi8255_ = new SDI_8255();
+	peripherals_.push_back(sdi8255_);
 
 	reset();
 }
@@ -294,7 +294,7 @@ void MinZX::update(uint8_t* screen)
 		// right here and reapplied immediately -- see reapplyMachinePaging().
 		traceInstructionIfEnabled();
 		bool romcsWasUp = memory_.isRomcsAsserted();
-		for (Peripheral* p : peripherals_) p->onInstructionFetch(z80->getRegPC(), memory_);
+		for (Peripheral* p : peripherals_) p->onInstructionFetch(z80->getRegPC(), memory_, tstates);
 		if (romcsWasUp && !memory_.isRomcsAsserted())
 			reapplyMachinePaging();
 		// Check AFTER executing, not before: if we're resuming from a
@@ -400,7 +400,7 @@ void MinZX::step(int n)
 		}
 		traceInstructionIfEnabled();
 		bool romcsWasUp = memory_.isRomcsAsserted();
-		for (Peripheral* p : peripherals_) p->onInstructionFetch(z80->getRegPC(), memory_);
+		for (Peripheral* p : peripherals_) p->onInstructionFetch(z80->getRegPC(), memory_, tstates);
 		if (romcsWasUp && !memory_.isRomcsAsserted())
 			reapplyMachinePaging();
 		z80->execute();
