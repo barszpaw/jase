@@ -175,7 +175,7 @@ def hex_preview(data: bytes, limit: int = 96) -> str:
 # ---------------------------------------------------------------------------
 
 def build_catalog(base_dir: str) -> bytes:
-    out = bytearray(b"\x01\x08")
+    out = bytearray(b"\x01\x00")  # EXPERIMENT: real CBM load-addr high byte is 0x08; testing 0x00
     link_addr = 0x0801
 
     def emit_line(linenum: int, text: bytes) -> None:
@@ -262,6 +262,30 @@ def handle_open(sock: socket.socket, line: str, channels: dict, base_dir: str) -
         print(f"[OPEN] ch={channel} name='$' -> CATALOG, {len(content)} bytes, "
               f"{len(list_entries(base_dir))} file(s)")
         print(f"       {hex_preview(content, limit=len(content))}")
+
+    elif name == '$STATUS':
+        # The CBM error/status channel (15) -- IecDeviceEmulator auto-opens
+        # this with the "$STATUS" sentinel name whenever SDI addresses
+        # channel 15 (see its onSecondaryByte comment). A real drive's
+        # default idle status is "00, OK,00,00\r" -- this file's own
+        # top-of-file comment already documented that SDI reads this
+        # line byte-by-byte via its own $3138 before showing a catalog,
+        # and suppresses display unless the second digit is >= '2' (i.e.
+        # only non-routine statuses like a power-up "73,..." banner get
+        # shown) -- "00" is exactly the routine case, so this canned
+        # reply should read as silently-OK to SDI.
+        # TRIED AND REVERTED (Pawel's suggestion): a 19-byte Spectrum
+        # .TAP-style header (flag/type/name[10]/length/param1/param2/
+        # checksum) on this same channel -- made things WORSE, not
+        # better: SDI hung (role=Talker, txPhase=0, PC parked in a bus
+        # poll loop) instead of cleanly reaching "LOADING OK" and
+        # returning to BASIC. So channel 15 itself isn't where a
+        # TAP-style header belongs, at least not alone/unprompted like
+        # this -- see project memory for the live IECBUS/REGS state at
+        # the hang, and the open question of where (if anywhere) such a
+        # header actually needs to go.
+        content = b"00, OK,00,00\r"
+        print(f"[OPEN] ch={channel} name='$STATUS' -> STATUS, {len(content)} bytes: {content!r}")
 
     else:
         match = next((e for e in list_entries(base_dir) if e.name.upper() == name.upper()), None)

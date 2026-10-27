@@ -36,6 +36,19 @@ public:
 	bool connect(const char* host, int port);
 
 	bool isConnected() const override { return fd_ >= 0; }
+	// WARNING: synchronous/blocking -- sendLine()+readLine()+readExact()
+	// with up to 2000ms of poll() timeout each, called straight from
+	// SDI_8255's chip_.outC -> IecDeviceEmulator::onSecondaryByte, i.e.
+	// from inside the Z80 instruction-fetch hot path (see that comment
+	// for the real-protocol case this gets hit from: TALK + OPEN
+	// channel 0 for the catalog, and channel 15's presence/status
+	// probe). Harmless against a local, fast bridge (confirmed live --
+	// channel 15's probe never even reaches here, see that comment),
+	// but a slow or remote bridge would stall the entire emulated CPU
+	// for the duration of the round-trip. Not fixed here: would need
+	// either an async open (return immediately, deliver the buffer
+	// later) or moving the bridge off TCP entirely -- out of scope
+	// until a real bridge latency problem shows up.
 	bool open(int channel, const std::string& name) override;
 	void close(int channel) override;
 	bool write(int channel, const std::string& data, bool eoi) override;

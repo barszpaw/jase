@@ -144,8 +144,26 @@ void IecDeviceEmulator::onSecondaryByte(uint8_t b)
 		// name at all. Channel 0 defaults to "$" (the standard CBM
 		// directory pseudo-file), matching the bridge's own special
 		// case for it and the SDI manual's documented SD2IEC workflow.
-		if (role_ == IecRole::WeAreTalker && activeChannel_ == 0 && device_)
-			device_->open(activeChannel_, "$");
+		// Channel 15 is the CBM error/status channel -- handled here
+		// defensively (auto-open under TALK, same shape as channel 0's
+		// catalog case) in case some future ROM path addresses it this
+		// way. NOT what SDI's own *L actually does, though: live-traced
+		// with a full atn/role transition dump, its device-presence
+		// probe addresses channel 15 under LISTEN (role_==WeAreListener),
+		// not TALK -- see the PlainSelect branch below, which is the
+		// shape that probe actually uses, and whose own comment explains
+		// why this WeAreTalker branch never fires for it in practice.
+		//
+		// NOTE: device_->open() below is a synchronous, blocking TCP
+		// call (see IecBridgeClient::open()'s own warning) made straight
+		// from this hot dispatch path. Fine against a fast local bridge;
+		// would stall the whole emulated CPU against a slow/remote one.
+		if (role_ == IecRole::WeAreTalker && device_) {
+			if (activeChannel_ == 0)
+				device_->open(activeChannel_, "$");
+			else if (activeChannel_ == 15)
+				device_->open(activeChannel_, "$STATUS");
+		}
 	} else if (isClose) {
 		secondaryCmd_ = SecondaryCmd::Close;
 		activeChannel_ = b & 0x0f;
@@ -153,6 +171,27 @@ void IecDeviceEmulator::onSecondaryByte(uint8_t b)
 	} else if (b >= 0xf0) {
 		secondaryCmd_ = SecondaryCmd::PlainSelect;
 		activeChannel_ = b & 0x0f;
+		// This IS the shape SDI's own *L actually uses to probe channel
+		// 15: LISTEN + plain-select 0xFF, role_==WeAreListener -- so the
+		// WeAreTalker guard below never fires for it (kept for protocol
+		// completeness/future-proofing, not because SDI needs it).
+		// Confirmed by a full atn/role/secCmd/chan transition dump
+		// (IECTRACE) around a real *L run: the probe is a sub-millisecond
+		// ATN pulse (ATN drops for ~20 trace samples then reasserts)
+		// with NO byte ever completing a full 8-bit shift under it --
+		// i.e. SDI isn't actually writing or reading data on channel 15
+		// here at all, just pulsing ATN, structurally identical to the
+		// ATN-presence-ack handshake IecListenerState::enterAtnPresenceAck
+		// already answers (DAT asserted locally, no device_ call, no
+		// network I/O -- see that function). So there was never a real
+		// "channel 15 blocks forever" bug in this flow: the earlier
+		// appearance of one came from an incompletely-submitted test
+		// command (ENTER not actually registering), not from this
+		// probe. The code below is honest protocol support for a
+		// hypothetical TALK-side use of channel 15, not a fix for
+		// anything SDI's own ROM was observed to need.
+		if (role_ == IecRole::WeAreTalker && activeChannel_ == 15 && device_)
+			device_->open(activeChannel_, "$STATUS");
 	}
 }
 
