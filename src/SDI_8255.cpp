@@ -55,7 +55,12 @@ bool SDI_8255::in(uint16_t port, uint8_t& value)
 	if (!enabled_) return false;
 	if ((port != 0x9F) && (port != 0xBF) && (port != 0xDF) && (port != 0xFF))
 		return false;
-	value = chip_.read((port >> 5) & 3); // A6,A5 -> 8255's own A1,A0
+	uint8_t reg = (port >> 5) & 3;
+	value = chip_.read(reg); // A6,A5 -> 8255's own A1,A0
+	if (iotraceEnabled_) {
+		double ts = (double)SDL_GetPerformanceCounter() / (double)SDL_GetPerformanceFrequency();
+		fprintf(stderr, "IOTRACE ts=%.6f pc=%04x IN  port=%02x reg=%d -> %02x\n", ts, lastPc_, port, reg, value);
+	}
 	return true;
 }
 
@@ -66,7 +71,12 @@ bool SDI_8255::out(uint16_t port, uint8_t value)
 	if (!enabled_) return false;
 	if ((port != 0x9F) && (port != 0xBF) && (port != 0xDF) && (port != 0xFF))
 		return false;
-	chip_.write((port >> 5) & 3, value);
+	uint8_t reg = (port >> 5) & 3;
+	chip_.write(reg, value);
+	if (iotraceEnabled_) {
+		double ts = (double)SDL_GetPerformanceCounter() / (double)SDL_GetPerformanceFrequency();
+		fprintf(stderr, "IOTRACE ts=%.6f pc=%04x OUT port=%02x reg=%d <- %02x\n", ts, lastPc_, port, reg, value);
+	}
 	return true;
 }
 
@@ -211,6 +221,16 @@ std::string SDI_8255::debugCommand(const std::vector<std::string>& toks)
 		}
 		char out[64];
 		snprintf(out, sizeof(out), "OK iectrace=%d", isIectraceEnabled() ? 1 : 0);
+		return out;
+	}
+
+	if (toks[0] == "IOTRACE") {
+		if (toks.size() >= 2) {
+			if (toks[1] == "ON") setIotraceEnabled(true);
+			else if (toks[1] == "OFF") setIotraceEnabled(false);
+		}
+		char out[64];
+		snprintf(out, sizeof(out), "OK iotrace=%d", isIotraceEnabled() ? 1 : 0);
 		return out;
 	}
 

@@ -421,6 +421,9 @@ int main(int argc, char *argv[])
 		else if (0 == strcmp(argv[i], "--debug-iectrace")) {
 			minZX.getSDI8255()->setIectraceEnabled(true);
 		}
+		else if (0 == strcmp(argv[i], "--debug-iotrace")) {
+			minZX.getSDI8255()->setIotraceEnabled(true);
+		}
 	}
 
 	// FileMgr's load* functions already print exactly which path failed

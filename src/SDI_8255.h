@@ -143,4 +143,5 @@ private:
 	uint16_t lastPc_ = 0; // same stash, for logIectrace()'s own PC column
 
 	bool iectraceEnabled_ = false;
+	bool iotraceEnabled_ = false;
 };
