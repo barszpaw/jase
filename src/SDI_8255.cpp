@@ -40,7 +40,7 @@ void SDI_8255::logIectrace(const char* direction, uint8_t value)
 	double ts = (double)SDL_GetPerformanceCounter() / (double)SDL_GetPerformanceFrequency();
 	fprintf(stderr,
 	        "IECTRACE ts=%.6f pc=%04x %s pc_byte=%02x atn=%d ctrlClk=%d ctrlDat=%d devClk=%d devDat=%d "
-	        "rxPhase=%d txPhase=%d role=%d bitCount=%d shiftByte=%02x secCmd=%d chan=%d txBitIndex=%d txByte=%02x\n",
+	        "rxPhase=%d txPhase=%d role=%n bitCount=%d shiftByte=%02x secCmd=%d chan=%d txBitIndex=%d txByte=%02x\n",
 	        ts, lastPc_, direction, value,
 	        bus_.atn() ? 1 : 0, bus_.controllerClk() ? 1 : 0, bus_.controllerDat() ? 1 : 0,
 	        bus_.deviceClk() ? 1 : 0, bus_.deviceDat() ? 1 : 0,
@@ -50,16 +50,22 @@ void SDI_8255::logIectrace(const char* direction, uint8_t value)
 
 bool SDI_8255::in(uint16_t port, uint8_t& value)
 {
+	// Validate that port is one of the SDI 8255 ports: $9F, $BF, $DF, $FF
+    // These are the only ports that map to the PPI chip's PA, PB, PC, CONF registers
 	if (!enabled_) return false;
-	if ((port & 0x9f) != 0x9f) return false; // U3A: A0-A4,A7 must all be 1
+	if ((port != 0x9F) && (port != 0xBF) && (port != 0xDF) && (port != 0xFF))
+		return false;
 	value = chip_.read((port >> 5) & 3); // A6,A5 -> 8255's own A1,A0
 	return true;
 }
 
 bool SDI_8255::out(uint16_t port, uint8_t value)
 {
+	// Validate that port is one of the SDI 8255 ports: $9F, $BF, $DF, $FF
+    // These are the only ports that map to the PPI chip's PA, PB, PC, CONF registers
 	if (!enabled_) return false;
-	if ((port & 0x9f) != 0x9f) return false;
+	if ((port != 0x9F) && (port != 0xBF) && (port != 0xDF) && (port != 0xFF))
+		return false;
 	chip_.write((port >> 5) & 3, value);
 	return true;
 }
@@ -110,6 +116,10 @@ void SDI_8255::pageOut(MemoryMap& memory)
 
 void SDI_8255::onPortCChanged(uint8_t value)
 {
+	// Handle PC1 (bank select) changes while active -- updates only
+	// page1_'s upper half ($3000-$3FFF); the lower half stays whatever
+	// was snapshotted at pageIn() time. pageIn() itself does the initial
+	// full setup (snapshot + upper half) directly, not through here.
 	bool bank1 = (value & 0x02) != 0; // PC1 -> EPROM A12
 	if (bank1 != romBank1Selected_) {
 		romBank1Selected_ = bank1;
@@ -166,8 +176,8 @@ std::string SDI_8255::debugCommand(const std::vector<std::string>& toks)
 		// so it can be polled while the emulator keeps running.
 		char out[320];
 		snprintf(out, sizeof(out),
-		         "OK atn=%d clk=%d dat=%d ctrlClk=%d ctrlDat=%d devClk=%d devDat=%d rxPhase=%d txPhase=%d role=%d "
-		         "bitCount=%d shiftByte=%02x lastByte=%02x secCmd=%d txBitIndex=%d txByte=%02x",
+		         "OK atn=%d clk=%d dat=%d ctrlClk=%d ctrlDat=%d devClk=%d devDat=%d "
+		         "rxPhase=%d txPhase=%d role=%id bitCount=%d shiftByte=%02x secCmd=%d chan=%d txBitIndex=%d txByte=%02x",
 		         bus_.atn() ? 1 : 0, bus_.clk() ? 1 : 0, bus_.dat() ? 1 : 0,
 		         bus_.controllerClk() ? 1 : 0, bus_.controllerDat() ? 1 : 0,
 		         bus_.deviceClk() ? 1 : 0, bus_.deviceDat() ? 1 : 0,
@@ -206,3 +216,4 @@ std::string SDI_8255::debugCommand(const std::vector<std::string>& toks)
 
 	return std::string();
 }
+EOF
