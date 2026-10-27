@@ -135,6 +135,16 @@ void SDI_8255::onPortCChanged(uint8_t value)
 		romBank1Selected_ = bank1;
 		if (active_) rebuildRomWindows();
 	}
+
+	// Update listener DAT override for DEVICE NOT PRESENT fix
+	// When ATN is asserted (bit 0 = 0 in real hardware, but bus_.atn() is inverted)
+	// and bridge is connected, simulate device presence.
+	// bus_.atn() is true when asserted.
+	if (bus_.atn() && bridge_.isConnected()) {
+		listenerDatOverride_ = true;
+	} else {
+		listenerDatOverride_ = false;
+	}
 }
 
 void SDI_8255::rebuildRomWindows()
