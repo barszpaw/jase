@@ -20,9 +20,11 @@ SDI_8255::SDI_8255()
 		uint8_t v = (uint8_t)(0xff & ~((bus_.clk() ? 0x40 : 0) | (bus_.dat() ? 0x80 : 0)));
 
 		// Apply listener DAT override for DEVICE NOT PRESENT fix
-		if (listenerDatOverride_) {
+		// Use a countdown to ensure the ROM sees the asserted DAT for multiple polls
+		if (listenerDatOverride_ || listenerDatCountdown_ > 0) {
 			// Force DAT line asserted (bit 7 = 0) when simulating device present
 			v &= 0x7F;
+			if (listenerDatCountdown_ > 0) listenerDatCountdown_--;
 		}
 
 		if (iectraceEnabled_) logIectrace("IN ", v);
@@ -142,6 +144,7 @@ void SDI_8255::onPortCChanged(uint8_t value)
 	// bus_.atn() is true when asserted.
 	if (bus_.atn() && bridge_.isConnected()) {
 		listenerDatOverride_ = true;
+		listenerDatCountdown_ = kListenerDatReadyPolls;
 	} else {
 		listenerDatOverride_ = false;
 	}

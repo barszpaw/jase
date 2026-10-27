@@ -113,9 +113,8 @@ private:
 	void logIectrace(const char* direction, uint8_t value);
 
 	// Listener DAT simulation for DEVICE NOT PRESENT fix
-	bool listenerDat_ = true;  // Initially deasserted (floating high)
 	bool listenerDatOverride_ = false;  // When true, force DAT asserted
-	uint32_t listenerDatTimeout_ = 0;   // T-states until auto-release
+	uint32_t listenerDatCountdown_ = 0; // Number of polls to keep DAT asserted
 	static constexpr uint32_t kListenerDatReadyPolls = 8;
 
 	I8255 chip_;
