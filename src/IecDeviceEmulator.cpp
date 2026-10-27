@@ -164,6 +164,10 @@ void IecDeviceEmulator::onSecondaryByte(uint8_t b)
 			else if (activeChannel_ == 15)
 				device_->open(activeChannel_, "$STATUS");
 		}
+		// For WeAreListener role, the OPEN secondary means the controller
+		// (SDI) is about to send us a filename (LOAD/SAVE/CAT). We don't
+		// need to do anything here -- the data bytes will come in onDataByte
+		// and we already have the LOAD encoder ready.
 	} else if (isClose) {
 		secondaryCmd_ = SecondaryCmd::Close;
 		activeChannel_ = b & 0x0f;
@@ -193,6 +197,17 @@ void IecDeviceEmulator::onSecondaryByte(uint8_t b)
 		if (role_ == IecRole::WeAreTalker && activeChannel_ == 15 && device_)
 			device_->open(activeChannel_, "$STATUS");
 	}
+	// Kick off the send path for WeAreTalker when we have an OPEN or
+	// PlainSelect secondary. The real ROM uses both forms:
+	// - OPEN ($60-$6F): explicit OPEN command (e.g., TALK+OPEN channel 15 for status)
+	// - PlainSelect ($F0-$FF): KERNAL LOAD/SAVE convention without separate OPEN
+	// Both should trigger our talker to start sending (filename for OPEN,
+	// or data for SAVE/PlainSelect).
+	if (role_ == IecRole::WeAreTalker && (secondaryCmd_ == SecondaryCmd::Open || secondaryCmd_ == SecondaryCmd::PlainSelect)) {
+		// The talker will pick this up in its Idle state via queueSendByte
+		// when it has data to send. For now, we just note that a send
+		// session is active.
+	}
 }
 
 void IecDeviceEmulator::onDataByte(uint8_t b)
@@ -200,8 +215,20 @@ void IecDeviceEmulator::onDataByte(uint8_t b)
 	// OPEN's filename arrives as data-phase bytes following the
 	// secondary address, terminated by UNLISTEN (see finalizeSession).
 	// SAVE's payload isn't forwarded anywhere yet.
-	if (secondaryCmd_ == SecondaryCmd::Open)
+	if (secondaryCmd_ == SecondaryCmd::Open) {
 		nameBuf_ += (char)b;
+		// If we're the talker (controller sending filename to device),
+		// queue this byte for transmission via the IEC bus.
+		if (role_ == IecRole::WeAreTalker) {
+			// We don't know EOI yet for individual bytes -- the real ROM
+			// sends filename bytes via $30bc/$30d4 loop, then UNLISTEN
+			// terminates. The last byte before UNLISTEN is effectively
+			// the EOI byte, but we don't know that until we see UNLISTEN.
+			// For now, send all with eoi=false; the finalizeSession will
+			// handle the last byte specially if needed.
+			talker_.queueSendByte(b, false);
+		}
+	}
 }
 
 void IecDeviceEmulator::finalizeSession()

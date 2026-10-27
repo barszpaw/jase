@@ -98,6 +98,13 @@ public:
 	void setIectraceEnabled(bool on) { iectraceEnabled_ = on; }
 	bool isIectraceEnabled() const { return iectraceEnabled_; }
 
+	// Per-access 8255 register I/O logger (SDI_IOTRACE): logs every IN/OUT
+	// to all four 8255 registers (PA/PB/PC/CONF) with the current PC.
+	// This is the raw port-access trace (what the register sees), NOT the
+	// resolved bus state (what IECTRACE logs). Runtime toggle, no rebuild.
+	void setIotraceEnabled(bool on) { iotraceEnabled_ = on; }
+	bool isIotraceEnabled() const { return iotraceEnabled_; }
+
 private:
 	void pageIn(MemoryMap& memory);
 	void pageOut(MemoryMap& memory);

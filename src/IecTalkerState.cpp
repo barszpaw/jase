@@ -25,6 +25,11 @@ static constexpr uint32_t kClaimClkTstates = 280;
 // 200us + the ack pulse width.
 static constexpr uint32_t kEoiNotifyTstates = 1050; // ~300us
 
+// Send path timing (mirrors receive path but as talker driving the bus)
+static constexpr uint32_t kSendBitSetupTstates = 280;  // ~80us, Ts
+static constexpr uint32_t kSendBitValidTstates = 245;  // ~70us, Tv
+static constexpr uint32_t kSendWaitAckTstates = 1050;  // ~300us max wait for ack
+
 void IecTalkerState::enterSubState(SubState s)
 {
 	subState_ = s;
@@ -37,6 +42,7 @@ void IecTalkerState::onEnter(IecDeviceEmulator& ctx, IecBus& bus)
 	(void)bus;
 	enterSubState(SubState::Idle);
 	byteAttempted_ = false;
+	sendQueue_.valid = false;
 }
 
 void IecTalkerState::abort(IecBus& bus)
@@ -44,7 +50,19 @@ void IecTalkerState::abort(IecBus& bus)
 	bus.setDeviceClk(false);
 	bus.setDeviceDat(false);
 	byteAttempted_ = false;
+	sendQueue_.valid = false;
 	enterSubState(SubState::Idle);
+}
+
+bool IecTalkerState::queueSendByte(uint8_t byte, bool eoi)
+{
+	if (sendQueue_.valid) {
+		return false; // pipeline full
+	}
+	sendQueue_.byte = byte;
+	sendQueue_.eoi = eoi;
+	sendQueue_.valid = true;
+	return true;
 }
 
 void IecTalkerState::onEdge(IecDeviceEmulator& ctx, IecBus& bus)
@@ -90,6 +108,12 @@ void IecTalkerState::checkTransitions(IecDeviceEmulator& ctx, IecBus& bus)
 					bus.setDeviceClk(true);
 					enterSubState(SubState::ClaimClk);
 				}
+			}
+			// Also check if there's a queued send byte (filename/SAVE path)
+			else if (sendQueue_.valid) {
+				// Transition to turnaround to claim the bus
+				bus.setDeviceClk(true);
+				enterSubState(SubState::Turnaround);
 			}
 			break;
 		case SubState::ClaimClk:
@@ -150,6 +174,69 @@ void IecTalkerState::checkTransitions(IecDeviceEmulator& ctx, IecBus& bus)
 			if (bus.controllerDat()) {
 				bus.setDeviceClk(false);
 				byteAttempted_ = false; // byte done -- let the next one be requested
+				enterSubState(SubState::Idle);
+			}
+			break;
+
+		// --- Filename/SAVE send path (mirrors real ROM's $30d4) ---
+		case SubState::Turnaround:
+			// One-shot: assert CLK (claim bus), then release for Step 1
+			// The real ROM's $30d4 does: release DAT, check listener DAT,
+			// release CLK, then per-bit loop. Here we just need to
+			// complete the claim-turnaround.
+			if (elapsed_ >= kClaimClkTstates) {
+				bus.setDeviceClk(false); // Step 1: ready-to-send
+				// Now wait for listener to release DAT (ready for data)
+				enterSubState(SubState::SendWaitReady);
+			}
+			break;
+		case SubState::SendWaitReady:
+			// Wait for listener to release DAT (ready for data)
+			// For EOI, withhold CLK for >200us (same as receive path)
+			if (!bus.controllerDat()) {
+				if (sendQueue_.eoi)
+					enterSubState(SubState::EoiNotify);
+				else
+					enterSubState(SubState::SendBitSetup);
+			}
+			break;
+		case SubState::SendBitSetup:
+			if (elapsed_ >= kSendBitSetupTstates) {
+				// Assert CLK and set DAT to current bit
+				bus.setDeviceClk(true);
+				bus.setDeviceDat((sendQueue_.byte & 1) == 0); // LSB-first, asserted DAT = bit 0
+				enterSubState(SubState::SendBitValid);
+			}
+			break;
+		case SubState::SendBitValid:
+			if (elapsed_ >= kSendBitValidTstates) {
+				// Release CLK (sample point), release DAT
+				bus.setDeviceClk(false);
+				bus.setDeviceDat(false);
+				bitIndex_++;
+				if (bitIndex_ >= 8) {
+					// Byte done, wait for ack
+					bus.setDeviceClk(true); // assert CLK for ack phase
+					enterSubState(SubState::SendWaitAck);
+				} else {
+					// Next bit
+					sendQueue_.byte >>= 1;
+					enterSubState(SubState::SendBitSetup);
+				}
+			}
+			break;
+		case SubState::SendWaitAck:
+			// Wait for listener to assert DAT (ack)
+			if (bus.controllerDat()) {
+				bus.setDeviceClk(false);
+				sendQueue_.valid = false; // byte done
+				bitIndex_ = 0;
+				enterSubState(SubState::Idle);
+			} else if (elapsed_ >= kSendWaitAckTstates) {
+				// Timeout - give up on this byte
+				bus.setDeviceClk(false);
+				sendQueue_.valid = false;
+				bitIndex_ = 0;
 				enterSubState(SubState::Idle);
 			}
 			break;

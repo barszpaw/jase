@@ -80,23 +80,12 @@ void IecListenerState::onTick(IecDeviceEmulator& ctx, IecBus& bus, uint32_t delt
 			}
 			break;
 		case SubState::AckHold:
-			if (elapsed_ >= kAckHoldTstates) {
-				datWeDrive_ = false;
-				bus.setDeviceDat(false);
-				// The real byte-sender ($30d4) repeats its own
-				// release-and-check dance ($30d8-$30e1) before EVERY
-				// byte it sends, under ATN or not -- it's generic, used
-				// for addressing bytes and plain data bytes alike.
-				// Re-ack rather than silently waiting in WaitReadyToSend
-				// for a CLK edge that might already be sitting asserted
-				// from the next byte's own early preamble (see $30ab).
-				// Only stop once nothing more is expected (role_ reset
-				// to None, e.g. after UNLISTEN).
-				if (bus.atn() || ctx.role_ == IecDeviceEmulator::IecRole::WeAreListener)
-					enterAtnPresenceAck(ctx, bus);
-				else
-					enterSubState(SubState::WaitReadyToSend);
-			}
+			// Event-driven: keep DAT asserted (ack) until the NEXT CLK assert edge
+			// (the controller's "ready-to-send" for the next byte). The real ROM
+			// does a device-presence check ($30d8-$30de) that polls DAT while its
+			// own CLK is still released -- so we must keep DAT asserted through
+			// that check. We release only when we see CLK asserted again.
+			// No fixed timeout here -- the edge detection in onEdge handles it.
 			break;
 		default:
 			break; // edge-driven phases, handled in onEdge
@@ -108,6 +97,7 @@ void IecListenerState::onEdge(IecDeviceEmulator& ctx, IecBus& bus)
 	bool ctrlClk = bus.controllerClk();
 	bool ctrlDat = bus.controllerDat();
 	bool clkReleaseEdge = !ctrlClk && lastCtrlClk_;
+	bool clkAssertEdge = ctrlClk && !lastCtrlClk_;
 
 	switch (subState_) {
 		case SubState::WaitReadyToSend:
@@ -135,6 +125,29 @@ void IecListenerState::onEdge(IecDeviceEmulator& ctx, IecBus& bus)
 					enterSubState(SubState::AckHold);
 					ctx.onByteReceived(byte, eoi, bus.atn());
 				}
+			}
+			break;
+
+		case SubState::AckHold:
+			// Event-driven release: when we see the NEXT CLK assert edge
+			// (controller ready-to-send for next byte), release DAT and
+			// transition to waiting for the next byte.
+			if (clkAssertEdge) {
+				datWeDrive_ = false;
+				bus.setDeviceDat(false);
+				// The real byte-sender ($30d4) repeats its own
+				// release-and-check dance ($30d8-$30e1) before EVERY
+				// byte it sends, under ATN or not -- it's generic, used
+				// for addressing bytes and plain data bytes alike.
+				// Re-ack rather than silently waiting in WaitReadyToSend
+				// for a CLK edge that might already be sitting asserted
+				// from the next byte's own early preamble (see $30ab).
+				// Only stop once nothing more is expected (role_ reset
+				// to None, e.g. after UNLISTEN).
+				if (bus.atn() || ctx.role_ == IecDeviceEmulator::IecRole::WeAreListener)
+					enterAtnPresenceAck(ctx, bus);
+				else
+					enterSubState(SubState::WaitReadyToSend);
 			}
 			break;
 

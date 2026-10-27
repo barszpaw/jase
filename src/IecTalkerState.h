@@ -49,23 +49,40 @@ public:
 	// so a fresh TALK+OPEN starts clean.
 	void abort(IecBus& bus);
 
+	// --- New: filename send path (mirrors real ROM's $30d4 bit-bang sender) ---
+	// Called by the facade when we need to queue a byte for transmission
+	// (after OPEN secondary byte, or for SAVE payload). Returns true if
+	// the byte was accepted into the pipeline, false if the pipeline is full.
+	bool queueSendByte(uint8_t byte, bool eoi);
+
 private:
 	enum class SubState {
 		Idle, ClaimClk, WaitListenerReady, EoiNotify, BitSetup, BitValid, WaitAck,
+		// Filename/SAVE send path (one-shot turnaround + streaming):
+		Turnaround,   // One-shot: assert CLK (claim bus), then release for Step 1
+		SendWaitReady, // Wait for listener to release DAT (ready for data)
+		SendBitSetup,  // Per-bit: assert CLK + set DAT
+		SendBitValid,  // Per-bit: release CLK (sample point), release DAT
+		SendWaitAck,   // Wait for listener to assert DAT (ack)
 	};
 
 	void enterSubState(SubState s);
 	void checkTransitions(IecDeviceEmulator& ctx, IecBus& bus);
 	void beginBits(IecBus& bus);
 
+	// Existing receive path (LOAD encoder) state:
 	SubState subState_ = SubState::Idle;
 	uint32_t elapsed_ = 0;
 	uint8_t currentByte_ = 0x00; // current byte being shifted out, from requestRead()
 	int bitIndex_ = 0;
 	bool eoi_ = false; // this is the last byte of the stream -- see EoiNotify
-
-	// requestRead() is called once per byte, not on every tick -- see
-	// the Idle case. Reset wherever a fresh read attempt makes sense
-	// (new TALK, new secondary/channel, after an abort()).
 	bool byteAttempted_ = false;
+
+	// New: send path state (for filename/SAVE payload)
+	struct SendQueue {
+		uint8_t byte = 0;
+		bool eoi = false;
+		bool valid = false;
+	};
+	SendQueue sendQueue_;
 };
