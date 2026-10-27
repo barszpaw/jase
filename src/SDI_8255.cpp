@@ -40,10 +40,10 @@ void SDI_8255::logIectrace(const char* direction, uint8_t value)
 	double ts = (double)SDL_GetPerformanceCounter() / (double)SDL_GetPerformanceFrequency();
 	fprintf(stderr,
 	        "IECTRACE ts=%.6f pc=%04x %s pc_byte=%02x atn=%d ctrlClk=%d ctrlDat=%d devClk=%d devDat=%d "
-	        "rxPhase=%d txPhase=%d role=%n bitCount=%d shiftByte=%02x secCmd=%d chan=%d txBitIndex=%d txByte=%02x\n",
+	        "rxPhase=%d txPhase=%d role=%d bitCount=%d shiftByte=%02x secCmd=%d chan=%d txBitIndex=%d txByte=%02x\n",
 	        ts, lastPc_, direction, value,
 	        bus_.atn() ? 1 : 0, bus_.controllerClk() ? 1 : 0, bus_.controllerDat() ? 1 : 0,
-	        bus_.deviceClk() ? 1 : 0, bus_.deviceDat() ? 1 : 0,
+		        bus_.deviceClk() ? 1 : 0, bus_.deviceDat() ? 1 : 0,
 	        iec_.rxPhase(), iec_.txPhase(), iec_.role(), iec_.bitCount(), iec_.shiftByte(),
 	        iec_.secondaryCmd(), iec_.activeChannel(), iec_.txBitIndex(), iec_.txByte());
 }
@@ -216,4 +216,3 @@ std::string SDI_8255::debugCommand(const std::vector<std::string>& toks)
 
 	return std::string();
 }
-EOF
