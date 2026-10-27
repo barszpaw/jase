@@ -18,6 +18,13 @@ SDI_8255::SDI_8255()
 		// released) read back as 1 -- floating/pulled-up, matching
 		// real unconnected-TTL-input behavior.
 		uint8_t v = (uint8_t)(0xff & ~((bus_.clk() ? 0x40 : 0) | (bus_.dat() ? 0x80 : 0)));
+
+		// Apply listener DAT override for DEVICE NOT PRESENT fix
+		if (listenerDatOverride_) {
+			// Force DAT line asserted (bit 7 = 0) when simulating device present
+			v &= 0x7F;
+		}
+
 		if (iectraceEnabled_) logIectrace("IN ", v);
 		return v;
 	};
