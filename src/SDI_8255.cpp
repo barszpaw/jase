@@ -16,17 +16,24 @@ SDI_8255::SDI_8255()
 	chip_.inC = [this]() {
 		// Bits this doesn't drive (0-5, and 6/7 themselves when
 		// released) read back as 1 -- floating/pulled-up, matching
-		// real unconnected-TTL-input behavior.
+		// real unconnected-TTL-input behavior. DAT/CLK readback comes
+		// straight from the resolved IecBus state -- iec_ (IecDeviceEmulator/
+		// IecListenerState/IecTalkerState) is the ONE place that drives
+		// bus_.setDeviceDat()/setDeviceClk(), via its own protocol-timed
+		// state machine (see IecListenerState::enterAtnPresenceAck and
+		// friends). There used to ALSO be a listenerDatOverride_/
+		// listenerDatCountdown_ hack here that force-asserted DAT for a
+		// fixed number of polls after any Port C write while ATN was up --
+		// a leftover from before the root cause of DEVICE NOT PRESENT was
+		// found (see in()/out()'s own comment: a full 16-bit port compare
+		// silently dropped nearly every real access). Once real traffic
+		// started reaching the chip, this override's "stay asserted until
+		// ATN releases" condition fought the real state machine: it never
+		// expired because the ROM's own wait-for-DAT-released loop can't
+		// make ATN release until DAT releases, a genuine deadlock. Removed
+		// in favor of letting IecListenerState answer for real -- the
+		// whole reason that layer exists.
 		uint8_t v = (uint8_t)(0xff & ~((bus_.clk() ? 0x40 : 0) | (bus_.dat() ? 0x80 : 0)));
-
-		// Apply listener DAT override for DEVICE NOT PRESENT fix
-		// Use a countdown to ensure the ROM sees the asserted DAT for multiple polls
-		if (listenerDatOverride_ || listenerDatCountdown_ > 0) {
-			// Force DAT line asserted (bit 7 = 0) when simulating device present
-			v &= 0x7F;
-			if (listenerDatCountdown_ > 0) listenerDatCountdown_--;
-		}
-
 		if (iectraceEnabled_) logIectrace("IN ", v);
 		return v;
 	};
@@ -52,10 +59,22 @@ void SDI_8255::logIectrace(const char* direction, uint8_t value)
 
 bool SDI_8255::in(uint16_t port, uint8_t& value)
 {
-	// Validate that port is one of the SDI 8255 ports: $9F, $BF, $DF, $FF
-    // These are the only ports that map to the PPI chip's PA, PB, PC, CONF registers
+	// Match on the LOW byte only -- the real board's gate network (U3A,
+	// see the class comment) decodes A0-A4,A7 alone, never A8-A15. The
+	// single-byte "IN A,(n)"/"OUT (n),A" forms the real SDI ROM uses
+	// throughout put the CURRENT value of register A on the port's high
+	// byte (confirmed in z80cpp's own REG_WZ = regA<<8 | n), which is
+	// essentially never 0 in real execution -- a full 16-bit compare here
+	// silently rejected 2625/2625 real port accesses in one trace run
+	// (zero of them had A=0x00), which is the actual root cause behind
+	// the long "DEVICE NOT PRESENT" investigation in VC1541.md: the 8255
+	// model was barely ever reached at all, independent of which SDI ROM
+	// is loaded. Matches the convention every OTHER peripheral here
+	// already uses (Kempston.cpp, DivIde.cpp, Multiface.cpp all mask
+	// with "port & 0xFF") -- this was the one that didn't.
 	if (!enabled_) return false;
-	if ((port != 0x9F) && (port != 0xBF) && (port != 0xDF) && (port != 0xFF))
+	uint8_t loport = (uint8_t)(port & 0xFF);
+	if ((loport != 0x9F) && (loport != 0xBF) && (loport != 0xDF) && (loport != 0xFF))
 		return false;
 	uint8_t reg = (port >> 5) & 3;
 	value = chip_.read(reg); // A6,A5 -> 8255's own A1,A0
@@ -68,10 +87,10 @@ bool SDI_8255::in(uint16_t port, uint8_t& value)
 
 bool SDI_8255::out(uint16_t port, uint8_t value)
 {
-	// Validate that port is one of the SDI 8255 ports: $9F, $BF, $DF, $FF
-    // These are the only ports that map to the PPI chip's PA, PB, PC, CONF registers
+	// See in()'s comment -- same low-byte-only match, same reason.
 	if (!enabled_) return false;
-	if ((port != 0x9F) && (port != 0xBF) && (port != 0xDF) && (port != 0xFF))
+	uint8_t loport = (uint8_t)(port & 0xFF);
+	if ((loport != 0x9F) && (loport != 0xBF) && (loport != 0xDF) && (loport != 0xFF))
 		return false;
 	uint8_t reg = (port >> 5) & 3;
 	chip_.write(reg, value);
@@ -136,17 +155,6 @@ void SDI_8255::onPortCChanged(uint8_t value)
 	if (bank1 != romBank1Selected_) {
 		romBank1Selected_ = bank1;
 		if (active_) rebuildRomWindows();
-	}
-
-	// Update listener DAT override for DEVICE NOT PRESENT fix
-	// When ATN is asserted (bit 0 = 0 in real hardware, but bus_.atn() is inverted)
-	// and bridge is connected, simulate device presence.
-	// bus_.atn() is true when asserted.
-	if (bus_.atn() && bridge_.isConnected()) {
-		listenerDatOverride_ = true;
-		listenerDatCountdown_ = kListenerDatReadyPolls;
-	} else {
-		listenerDatOverride_ = false;
 	}
 }
 

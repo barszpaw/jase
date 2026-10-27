@@ -112,11 +112,6 @@ private:
 	void rebuildRomWindows();
 	void logIectrace(const char* direction, uint8_t value);
 
-	// Listener DAT simulation for DEVICE NOT PRESENT fix
-	bool listenerDatOverride_ = false;  // When true, force DAT asserted
-	uint32_t listenerDatCountdown_ = 0; // Number of polls to keep DAT asserted
-	static constexpr uint32_t kListenerDatReadyPolls = 8;
-
 	I8255 chip_;
 	IecBus bus_;
 	IecDeviceEmulator iec_;
