@@ -6,10 +6,10 @@ SDI_8255::SDI_8255()
 {
 	memset(eprom_[1], 0xff, sizeof(eprom_[1])); // erased-EPROM default, see class comment
 	chip_.outC = [this](uint8_t v) {
-		onPortCChanged(v);
 		bus_.setAtn((v & 0x01) != 0);
 		bus_.setControllerClk((v & 0x04) != 0);
 		bus_.setControllerDat((v & 0x08) != 0);
+		onPortCChanged(v);
 		iec_.onControllerChanged(bus_, lastTstates_);
 		if (iectraceEnabled_) logIectrace("OUT", v);
 	};
