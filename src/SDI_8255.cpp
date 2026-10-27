@@ -177,7 +177,7 @@ std::string SDI_8255::debugCommand(const std::vector<std::string>& toks)
 		char out[320];
 		snprintf(out, sizeof(out),
 		         "OK atn=%d clk=%d dat=%d ctrlClk=%d ctrlDat=%d devClk=%d devDat=%d "
-		         "rxPhase=%d txPhase=%d role=%id bitCount=%d shiftByte=%02x secCmd=%d chan=%d txBitIndex=%d txByte=%02x",
+		         "rxPhase=%d txPhase=%d role=%d bitCount=%d shiftByte=%02x secCmd=%d chan=%d txBitIndex=%d txByte=%02x",
 		         bus_.atn() ? 1 : 0, bus_.clk() ? 1 : 0, bus_.dat() ? 1 : 0,
 		         bus_.controllerClk() ? 1 : 0, bus_.controllerDat() ? 1 : 0,
 		         bus_.deviceClk() ? 1 : 0, bus_.deviceDat() ? 1 : 0,
