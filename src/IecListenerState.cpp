@@ -7,12 +7,37 @@
 static constexpr uint32_t kEoiWaitTstates = 700;      // 200us
 static constexpr uint32_t kEoiAckPulseTstates = 280;  // 80us
 static constexpr uint32_t kAckHoldTstates = 245;      // 70us
-// Presence ack -- measured directly against the real SDI103J ROM: 3761
-// T-states from the ATN OUT ($30a8) to its own presence check ($30e1),
-// via a software delay loop ($30b1-$30b9), not a fixed protocol
-// constant like the EOI/ack timings above. Held a bit past that
-// measured value for margin.
-static constexpr uint32_t kAtnAckTstates = 4200;
+// Presence ack -- originally measured directly against the real SDI103J
+// ROM: 3761 T-states from the ATN OUT ($30a8) to its own presence check
+// ($30e1), via a software delay loop ($30b1-$30b9), for the FIRST-TIME
+// activation case specifically (ATN assert -> check, nothing else in
+// between). 4200 (a bit past that) was fine for that one case.
+//
+// BUG FOUND LIVE 2026-10-28 (see project memory, "DEVICE NOT PRESENT --
+// FULL dispatch chain"): this same timeout also gates every RE-ENTRY
+// into AtnPresenceAck from AckHold (see onEdge's clkAssertEdge case
+// below) -- i.e. every subsequent byte in a multi-byte exchange, not
+// just the very first. In that context the real ROM does NOT go
+// straight to its presence re-check: it first re-sends a full LISTEN +
+// device-number + secondary-address byte (confirmed live via IECTRACE:
+// 8+ IN/OUT pairs at $3015/$3019/$30a2/$30a6/$300d/$3011 before it
+// finally reaches its own re-check at $30d8) -- real elapsed time for
+// THIS path is longer than the 3761 T-state figure the original
+// constant was calibrated against. Confirmed live: with the old 4200
+// value, IECTRACE showed devDat dropping to 0 (our own onTick timeout
+// firing and releasing DAT) BEFORE the real ROM's $30d8 check sampled
+// it (read back pc_byte=$bf, bit7 set = "released" from the ROM's own
+// point of view) -- i.e. we were releasing our presence-ack EARLY,
+// which is exactly what the ROM's own DEVICE_NOT_PRESENT dispatch
+// ($30d4's "JP M,$3036" -> $347e's "JP M,$3331" -> ERR_DISPATCH, B=1)
+// is built to detect. Bumped generously (not a second precise
+// measurement -- the point is to comfortably outlast a full real
+// LISTEN+devnum+secondary send, not shave a new constant as fine as the
+// original one) rather than making this state purely event-driven like
+// AckHold already is, since the real ROM's own check is reportedly a
+// polling loop (see $30b1-$30b9) that this timeout is meant to outlast,
+// not a single edge we could key off instead.
+static constexpr uint32_t kAtnAckTstates = 20000;
 
 void IecListenerState::enterSubState(SubState s)
 {

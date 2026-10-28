@@ -110,6 +110,20 @@ private:
 
 	uint8_t lastByte_ = 0;
 
+	// Set by finalizeSession() right after it opens a real (non-"$")
+	// name on channel 0 -- e.g. *LOAD's filename-announce session.
+	// Consulted by onSecondaryByte()'s WeAreTalker+channel-0 OPEN
+	// branch: that branch is ALSO what the real SDI ROM's own *C
+	// (catalog) command addresses, with no distinguishing secondary
+	// byte of its own, so without this flag it unconditionally
+	// re-opens "$" and clobbers the just-opened real file's buffer
+	// before the Z80 ever reads a byte of it (confirmed live: a
+	// BREAK right after the turnaround showed register A holding the
+	// catalog's first byte, 0x01, not the file's). Cleared once
+	// consulted, or on an explicit CLOSE of channel 0, so a later
+	// genuine *C still gets its catalog.
+	bool pendingChannel0RealOpen_ = false;
+
 	IecListenerState listener_;
 	IecTalkerState talker_;
 	IecState* current_ = nullptr;

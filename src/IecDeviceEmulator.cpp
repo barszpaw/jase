@@ -158,11 +158,17 @@ void IecDeviceEmulator::onSecondaryByte(uint8_t b)
 		// call (see IecBridgeClient::open()'s own warning) made straight
 		// from this hot dispatch path. Fine against a fast local bridge;
 		// would stall the whole emulated CPU against a slow/remote one.
-		if (role_ == IecRole::WeAreTalker && device_) {
-			if (activeChannel_ == 0)
+		// Channel 15 deliberately NOT special-cased here -- see the
+		// comment above this whole branch. Any real channel-15 DOS
+		// command arrives as data bytes via the generic nameBuf_/
+		// finalizeSession() path below, same as a filename would, and
+		// the bridge (sdi_bridge.py's handle_open) is what decides what
+		// a channel-15 open means, not this layer.
+		if (role_ == IecRole::WeAreTalker && activeChannel_ == 0 && device_) {
+			if (pendingChannel0RealOpen_)
+				pendingChannel0RealOpen_ = false; // real file already open, just read it -- see header comment
+			else
 				device_->open(activeChannel_, "$");
-			else if (activeChannel_ == 15)
-				device_->open(activeChannel_, "$STATUS");
 		}
 		// For WeAreListener role, the OPEN secondary means the controller
 		// (SDI) is about to send us a filename (LOAD/SAVE/CAT). We don't
@@ -171,6 +177,8 @@ void IecDeviceEmulator::onSecondaryByte(uint8_t b)
 	} else if (isClose) {
 		secondaryCmd_ = SecondaryCmd::Close;
 		activeChannel_ = b & 0x0f;
+		if (activeChannel_ == 0)
+			pendingChannel0RealOpen_ = false;
 		if (device_) device_->close(activeChannel_);
 	} else if (b >= 0xf0) {
 		secondaryCmd_ = SecondaryCmd::PlainSelect;
@@ -193,9 +201,9 @@ void IecDeviceEmulator::onSecondaryByte(uint8_t b)
 		// command (ENTER not actually registering), not from this
 		// probe. The code below is honest protocol support for a
 		// hypothetical TALK-side use of channel 15, not a fix for
-		// anything SDI's own ROM was observed to need.
-		if (role_ == IecRole::WeAreTalker && activeChannel_ == 15 && device_)
-			device_->open(activeChannel_, "$STATUS");
+		// anything SDI's own ROM was observed to need. Channel 15 is
+		// NOT special-cased here either, for the same reason as the
+		// OPEN branch above -- the bridge owns that decision.
 	}
 	// Kick off the send path for WeAreTalker when we have an OPEN or
 	// PlainSelect secondary. The real ROM uses both forms:
@@ -251,8 +259,11 @@ void IecDeviceEmulator::onDataByte(uint8_t b)
 void IecDeviceEmulator::finalizeSession()
 {
 	if ((secondaryCmd_ == SecondaryCmd::Open || secondaryCmd_ == SecondaryCmd::PlainSelect) &&
-	    !nameBuf_.empty() && device_)
+	    !nameBuf_.empty() && device_) {
 		device_->open(activeChannel_, nameBuf_);
+		if (activeChannel_ == 0 && nameBuf_ != "$")
+			pendingChannel0RealOpen_ = true; // see header comment on this flag
+	}
 	secondaryCmd_ = SecondaryCmd::None;
 	nameBuf_.clear();
 }

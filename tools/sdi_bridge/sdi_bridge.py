@@ -281,7 +281,15 @@ def handle_open(sock: socket.socket, line: str, channels: dict, base_dir: str) -
         # The CBM error/status channel (15) -- IecDeviceEmulator auto-opens
         # this with the "$STATUS" sentinel name whenever SDI addresses
         # channel 15 (see its onSecondaryByte comment). A real drive's
-        # default idle status is "00, OK,00,00\r" -- this file's own
+        # default idle status is "00,OK,00,00\r" -- NO space after the
+        # first comma (this file's own top-of-file comment already
+        # documented that real format; an earlier version of this exact
+        # line had a stray space before "OK" that contradicted its own
+        # documented convention -- live-confirmed as the actual bug: the
+        # ROM prints this string's bytes raw immediately after its own
+        # "LOADING " message with no parsing/filtering, so the extra
+        # space showed up verbatim as "00, OK,00,00" on screen where a
+        # real drive's response renders as "LOADING OK"). This file's
         # top-of-file comment already documented that SDI reads this
         # line byte-by-byte via its own $3138 before showing a catalog,
         # and suppresses display unless the second digit is >= '2' (i.e.
@@ -298,7 +306,7 @@ def handle_open(sock: socket.socket, line: str, channels: dict, base_dir: str) -
         # this -- see project memory for the live IECBUS/REGS state at
         # the hang, and the open question of where (if anywhere) such a
         # header actually needs to go.
-        content = b"00, OK,00,00\r"
+        content = b"00,OK,00,00\r"
         print(f"[OPEN] ch={channel} name='$STATUS' -> STATUS, {len(content)} bytes: {content!r}")
 
     elif channel == 15:
@@ -317,7 +325,7 @@ def handle_open(sock: socket.socket, line: str, channels: dict, base_dir: str) -
         # speed/init state to change), but answering with the same
         # routine-OK status $STATUS already uses is honest: from SDI's
         # perspective, the command succeeded.
-        content = b"00, OK,00,00\r"
+        content = b"00,OK,00,00\r"
         print(f"[OPEN] ch={channel} name='{name}' -> DOS command (channel 15), OK")
 
     else:
@@ -326,6 +334,17 @@ def handle_open(sock: socket.socket, line: str, channels: dict, base_dir: str) -
             print(f"[OPEN] ch={channel} name='{name}' -> NOT FOUND")
             send_line(sock, "ERR not found")
             return
+        # RAW file content, no extra header byte -- Pawel confirmed live
+        # (2026-10-28) that prepending a 0xF0 "confirmation byte" here
+        # (an earlier hypothesis, from disassembling $3512-$3542's "CP
+        # 0xF0" check right after TALK+OPEN(ch0)) broke the load instead
+        # of fixing it; removing it made the real file load correctly.
+        # That $3512-$3542 check almost certainly belongs to the
+        # catalog-open ("$") path, not this real-file path -- with the
+        # channel-0 buffer-clobbering fix in IecDeviceEmulator (see
+        # project memory, Bug 4), that catalog open no longer even fires
+        # during a real *LOAD, so this code was never exercising the
+        # path the earlier live test thought it was confirming.
         content = match.read()
         print(f"[OPEN] ch={channel} name='{name}' -> FILE, {len(content)} bytes "
               f"({match.blocks} block(s) on disk)")

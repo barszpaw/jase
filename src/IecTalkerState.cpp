@@ -171,9 +171,28 @@ void IecTalkerState::checkTransitions(IecDeviceEmulator& ctx, IecBus& bus)
 			// waiting until the listener releases this same ack (its
 			// own Step 5, "back where we started"), so no extra state
 			// is needed here for that.
+			//
+			// Timeout added (2026-10-28): this case used to wait here
+			// unconditionally, unlike SendWaitAck's own identical-shaped
+			// wait, which already had kSendWaitAckTstates as a fallback.
+			// Found live via IECTRACE during the post-*LOAD channel-15
+			// "I" DOS-command retry storm -- the talker got stuck here
+			// (bitIndex_==8, ctrlDat never observed true) while the real
+			// ROM kept re-polling the same Port C reading without ever
+			// asserting its own ack. Whether the ROM's own retry-and-
+			// reassert-ATN behavior was always going to recover this via
+			// IecDeviceEmulator::onControllerChanged's abort-on-ATN path
+			// regardless, or whether this timeout changes/fixes the
+			// observed symptom, is exactly what adding it is meant to
+			// test -- see project memory for the live comparison.
 			if (bus.controllerDat()) {
 				bus.setDeviceClk(false);
 				byteAttempted_ = false; // byte done -- let the next one be requested
+				enterSubState(SubState::Idle);
+			} else if (elapsed_ >= kSendWaitAckTstates) {
+				bus.setDeviceClk(false);
+				bus.setDeviceDat(false);
+				byteAttempted_ = false;
 				enterSubState(SubState::Idle);
 			}
 			break;
