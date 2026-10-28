@@ -175,7 +175,15 @@ def hex_preview(data: bytes, limit: int = 96) -> str:
 # ---------------------------------------------------------------------------
 
 def build_catalog(base_dir: str) -> bytes:
-    out = bytearray(b"\x01\x00")  # EXPERIMENT: real CBM load-addr high byte is 0x08; testing 0x00
+    # Real CBM BASIC load address, $0801 (little-endian: 01 08) -- confirmed
+    # byte-for-byte against a real C64's own IEC file-server log (fox20io/
+    # c64-fdemu, LOAD"$",8 against this same disk): its own catalog starts
+    # "01 08 23 08 00 00 12 22 20 43 36 34...". An earlier session's "testing
+    # 0x00" experiment here (load-addr high byte 0x00 instead of 0x08) was
+    # never reverted -- almost certainly why SDI's own catalog-parsing
+    # routine never recognized this as a well-formed directory and never
+    # proceeded to the real second OPEN with the resolved filename.
+    out = bytearray(b"\x01\x08")
     link_addr = 0x0801
 
     def emit_line(linenum: int, text: bytes) -> None:
@@ -187,14 +195,20 @@ def build_catalog(base_dir: str) -> bytes:
 
     disk_name, disk_id, dos_type, dos_version, free_blocks = disk_header()
 
+    # 0x12 = REVERSE-ON (CBM control char), real CBM "$" catalogs emit it
+    # right before the disk-name header line's opening quote (confirmed
+    # against the same real c64-fdemu reference log: "...00 00 12 22 20
+    # 43 36 34..."), never for individual file-entry lines. Missing here
+    # before -- one more real deviation from the format SDI's own ROM is
+    # almost certainly pattern-matching against.
     if charcode_mode == 'PETASCII':
-        emit_line(0, b'"' + disk_name + b'" ' + disk_id + b' ' + bytes([dos_version, dos_type]))
+        emit_line(0, b'\x12"' + disk_name + b'" ' + disk_id + b' ' + bytes([dos_version, dos_type]))
         for e in list_entries(base_dir):
             emit_line(e.blocks, b'"' + e.raw_name16 + b'" PRG')
     else:
         disk_name = bytes(0x20 if b == 0xA0 else b for b in disk_name)
         disk_id = bytes(0x20 if b == 0xA0 else b for b in disk_id)
-        emit_line(0, b'"' + disk_name + b'" ' + disk_id + b' ' + bytes([dos_version, dos_type]))
+        emit_line(0, b'\x12"' + disk_name + b'" ' + disk_id + b' ' + bytes([dos_version, dos_type]))
         for e in list_entries(base_dir):
             clean = ''.join(c for c in e.name.upper() if 0x20 <= ord(c) <= 0x7E)
             padded = clean.ljust(16)[:16]
@@ -286,6 +300,25 @@ def handle_open(sock: socket.socket, line: str, channels: dict, base_dir: str) -
         # header actually needs to go.
         content = b"00, OK,00,00\r"
         print(f"[OPEN] ch={channel} name='$STATUS' -> STATUS, {len(content)} bytes: {content!r}")
+
+    elif channel == 15:
+        # Channel 15 is the real CBM command/error channel -- an OPEN
+        # here with anything other than the "$STATUS" sentinel above is
+        # SDI writing a genuine DOS command string, not naming a file to
+        # load (confirmed: "I" = INITIALIZE, "UI-" = force standard/
+        # non-fast serial speed, both real, documented 1541 DOS commands
+        # -- see docs/VC1541/VC1541.md's own filename-send trace, which
+        # already identified "UI-" as exactly this). Treating them as
+        # filenames and replying "NOT FOUND" was almost certainly read
+        # by SDI as a failed command, driving the repeated-retry loop
+        # seen live (same "I" open sent 7+ times in a row). A real drive
+        # just executes the command and reports its routine-OK status;
+        # we don't implement any of these commands for real (no actual
+        # speed/init state to change), but answering with the same
+        # routine-OK status $STATUS already uses is honest: from SDI's
+        # perspective, the command succeeded.
+        content = b"00, OK,00,00\r"
+        print(f"[OPEN] ch={channel} name='{name}' -> DOS command (channel 15), OK")
 
     else:
         match = next((e for e in list_entries(base_dir) if e.name.upper() == name.upper()), None)
