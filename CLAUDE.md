@@ -29,6 +29,33 @@
   headless przez `--debug-port` (patrz testy w transkrypcie sesji
   d450f7d9 / memory poniżej — pełny round-trip Z80→Multiply→Z80
   potwierdzony).
+- **ZWERYFIKOWANE prawdziwym romsetem** (`dandanator_10.4.3.rom`, nie
+  w repo): menu Dandanatora renderuje się poprawnie, klawiatura działa.
+  Po drodze znaleziony i naprawiony bug: Dandanator wymagał jawnego
+  `pressButton()` zanim cokolwiek się włączyło — to był błąd, prawdziwy
+  sprzęt aktywuje się SAM przy starcie (manual: sekcja "During Boot"
+  opisuje tylko alternatywy trzymania przycisku, nie wymóg dla
+  domyślnego zachowania). ZEsarUX wymaga przycisku z innego powodu —
+  to wygoda emulatora do podmiany romsetu w locie, nie odwzorowanie
+  sprzętu. Naprawione w konstruktorze `Dandanator()` (auto-engage);
+  `pressButton()`/F9 zostaje jako akcja runtime (powrót do menu z
+  uruchomionej gry). Commit `619737b`.
+- **Multiply przepisany na most TCP** (ten sam dzień): zamiast
+  reimplementować prawdziwy zestaw `CMD_ZX2SD_*` (SD, Z80/SNA/TAP) w
+  C++, `Multiply.h/.cpp` kopiuje architekturę `ZiFi.h/.cpp` jeden do
+  jednego (niezblokowany socket, `txRing_`/`rxRing_`, `pump()` co
+  klatkę) i rozmawia z nowym `tools/multiply_bridge.py` — ten sam
+  podział co SDI (`sdi_bridge.py`/`IecBridgeClient`): C++ to czysty
+  bajtowy pipe, cała logika formatów plików ma żyć w Pythonie.
+  `--multiply-bridge HOST:PORT` (implikuje `--multiply`). v1 bridge'a
+  odpowiada tylko na `CMD_ZX2SD_REQ_ID` — round-trip zweryfikowany
+  przez prawdziwy proces. Commit `60947b6`.
+- **Zaplanowane (user, "na sam koniec wdrożenia")**: zastąpić twardo
+  zakodowaną kolejność konstrukcji peryferiów w `MinZX::init()`
+  (dziś jedyne, co chroni przed cichym przegrywaniem portu 0x1F przez
+  Kempston) jawnym `config.json` z kluczem `interfaces` definiującym
+  priorytet/kolejność każdego peryferium. "First wins" zostaje tą samą
+  semantyką, tylko konfigurowalną z zewnątrz. Nie zaimplementowane.
 - Pełne tło sprzętowe (schematy, protokół, źródła) i aktualny stan
   implementacji: auto-memory
   `project_jase_dandanator_multiply.md` (CZYTAJ PRZED kontynuacją tej

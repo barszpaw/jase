@@ -172,9 +172,20 @@ section above. Not committed to git yet.)
   x 16K bank storage, full command protocol (commands 1-49 + 52), the
   ROM-write-trap command channel via the new `Peripheral::
   onMemoryWrite()` hook (see below). `--dandanator`/`--dandanator-rom`
-  CLI flags, button = F9 window hotkey / `DANDANATOR BUTTON` debug
-  command. Built-in placeholder ROM in bank 0 so it's exercisable
-  without a real 512K romset.
+  CLI flags. **Auto-engages on power-on** (constructor sets bank 0 +
+  WaitNormal directly) -- matches real hardware, which needs no button
+  for the default "show the menu" case (the manual's "During Boot"
+  button actions are all alternatives you hold a button to get, e.g.
+  boot the internal ROM instead). `pressButton()`/F9 window hotkey /
+  `DANDANATOR BUTTON` debug command is the RUNTIME action (return to
+  menu from a running game), not the initial activation -- fixed
+  2026-10-28 after a real-romset test showed nothing happened without
+  it; ZEsarUX requires a button for a different reason (hot-swapping a
+  romset already loaded into its memory), not because real hardware
+  does. Built-in placeholder ROM in bank 0 so it's exercisable without a
+  real 512K romset too. **Verified against a real romset
+  (`dandanator_10.4.3.rom`)**: menu renders correctly, keyboard works,
+  commit `619737b`.
 - `src/Multiply.h/.cpp` — Multiply microSD-addon stand-in, TX/RX
   **foundation only**: recognizes just `CMD_ZX2SD_REQ_ID` (0x01) and
   replies with one fixed byte, proving the plumbing works. The real
@@ -198,6 +209,32 @@ section above. Not committed to git yet.)
   protocol on port 0x1F (the SAME port the Dandanator's own onboard
   Kempston interface, and a real Multiface ONE, also use) for
   Multiply->Z80 bytes.
+
+## Verified against real artifacts (2026-10-28, after initial commit)
+- Real romset `dandanator_10.4.3.rom` (user-supplied, not in repo):
+  Dandanator initially required an explicit `pressButton()`/F9 before
+  anything activated -- WRONG, real hardware auto-engages on power-on
+  (manual's "During Boot" section only documents button-HELD
+  alternatives). Fixed: `Dandanator::Dandanator()` now sets
+  `switchedOn_`/`state_`/`bankChangePending_` directly; `pressButton()`
+  kept for its real runtime role (return to menu, like the physical
+  right button). Verified: real menu renders correctly, keyboard works.
+  Commit `619737b`.
+- Multiply rewritten from an in-process placeholder to a TCP bridge
+  client -- copies `ZiFi.h/.cpp`'s architecture (non-blocking socket,
+  `txRing_`/`rxRing_`, `pump()` once per frame) and talks to new
+  `tools/multiply_bridge.py`, same split as SDI's own bridge
+  (`sdi_bridge.py`/`IecBridgeClient`): JASE stays a dumb byte-pipe, all
+  `CMD_ZX2SD_*` command semantics belong in the Python companion.
+  `--multiply-bridge HOST:PORT` (implies `--multiply`). v1 bridge only
+  answers `CMD_ZX2SD_REQ_ID` -- round-trip re-verified through the real
+  process, works identically to the old in-process version. Commit
+  `60947b6`.
+- **Planned, not yet done** (user's idea): replace the hardcoded
+  peripheral construction/push order in `MinZX::init()` with an
+  explicit `config.json` `interfaces` key defining each peripheral's
+  priority -- "first wins" for port conflicts stays the same semantic,
+  just externally configured instead of implicit in source order.
 
 ## Architecture gotcha — generalizes to any future peripheral
 `MinZX::processInputPort()` awards a shared port's VALUE to the FIRST
