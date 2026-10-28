@@ -12,6 +12,8 @@
 #include "ZiFi.h"
 #include "Multiface.h"
 #include "DivIde.h"
+#include "Dandanator.h"
+#include "Multiply.h"
 #include "SDI_8255.h"
 #include "OsdMenu.h"
 #include <cstdlib>
@@ -200,6 +202,28 @@ static void printUsage(const char* argv0)
 		"  --divide-disk PATH     the \"hard disk\" backing store -- a raw\n"
 		"                         sector image or a standard .hdf (RS-IDE\n"
 		"                         signature), sniffed automatically.\n"
+		"  --dandanator           enable the ZX Dandanator! Mini stand-in (a\n"
+		"                         real, still-sold ROM/RAM cartridge, see\n"
+		"                         docs/Dandanator/ -- NOT a Multiface clone):\n"
+		"                         32x16K banks over 0x0000-0x3FFF, switched\n"
+		"                         by a write-trap command channel (ROM-space\n"
+		"                         writes to addr 0-3), button = F9 window\n"
+		"                         hotkey (also resets the Z80, like real\n"
+		"                         hardware). Without a real romset (see\n"
+		"                         below) this uses a tiny built-in\n"
+		"                         placeholder in bank 0 only -- no actual menu.\n"
+		"  --dandanator-rom PATH  a real 512KB romset dump (produced by the\n"
+		"                         Dandanator PC/Mac tool) instead of the\n"
+		"                         built-in placeholder; implies --dandanator.\n"
+		"                         Copyrighted game content -- bring your own,\n"
+		"                         none is bundled.\n"
+		"  --multiply             enable the Multiply stand-in (an Arduino+\n"
+		"                         microSD addon for the Dandanator, see\n"
+		"                         docs/Dandanator/ -- rides on --dandanator's\n"
+		"                         own command 52, needs it to do anything).\n"
+		"                         v1 only answers one command (identify) --\n"
+		"                         a foundation proving the TX/RX round trip,\n"
+		"                         not the real SD file browser yet.\n"
 		"  --sdi8255              enable the SDI board's 8255 PPI + ROM/ROMCS\n"
 		"                         decode layer (see docs/VC1541/VC1541.md) --\n"
 		"                         just the hardware-decode layer so far, no\n"
@@ -219,7 +243,7 @@ static void printUsage(const char* argv0)
 		"                           SCREENSHOT path\n"
 		"                         plus one per peripheral (each device owns its\n"
 		"                         own command, see Peripheral.h): KEMPSTON, AY,\n"
-		"                         ZIFI, MULTIFACE1, DIVIDE\n"
+		"                         ZIFI, MULTIFACE1, DIVIDE, DANDANATOR, MULTIPLY\n"
 		"                         (see debugserver.cpp for exact syntax)\n"
 		"  --poke ADDR=B1,B2,...  write bytes to memory before execution starts\n"
 		"                         (hex address, comma-separated hex bytes)\n"
@@ -251,6 +275,8 @@ static void printUsage(const char* argv0)
 		"                         pico-spec's own F2 Reload/F5 Save/F8 Forget\n"
 		"                         file-browser convention (also F2 Reload,\n"
 		"                         F8 Forget-connection in the Network menus).\n"
+		"  F9                     Dandanator button (see --dandanator above;\n"
+		"                         also resets the Z80, like real hardware)\n"
 		"  F11                    RESET (full machine reset)\n"
 		"  Alt+F10                NMI (see --multiface1 above; matches\n"
 		"                         pico-spec-drewpo's own F10/Alt+F10 split)\n"
@@ -379,6 +405,16 @@ int main(int argc, char *argv[])
 				exit(1);
 			}
 		}
+		else if (0 == strcmp(argv[i], "--dandanator"))
+			minZX.getDandanator()->setEnabled(true);
+		else if (0 == strcmp(argv[i], "--dandanator-rom") && i + 1 < argc) {
+			// Implies --dandanator, same reasoning as --multiface1-rom.
+			minZX.getDandanator()->setEnabled(true);
+			if (!minZX.getDandanator()->loadRom(argv[++i]))
+				std::cerr << "--dandanator-rom: failed to load, falling back to the built-in placeholder" << std::endl;
+		}
+		else if (0 == strcmp(argv[i], "--multiply"))
+			minZX.getMultiply()->setEnabled(true);
 		else if (0 == strcmp(argv[i], "--sdi8255"))
 			minZX.getSDI8255()->setEnabled(true);
 		else if (0 == strcmp(argv[i], "--sdi8255-rom") && i + 1 < argc) {
@@ -608,6 +644,17 @@ int main(int argc, char *argv[])
 			{
 				minZX.triggerNMI();
 				std::cout << "NMI" << std::endl;
+			}
+			// F9 = Dandanator button. Real hardware resets the Z80 the
+			// instant the button is pressed (the ROM just changed out
+			// from under the running program) -- same two-calls-together
+			// split main.cpp already uses for F11/Alt+F10 above, since
+			// Peripheral itself never calls back into MinZX directly.
+			if (SDL_KEYDOWN == event.type && SDL_SCANCODE_F9 == event.key.keysym.scancode)
+			{
+				minZX.getDandanator()->pressButton();
+				minZX.reset();
+				std::cout << "DANDANATOR BUTTON" << std::endl;
 			}
 		}
 

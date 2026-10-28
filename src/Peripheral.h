@@ -70,4 +70,44 @@ public:
 	// device defines what /NMI *means* to it (Multiface's "red button"
 	// semantics live entirely here, not in MinZX).
 	virtual void onNMI() {}
+
+	// ROM-write-trap devices (Dandanator, and real hardware's own similar
+	// cartridge interfaces) repurpose Z80 writes into otherwise-pure-ROM
+	// address space as a side-channel command bus: on real hardware such
+	// a write is physically a no-op (you can't bit-bang a NOR flash's
+	// write-command sequence just by asserting /WR at an arbitrary
+	// address), which is exactly why it's safe and invisible to any
+	// software not deliberately using it. MemoryMap::poke8() already
+	// silently drops writes to any page with isRom==true (correct for
+	// memory *content*), which means today no peripheral ever gets a
+	// chance to see the write happen at all. This hook closes that gap:
+	// called for EVERY Z80 memory write (see MinZX::poke8()), regardless
+	// of whether the target page is currently owned by this -- or any --
+	// peripheral. Unlike onInstructionFetch() (PC-keyed) or in()/out()
+	// (port-keyed), a device that cares has to filter by `addr` itself.
+	// `memory` is handed over the same way onInstructionFetch() does, so
+	// a device that decides to repage in response to a just-completed
+	// command (see Dandanator) can do so immediately, right here --
+	// no deferred pick-up on the next instruction fetch needed, since
+	// (unlike onNMI()/in()) this hook already has a MemoryMap& to act on.
+	// Default no-op: a device that only cares about writes to memory it
+	// already owns (Multiface's RAM, DivIDE's RAM banks) doesn't need
+	// this at all -- those writes already flow through MemoryMap::poke8()
+	// normally once mapPage() has installed the bank.
+	virtual void onMemoryWrite(uint16_t addr, uint8_t value, MemoryMap& memory) { (void)addr; (void)value; (void)memory; }
+
+	// A device that can trigger a full Z80 reset or /NMI itself as a
+	// SIDE EFFECT of its own protocol (Dandanator's command 36/40, not a
+	// user keypress or debug command -- those already go straight from
+	// main.cpp/DebugServer to MinZX::reset()/triggerNMI()) returns true
+	// exactly once, the moment it wants one; MinZX's instruction loop
+	// polls every peripheral for this once per instruction, right
+	// alongside onInstructionFetch(), and services it immediately.
+	// Consuming the request (not just peeking at it) is this method's
+	// job, same contract as a hardware edge-triggered latch -- MinZX
+	// never clears anything on this device's behalf. Default false: the
+	// overwhelming majority of peripherals never initiate either on
+	// their own.
+	virtual bool takeResetRequest() { return false; }
+	virtual bool takeNMIRequest() { return false; }
 };

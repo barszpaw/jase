@@ -1,11 +1,13 @@
 #include "minzx.h"
 #include "z80.h"
-#include "Kempston.h"
+#include "plugin_api.h"
 #include "AyPsg.h"
 #include "TurboSound.h"
 #include "ZiFi.h"
 #include "Multiface.h"
 #include "DivIde.h"
+#include "Dandanator.h"
+#include "Multiply.h"
 #include "SDI_8255.h"
 #include <SDL.h>
 #include <stdio.h>
@@ -15,6 +17,7 @@
 #include <unistd.h>
 #include <climits>
 #include <sys/stat.h>
+#include <dlfcn.h>
 
 #define TRACE  printf
 #define DEBUG  printf
@@ -112,6 +115,28 @@ bool MinZX::setMachine(const char* name)
 	return true;
 }
 
+// POC (2026-10-28): load the Kempston peripheral from plugins/libkempston.so
+// instead of linking it into core -- see plugin_api.h for the ABI contract
+// and project memory for why (independent release of SDI/peripherals vs.
+// core). Missing/broken plugin is non-fatal: Kempston just won't be
+// registered, same as any other optional peripheral.
+static Peripheral* loadKempstonPlugin()
+{
+	const char* path = "plugins/libkempston.so";
+	void* handle = dlopen(path, RTLD_NOW);
+	if (!handle) {
+		fprintf(stderr, "plugin: %s not loaded (%s) -- Kempston disabled\n", path, dlerror());
+		return nullptr;
+	}
+	auto create = (jase_plugin_create_fn)dlsym(handle, JASE_PLUGIN_CREATE_SYM);
+	if (!create) {
+		fprintf(stderr, "plugin: %s missing %s (%s)\n", path, JASE_PLUGIN_CREATE_SYM, dlerror());
+		dlclose(handle);
+		return nullptr;
+	}
+	return create();
+}
+
 void MinZX::init()
 {
 	z80   = new Z80(this);
@@ -147,7 +172,22 @@ void MinZX::init()
 	createSpectrumColors();
 	initAudio();
 
-	peripherals_.push_back(new Kempston());
+	// Dandanator/Multiply are constructed -- and pushed -- BEFORE the
+	// Kempston plugin on purpose: Multiply::in() only conditionally
+	// claims port 0x1F (while actively streaming a reply nibble, see
+	// Multiply.h), but Kempston::in() claims it UNCONDITIONALLY whenever
+	// addressed (0 = "no buttons" is still a valid claim). processInputPort()
+	// awards the VALUE to the FIRST claimant in peripherals_ order (see
+	// its own comment) -- so Multiply has to be checked first, or its
+	// nibble data would silently lose to Kempston's every single time.
+	dandanator_ = new Dandanator();
+	peripherals_.push_back(dandanator_);
+	multiply_ = new Multiply();
+	peripherals_.push_back(multiply_);
+	dandanator_->setCmd52Sink(multiply_);
+
+	if (Peripheral* kempston = loadKempstonPlugin())
+		peripherals_.push_back(kempston);
 	if (turboSoundRequested_) {
 		TurboSound* ts = new TurboSound();
 		ay_ = ts;
@@ -297,6 +337,12 @@ void MinZX::update(uint8_t* screen)
 		for (Peripheral* p : peripherals_) p->onInstructionFetch(z80->getRegPC(), memory_, tstates);
 		if (romcsWasUp && !memory_.isRomcsAsserted())
 			reapplyMachinePaging();
+		// Self-triggered reset/NMI (Dandanator command 36/40) -- see
+		// Peripheral::takeResetRequest()/takeNMIRequest().
+		for (Peripheral* p : peripherals_) {
+			if (p->takeResetRequest()) reset();
+			if (p->takeNMIRequest()) triggerNMI();
+		}
 		// Check AFTER executing, not before: if we're resuming from a
 		// breakpoint we're currently sitting on, checking first would
 		// re-trigger immediately without ever advancing — CONT would
@@ -403,6 +449,10 @@ void MinZX::step(int n)
 		for (Peripheral* p : peripherals_) p->onInstructionFetch(z80->getRegPC(), memory_, tstates);
 		if (romcsWasUp && !memory_.isRomcsAsserted())
 			reapplyMachinePaging();
+		for (Peripheral* p : peripherals_) {
+			if (p->takeResetRequest()) reset();
+			if (p->takeNMIRequest()) triggerNMI();
+		}
 		z80->execute();
 		if (breakpointsEnabled_ && isBreakpoint(z80->getRegPC()))
 		{
@@ -1067,6 +1117,12 @@ void MinZX::poke8(uint16_t address, uint8_t value)
 
 	tstates += 3;
 	memory_.poke8(address, value);
+
+	// See Peripheral::onMemoryWrite() -- the only way a ROM-write-trap
+	// device (Dandanator) can observe a write MemoryMap::poke8() itself
+	// just silently dropped (target page has isRom==true). Called for
+	// every write regardless of who currently owns the target page.
+	for (Peripheral* p : peripherals_) p->onMemoryWrite(address, value, memory_);
 }
 
 /* Read/Write word from/to RAM */

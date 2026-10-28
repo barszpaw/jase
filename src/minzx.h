@@ -493,6 +493,18 @@ public:
 	// --divide-disk.
 	class DivIde* getDivIde() const { return divide_; }
 
+	// Same idea: main.cpp calls setEnabled()/loadRom()/pressButton() on
+	// this after init() constructs it, for --dandanator/--dandanator-rom
+	// and the Dandanator button key binding.
+	class Dandanator* getDandanator() const { return dandanator_; }
+
+	// Same idea: main.cpp calls setEnabled() on this after init()
+	// constructs it, for --multiply. init() also wires
+	// dandanator_->setCmd52Sink(multiply_) unconditionally -- see
+	// DandanatorCmd52Sink in Dandanator.h for why that's harmless
+	// regardless of this flag.
+	class Multiply* getMultiply() const { return multiply_; }
+
 	// Same idea: main.cpp calls setEnabled()/loadRom() on this after
 	// init() constructs it, for --sdi8255/--sdi8255-rom.
 	class SDI_8255* getSDI8255() const { return sdi8255_; }
@@ -501,6 +513,8 @@ private:
 	class ZiFi* zifi_ = nullptr;
 	class Multiface* multiface_ = nullptr;
 	class DivIde* divide_ = nullptr;
+	class Dandanator* dandanator_ = nullptr;
+	class Multiply* multiply_ = nullptr;
 	class SDI_8255* sdi8255_ = nullptr;
 };
 
