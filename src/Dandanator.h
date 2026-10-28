@@ -110,13 +110,20 @@ public:
 	// external file.
 	bool loadRom(const char* path);
 
-	// The physical button: selects bank 0 and starts accepting commands
-	// (Wait_Normal state). Real hardware also does a full Z80 reset the
-	// instant the button is pressed (it has to -- the ROM just changed
-	// out from under the running program); main.cpp's key binding calls
-	// MinZX::reset() right alongside this, same split as the existing
-	// NMI/F10 handling (Peripheral never calls back into MinZX directly
-	// except via the generic takeResetRequest()/takeNMIRequest() poll).
+	// The physical right button's RUNTIME behaviour ("always loads the
+	// Dandanator menu", per the real manual) -- selects bank 0 and
+	// starts accepting commands (Wait_Normal state). NOT needed for the
+	// initial activation: the constructor already does this (real
+	// hardware auto-engages on power-on, see Dandanator.cpp), so a
+	// plain `--dandanator --dandanator-rom X` boots straight into the
+	// menu with no button press at all. This is for getting BACK to the
+	// menu later (e.g. from a running game) -- real hardware also does
+	// a full Z80 reset the instant the button is pressed (it has to --
+	// the ROM just changed out from under the running program);
+	// main.cpp's key binding calls MinZX::reset() right alongside this,
+	// same split as the existing NMI/F10 handling (Peripheral never
+	// calls back into MinZX directly except via the generic
+	// takeResetRequest()/takeNMIRequest() poll).
 	void pressButton();
 
 	// Registers the Multiply addon's command-52 receive hook -- see

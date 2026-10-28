@@ -5,6 +5,20 @@
 Dandanator::Dandanator()
 {
 	initPlaceholderRom();
+
+	// Real hardware auto-engages on every power-on -- the manual's
+	// "During Boot" button actions (left=launch diagnostics ROM,
+	// right=boot the internal Spectrum ROM instead, both=PIC firmware
+	// update) are all ALTERNATIVES you hold a button to get; doing
+	// nothing is what shows the Dandanator's own menu (bank 0), since
+	// that's the entire point of the cartridge -- no button needed for
+	// the common case. pressButton() is for RUNTIME re-entry (the real
+	// right button's "always loads the Dandanator menu", used to get
+	// back to the menu from a running game), not the initial activation.
+	switchedOn_ = true;
+	state_ = WaitNormal;
+	pendingBank_ = 0;
+	bankChangePending_ = true;
 }
 
 // Hand-assembled, clean-room (same idea as Multiface::initPlaceholderRom()
