@@ -23,7 +23,7 @@
 // (see tools/sdi_bridge/sdi_bridge.py for SDI's equivalent split, and
 // IecBridgeClient.h's own reasoning). This class is deliberately a
 // thin byte-pipe: it knows nothing about what CMD_ZX2SD_* commands
-// MEAN, only how to get bytes to and from tools/multiply_bridge.py.
+// MEAN, only how to get bytes to and from tools/multiply_bridge/multiply_bridge.py.
 //
 // Two channels, both confirmed from the real firmware source (not
 // guessed -- see reference_src/ under the docs path above):
@@ -75,7 +75,7 @@ public:
 	void setEnabled(bool on) { enabled_ = on; }
 	bool isEnabled() const { return enabled_; }
 
-	// Connects (non-blocking) to tools/multiply_bridge.py or an
+	// Connects (non-blocking) to tools/multiply_bridge/multiply_bridge.py or an
 	// equivalent companion process. Safe to call even if never
 	// configured -- just does nothing elsewhere. Remembers host/port on
 	// success, for reconnect().

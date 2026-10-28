@@ -223,14 +223,14 @@ section above. Not committed to git yet.)
 - Multiply rewritten from an in-process placeholder to a TCP bridge
   client -- copies `ZiFi.h/.cpp`'s architecture (non-blocking socket,
   `txRing_`/`rxRing_`, `pump()` once per frame) and talks to new
-  `tools/multiply_bridge.py`, same split as SDI's own bridge
+  `tools/multiply_bridge/multiply_bridge.py`, same split as SDI's own bridge
   (`sdi_bridge.py`/`IecBridgeClient`): JASE stays a dumb byte-pipe, all
   `CMD_ZX2SD_*` command semantics belong in the Python companion.
   `--multiply-bridge HOST:PORT` (implies `--multiply`). v1 bridge only
   answers `CMD_ZX2SD_REQ_ID` -- round-trip re-verified through the real
   process, works identically to the old in-process version. Commit
   `60947b6`.
-- `tools/multiply_bridge.py` now implements real `CMD_ZX2SD_*` commands
+- `tools/multiply_bridge/multiply_bridge.py` now implements real `CMD_ZX2SD_*` commands
   instead of REQ_ID-only: SETZXTYPE, CD_ROOT/CD/CD_IX/GETDIR,
   LS_RELATIVE (single chapter, 34-byte records: type+30char name+
   0x00+uint16 LE index), OFREAD/OFREAD_IX, CMD_ZX2SD_SCR (.SCR preview

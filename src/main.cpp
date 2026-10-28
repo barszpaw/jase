@@ -226,7 +226,7 @@ static void printUsage(const char* argv0)
 		"                         real CMD_ZX2SD_* logic (SD browsing, Z80/\n"
 		"                         SNA/TAP) lives in that companion process,\n"
 		"                         not in JASE itself.\n"
-		"  --multiply-bridge HOST:PORT connect to tools/multiply_bridge.py\n"
+		"  --multiply-bridge HOST:PORT connect to tools/multiply_bridge/multiply_bridge.py\n"
 		"                         (or an equivalent companion) for the real\n"
 		"                         file-serving logic; implies --multiply.\n"
 		"  --sdi8255              enable the SDI board's 8255 PPI + ROM/ROMCS\n"

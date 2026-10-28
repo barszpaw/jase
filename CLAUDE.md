@@ -44,13 +44,13 @@
   reimplementować prawdziwy zestaw `CMD_ZX2SD_*` (SD, Z80/SNA/TAP) w
   C++, `Multiply.h/.cpp` kopiuje architekturę `ZiFi.h/.cpp` jeden do
   jednego (niezblokowany socket, `txRing_`/`rxRing_`, `pump()` co
-  klatkę) i rozmawia z nowym `tools/multiply_bridge.py` — ten sam
+  klatkę) i rozmawia z nowym `tools/multiply_bridge/multiply_bridge.py` — ten sam
   podział co SDI (`sdi_bridge.py`/`IecBridgeClient`): C++ to czysty
   bajtowy pipe, cała logika formatów plików ma żyć w Pythonie.
   `--multiply-bridge HOST:PORT` (implikuje `--multiply`). v1 bridge'a
   odpowiada tylko na `CMD_ZX2SD_REQ_ID` — round-trip zweryfikowany
   przez prawdziwy proces. Commit `60947b6`.
-- **`tools/multiply_bridge.py` ma już realne komendy** (ten sam dzień):
+- **`tools/multiply_bridge/multiply_bridge.py` ma już realne komendy** (ten sam dzień):
   SETZXTYPE, CD_ROOT/CD/CD_IX/GETDIR, LS_RELATIVE (listing katalogu,
   rekord 34 bajty: typ+30-znakowa nazwa+0x00+uint16 index),
   OFREAD/OFREAD_IX, CMD_ZX2SD_SCR (podgląd ekranu .SCR). Fakty protokołu
