@@ -71,20 +71,6 @@ public:
 	int activeChannel_ = 0;
 	std::string nameBuf_;
 
-	// *LOAD's own filename-announce (PlainSelect under LISTEN, see
-	// onDataByte's comment) is a SEPARATE IEC exchange from the TALK+
-	// Open(channel 0, "$") that follows it -- on real SDI hardware the
-	// BRIDGE is what's supposed to remember the announced name and
-	// substitute it for the literal "$" (confirmed against a second
-	// reference, see docs/VC1541/VC1541.md's *LOAD write-up): the real
-	// ROM never re-opens the file by name a second time itself. Stashed
-	// here (not forgotten once finalizeSession() opens it) so the
-	// hardcoded "$" in onSecondaryByte's WeAreTalker branch can be
-	// swapped for the real name on the very next TALK+Open for the same
-	// channel -- a genuine *CAT (no prior PlainSelect) still gets the
-	// real catalog, since this stays empty in that case.
-	std::string pendingLoadName_;
-
 	// Called by IecListenerState once a full byte has been shifted in,
 	// whether under ATN (an addressing/command byte) or plain LISTEN
 	// data. Decode logic (what the byte MEANS) lives here, not in the
