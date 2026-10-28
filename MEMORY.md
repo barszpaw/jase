@@ -230,6 +230,21 @@ section above. Not committed to git yet.)
   answers `CMD_ZX2SD_REQ_ID` -- round-trip re-verified through the real
   process, works identically to the old in-process version. Commit
   `60947b6`.
+- `tools/multiply_bridge.py` now implements real `CMD_ZX2SD_*` commands
+  instead of REQ_ID-only: SETZXTYPE, CD_ROOT/CD/CD_IX/GETDIR,
+  LS_RELATIVE (single chapter, 34-byte records: type+30char name+
+  0x00+uint16 LE index), OFREAD/OFREAD_IX, CMD_ZX2SD_SCR (.SCR preview
+  streaming). Protocol facts read from the real Arduino firmware in
+  full (Multiply_Arduino.ino/libFileList.ino/libSDFiles.ino, not
+  vendored, CC BY-SA). Unimplemented-but-recognized commands (Z80/SNA/
+  TAP/ROMSET content, GETINFO, LS_ABSOLUTE) still consume their correct
+  payload length (`_FIXED_PAYLOAD`) to avoid desyncing the unframed
+  byte stream. Verified end-to-end against a test SD-card directory.
+  Commit `4857713`. Still not done: actually loading a game.
+- **Testing gotcha**: debug protocol's `STEP` sets `running_=false`
+  (debugserver.cpp:322), which stops `MinZX::update()` and therefore
+  `pump()` (ZiFi/Multiply) until a `CONT`. Don't use `STEP` when testing
+  Multiply/ZiFi protocol round-trips -- just let real frames tick.
 - **Planned, not yet done** (user's idea): replace the hardcoded
   peripheral construction/push order in `MinZX::init()` with an
   explicit `config.json` `interfaces` key defining each peripheral's

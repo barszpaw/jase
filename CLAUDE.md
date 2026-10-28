@@ -50,6 +50,21 @@
   `--multiply-bridge HOST:PORT` (implikuje `--multiply`). v1 bridge'a
   odpowiada tylko na `CMD_ZX2SD_REQ_ID` — round-trip zweryfikowany
   przez prawdziwy proces. Commit `60947b6`.
+- **`tools/multiply_bridge.py` ma już realne komendy** (ten sam dzień):
+  SETZXTYPE, CD_ROOT/CD/CD_IX/GETDIR, LS_RELATIVE (listing katalogu,
+  rekord 34 bajty: typ+30-znakowa nazwa+0x00+uint16 index),
+  OFREAD/OFREAD_IX, CMD_ZX2SD_SCR (podgląd ekranu .SCR). Fakty protokołu
+  wyciągnięte z pełnego źródła Arduino (Multiply_Arduino.ino,
+  libFileList.ino, libSDFiles.ino — nie w repo, CC BY-SA). Każda
+  nieobsłużona jeszcze komenda i tak poprawnie konsumuje swój payload
+  (patrz `_FIXED_PAYLOAD`) — inaczej desynchronizuje strumień bez
+  ramkowania. Zweryfikowane end-to-end na testowym katalogu SD.
+  Brakuje: realne wczytanie gry (Z80/SNA/TAP), GETINFO. Commit `4857713`.
+- **Pułapka testowa**: `STEP` w protokole debug ustawia `running_=false`
+  (`debugserver.cpp:322`), co zatrzymuje `MinZX::update()` i tym samym
+  `pump()` (ZiFi/Multiply) na zawsze, dopóki nie przyjdzie `CONT`. Testy
+  protokołu Multiply/ZiFi NIE MOGĄ używać `STEP` — niech klatki lecą w
+  czasie rzeczywistym (`running_` domyślnie `true`).
 - **Zaplanowane (user, "na sam koniec wdrożenia")**: zastąpić twardo
   zakodowaną kolejność konstrukcji peryferiów w `MinZX::init()`
   (dziś jedyne, co chroni przed cichym przegrywaniem portu 0x1F przez
