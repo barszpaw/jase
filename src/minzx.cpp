@@ -310,6 +310,7 @@ void MinZX::update(uint8_t* screen)
 	justHitBreakpoint_ = false;
 	advanceAutoType();
 	if (zifi_) zifi_->pump();
+	if (multiply_) multiply_->pump();
 
 	while (tstates < cycleTstates)
 	{

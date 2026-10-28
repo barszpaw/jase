@@ -1,32 +1,77 @@
 #include "Multiply.h"
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <fcntl.h>
 
-namespace {
-// multiply_commands_v1.asm: CMD_ZX2SD_REQ_ID EQU 0x01 -- "Ask for
-// Multiply Identification".
-const uint8_t CMD_REQ_ID = 0x01;
+Multiply::~Multiply()
+{
+	if (sockFd_ >= 0)
+		close(sockFd_);
+}
 
-// Placeholder reply payload -- the real firmware's actual identification
-// response FORMAT (length, fields) wasn't captured in the sources read
-// for this (see docs/Dandanator/dandanator_multiply_notes.md); this
-// single byte only proves the TX+RX round trip works end-to-end, it is
-// not a faithful reproduction of a real reply.
-const uint8_t PLACEHOLDER_ID_BYTE = 0x01;
+bool Multiply::connectTo(const char* host, int port)
+{
+	if (sockFd_ >= 0) {
+		close(sockFd_);
+		sockFd_ = -1;
+	}
+
+	int fd = socket(AF_INET, SOCK_STREAM, 0);
+	if (fd < 0)
+		return false;
+
+	sockaddr_in addr{};
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons((uint16_t)port);
+	if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
+		close(fd);
+		return false;
+	}
+
+	if (connect(fd, (sockaddr*)&addr, sizeof(addr)) < 0) {
+		fprintf(stderr, "Multiply: connect to %s:%d failed\n", host, port);
+		close(fd);
+		return false;
+	}
+
+	int one = 1;
+	setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+	fcntl(fd, F_SETFL, O_NONBLOCK);
+
+	sockFd_ = fd;
+	lastHost_ = host;
+	lastPort_ = port;
+	printf("Multiply: connected to %s:%d\n", host, port);
+	return true;
+}
+
+bool Multiply::reconnect()
+{
+	if (lastHost_.empty() || lastPort_ <= 0)
+		return false;
+	// Stale bytes from the dead connection would otherwise confuse the
+	// bridge's own command-boundary tracking on the new one (same
+	// reasoning as ZiFi::reconnect()) -- start clean.
+	rxRing_.clear();
+	txRing_.clear();
+	rxPhase_ = RxPhase::Idle;
+	return connectTo(lastHost_.c_str(), lastPort_);
 }
 
 // Called synchronously from Dandanator::executeCommand() the moment a
-// command-52 byte arrives -- see DandanatorCmd52Sink.
+// command-52 byte arrives -- see DandanatorCmd52Sink. Just queues it;
+// pump() does the actual socket I/O.
 void Multiply::onDandanatorByte(uint8_t value)
 {
 	if (!enabled_) return;
-	lastByteReceived_ = value;
-	if (value == CMD_REQ_ID) {
-		replyByte_ = PLACEHOLDER_ID_BYTE;
-		rxPhase_ = RxPhase::HighReady;
-	}
-	// Any other command byte: v1 has nothing further implemented, so it's
-	// silently acknowledged-but-ignored, same as Dandanator's own
-	// no-op commands.
+	if (txRing_.size() < kRingCap)
+		txRing_.push_back(value);
 }
 
 // See class comment for the real 2-edge nibble handshake this
@@ -35,7 +80,13 @@ void Multiply::onDandanatorByte(uint8_t value)
 bool Multiply::in(uint16_t port, uint8_t& value)
 {
 	if (!enabled_ || (port & 0xFF) != 0x1F) return false;
-	if (rxPhase_ == RxPhase::Idle) return false; // nothing queued -- let Kempston/default answer this port
+
+	if (rxPhase_ == RxPhase::Idle) {
+		if (rxRing_.empty()) return false; // nothing queued -- let Kempston/default answer this port
+		replyByte_ = rxRing_.front();
+		rxRing_.erase(rxRing_.begin());
+		rxPhase_ = RxPhase::HighReady;
+	}
 
 	// Real port layout (same bit assignment as Kempston's joystick
 	// byte): bits 4-1 = 4-bit nibble, bit 0 = the strobe the real
@@ -50,13 +101,55 @@ bool Multiply::in(uint16_t port, uint8_t& value)
 	return true;
 }
 
+void Multiply::pump()
+{
+	if (sockFd_ < 0)
+		return;
+
+	// Drain the TX ring to the socket.
+	while (!txRing_.empty()) {
+		ssize_t n = send(sockFd_, txRing_.data(), txRing_.size(), 0);
+		if (n > 0)
+			txRing_.erase(txRing_.begin(), txRing_.begin() + n);
+		else
+			break; // EAGAIN or error -- try again next frame
+	}
+
+	// Pull whatever's waiting into the RX ring (bounded).
+	uint8_t buf[1024];
+	for (;;) {
+		ssize_t n = recv(sockFd_, buf, sizeof(buf), 0);
+		if (n == 0) {
+			// Peer closed (e.g. the bridge process was killed) --
+			// distinct from n<0 (EAGAIN, just no data yet on a non-
+			// blocking socket). Same reasoning as ZiFi::pump(): without
+			// this, a dead peer leaves sockFd_ looking "connected"
+			// forever.
+			close(sockFd_);
+			sockFd_ = -1;
+			break;
+		}
+		if (n < 0)
+			break;
+		for (ssize_t i = 0; i < n && rxRing_.size() < kRingCap; i++)
+			rxRing_.push_back(buf[i]);
+	}
+}
+
 std::string Multiply::debugCommand(const std::vector<std::string>& toks)
 {
 	if (toks.empty() || toks[0] != "MULTIPLY")
 		return std::string();
 
-	char out[96];
-	snprintf(out, sizeof(out), "OK enabled=%d lastByteReceived=%d rxPhase=%d",
-	         enabled_ ? 1 : 0, lastByteReceived_, (int)rxPhase_);
+	// "MULTIPLY RECONNECT" / "MULTIPLY CONNECT host port" -- same
+	// convention as ZIFI's debug commands.
+	if (toks.size() >= 2 && toks[1] == "RECONNECT")
+		return reconnect() ? "OK" : "ERR no prior connectTo()";
+	if (toks.size() >= 4 && toks[1] == "CONNECT")
+		return connectTo(toks[2].c_str(), atoi(toks[3].c_str())) ? "OK" : "ERR connect failed";
+
+	char out[128];
+	snprintf(out, sizeof(out), "OK enabled=%d connected=%d rx=%zu tx=%zu",
+	         enabled_ ? 1 : 0, sockFd_ >= 0 ? 1 : 0, rxRing_.size(), txRing_.size());
 	return out;
 }

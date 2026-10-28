@@ -221,9 +221,14 @@ static void printUsage(const char* argv0)
 		"                         microSD addon for the Dandanator, see\n"
 		"                         docs/Dandanator/ -- rides on --dandanator's\n"
 		"                         own command 52, needs it to do anything).\n"
-		"                         v1 only answers one command (identify) --\n"
-		"                         a foundation proving the TX/RX round trip,\n"
-		"                         not the real SD file browser yet.\n"
+		"                         Does nothing on its own without a bridge\n"
+		"                         connected (see --multiply-bridge) -- all the\n"
+		"                         real CMD_ZX2SD_* logic (SD browsing, Z80/\n"
+		"                         SNA/TAP) lives in that companion process,\n"
+		"                         not in JASE itself.\n"
+		"  --multiply-bridge HOST:PORT connect to tools/multiply_bridge.py\n"
+		"                         (or an equivalent companion) for the real\n"
+		"                         file-serving logic; implies --multiply.\n"
 		"  --sdi8255              enable the SDI board's 8255 PPI + ROM/ROMCS\n"
 		"                         decode layer (see docs/VC1541/VC1541.md) --\n"
 		"                         just the hardware-decode layer so far, no\n"
@@ -415,6 +420,18 @@ int main(int argc, char *argv[])
 		}
 		else if (0 == strcmp(argv[i], "--multiply"))
 			minZX.getMultiply()->setEnabled(true);
+		else if (0 == strcmp(argv[i], "--multiply-bridge") && i + 1 < argc) {
+			// Implies --multiply, same reasoning as --divide-rom implying
+			// --divide: supplying a bridge target only makes sense if you
+			// also want the addon active.
+			minZX.getMultiply()->setEnabled(true);
+			char* arg = argv[++i];
+			char* colon = strrchr(arg, ':');
+			if (!colon) { std::cerr << "--multiply-bridge expects HOST:PORT" << std::endl; continue; }
+			*colon = '\0';
+			if (!minZX.getMultiply()->connectTo(arg, atoi(colon + 1)))
+				std::cerr << "--multiply-bridge: failed to connect to " << arg << ":" << (colon + 1) << std::endl;
+		}
 		else if (0 == strcmp(argv[i], "--sdi8255"))
 			minZX.getSDI8255()->setEnabled(true);
 		else if (0 == strcmp(argv[i], "--sdi8255-rom") && i + 1 < argc) {
