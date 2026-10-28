@@ -159,9 +159,20 @@ void IecDeviceEmulator::onSecondaryByte(uint8_t b)
 		// from this hot dispatch path. Fine against a fast local bridge;
 		// would stall the whole emulated CPU against a slow/remote one.
 		if (role_ == IecRole::WeAreTalker && device_) {
-			if (activeChannel_ == 0)
-				device_->open(activeChannel_, "$");
-			else if (activeChannel_ == 15)
+			if (activeChannel_ == 0) {
+				// Substitute a real, already-announced *LOAD filename for
+				// the literal "$" if one is pending (see pendingLoadName_'s
+				// own comment) -- the real ROM never re-opens the file by
+				// name a second time itself; the bridge/this layer is what
+				// has to remember it. Consumed once so a later genuine
+				// *CAT (no prior PlainSelect) still gets the real catalog.
+				if (!pendingLoadName_.empty()) {
+					device_->open(activeChannel_, pendingLoadName_);
+					pendingLoadName_.clear();
+				} else {
+					device_->open(activeChannel_, "$");
+				}
+			} else if (activeChannel_ == 15)
 				device_->open(activeChannel_, "$STATUS");
 		}
 		// For WeAreListener role, the OPEN secondary means the controller
@@ -251,8 +262,22 @@ void IecDeviceEmulator::onDataByte(uint8_t b)
 void IecDeviceEmulator::finalizeSession()
 {
 	if ((secondaryCmd_ == SecondaryCmd::Open || secondaryCmd_ == SecondaryCmd::PlainSelect) &&
-	    !nameBuf_.empty() && device_)
+	    !nameBuf_.empty() && device_) {
 		device_->open(activeChannel_, nameBuf_);
+		// *LOAD's filename-announce is a PlainSelect-under-Listener
+		// session on its own -- remember the name so the TALK+Open(ch0,
+		// "$") that follows it (see onSecondaryByte) can be answered
+		// with the real file instead of the literal catalog. Regardless
+		// of whether this open() just succeeded: a failed open still
+		// means "this is the name SDI wants", same as "$" would get
+		// a real (if non-matching) answer either way. Scoped to channel
+		// 0 specifically -- SDI also sends unrelated PlainSelect
+		// housekeeping probes ("I", "UI-") on channel 15 that must NOT
+		// overwrite this (confirmed live: those come right before the
+		// real channel-0 filename-announce in the same session).
+		if (secondaryCmd_ == SecondaryCmd::PlainSelect && activeChannel_ == 0)
+			pendingLoadName_ = nameBuf_;
+	}
 	secondaryCmd_ = SecondaryCmd::None;
 	nameBuf_.clear();
 }
