@@ -214,8 +214,25 @@ void IecDeviceEmulator::onDataByte(uint8_t b)
 {
 	// OPEN's filename arrives as data-phase bytes following the
 	// secondary address, terminated by UNLISTEN (see finalizeSession).
-	// SAVE's payload isn't forwarded anywhere yet.
-	if (secondaryCmd_ == SecondaryCmd::Open) {
+	//
+	// *LOAD's real filename send does NOT use the $60-$6F Open secondary
+	// at all -- confirmed live via IECTRACE against the real SDI ROM:
+	// LISTEN(8) -> secondary $F0 (PlainSelect, channel 0) -> 11 data
+	// bytes that decode to the exact literal characters "ace of aces"
+	// -> UNLISTEN. This was flagged as an open question in
+	// docs/VC1541/VC1541.md ("$3463's own secondary-address computation
+	// ... works out to 0xff -- outside the normal $60-$6F OPEN-channel
+	// range ... not resolved") -- now resolved: it's PlainSelect, not
+	// Open, and this method was silently dropping every one of those
+	// bytes, which is why *LOAD always reported "LOADING OK" against an
+	// empty/never-actually-requested file (LIST showed nothing loaded).
+	// SAVE's payload also arrives via PlainSelect-under-Listener per
+	// onSecondaryByte's own comment (the KERNAL LOAD/SAVE convention
+	// without a separate OPEN) -- NOT forwarded anywhere yet, still a
+	// real gap, but out of scope for this fix (SAVE payload bytes need
+	// to go to device_->write(), not be treated as a filename).
+	if (secondaryCmd_ == SecondaryCmd::Open ||
+	    (secondaryCmd_ == SecondaryCmd::PlainSelect && role_ == IecRole::WeAreListener)) {
 		nameBuf_ += (char)b;
 		// If we're the talker (controller sending filename to device),
 		// queue this byte for transmission via the IEC bus.
@@ -233,7 +250,8 @@ void IecDeviceEmulator::onDataByte(uint8_t b)
 
 void IecDeviceEmulator::finalizeSession()
 {
-	if (secondaryCmd_ == SecondaryCmd::Open && !nameBuf_.empty() && device_)
+	if ((secondaryCmd_ == SecondaryCmd::Open || secondaryCmd_ == SecondaryCmd::PlainSelect) &&
+	    !nameBuf_.empty() && device_)
 		device_->open(activeChannel_, nameBuf_);
 	secondaryCmd_ = SecondaryCmd::None;
 	nameBuf_.clear();
