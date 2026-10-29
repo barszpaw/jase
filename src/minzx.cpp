@@ -981,8 +981,26 @@ void MinZX::processOutputPort(uint16_t port, uint8_t value)
 		// changed the RAM bank in STATE's output when the real page table
 		// -- confirmed unchanged via MEM -- hadn't moved at all).
 		if (!spectrum128Locked_) {
-			memory_.mapPage(0, value & 0x10 ? &memory_.romBank(2) : &memory_.romBank(0));
-			memory_.mapPage(1, value & 0x10 ? &memory_.romBank(3) : &memory_.romBank(1));
+			// Pages 0/1 are skipped here while a ROMCS peripheral (Dandanator,
+			// Multiface, DivIDE) currently owns them -- confirmed live as the
+			// cause of a black screen running the Dandanator menu on 128K
+			// specifically (never surfaced on 48K): real 128K software writes
+			// to this port constantly for RAM-bank/screen selection, entirely
+			// unrelated to ROM paging, and this handler was blindly remapping
+			// 0/1 on every single one of those writes -- stomping the
+			// peripheral's own ROM out from under it within a frame or two of
+			// it paging in. reapplyMachinePaging() (see its own comment)
+			// already owns reapplying 0/1 from spectrum128Paging_ the moment
+			// ROMCS is released -- this just has to not fight it while ROMCS
+			// is still up. Everything else below (RAM banks 6/7, screen bank,
+			// the paging value itself) is unrelated to ROM ownership and
+			// still has to track real hardware's state unconditionally, so a
+			// peripheral that pages 0/1 back out later reapplies whatever the
+			// Z80 most recently asked for -- not stale pre-ROMCS state.
+			if (!memory_.isRomcsAsserted()) {
+				memory_.mapPage(0, value & 0x10 ? &memory_.romBank(2) : &memory_.romBank(0));
+				memory_.mapPage(1, value & 0x10 ? &memory_.romBank(3) : &memory_.romBank(1));
+			}
 			int ramBankSel = value & 0x07;
 			memory_.mapPage(6, &memory_.ramBank(2 * ramBankSel));
 			memory_.mapPage(7, &memory_.ramBank(2 * ramBankSel + 1));
