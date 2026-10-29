@@ -45,7 +45,7 @@ class Session:
 # directly from `conn` and writes its own reply (if any). ---------------
 
 def _handle_req_id(conn):
-    conn.sendall(bytes([0x01]))
+    conn.sendall(proto.MULTIPLY_VERSION)
 
 
 def _handle_setzxtype(conn, session):

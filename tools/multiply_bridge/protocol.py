@@ -41,6 +41,17 @@ CMD_ZX2SD_TAP          = 0x20
 CMD_ZX2SD_SCRTAP       = 0x23
 CMD_ZX2SD_ROMSETBLK4B  = 0x30
 
+# Multiply_Arduino.ino: const uint8_t MultiplyVersion[8] = {'M','U','L',
+# 'T','v','1','.','2'}, the exact reply to CMD_ZX2INO_REQ_ID. Getting the
+# BYTE COUNT right here matters, not just the content: real menu ROMs read
+# a fixed-size identification string and busy-poll port 0x1F for every
+# byte of it -- send fewer bytes than expected (an earlier version of this
+# bridge sent a single placeholder byte) and the Z80 side hangs forever
+# waiting for bytes that will never come, with no error and no timeout.
+# Confirmed live: a real romset's "Launch Multiply" menu entry appeared to
+# freeze after one nibble-pair -- it was correctly waiting for byte 2 of 8.
+MULTIPLY_VERSION = bytes(b'MULTv1.2')
+
 # File-type bytes for directory-entry records (incCmdsFileTypes.h).
 FT_END_DIRECTORY = 0x00
 FT_DIRECTORY     = 0x0C
