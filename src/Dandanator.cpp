@@ -151,7 +151,25 @@ void Dandanator::onMemoryWrite(uint16_t addr, uint8_t value, MemoryMap& memory)
 		} else {
 			pulseCount_++;
 		}
-		if (value < 40 && pulseCount_ == value) {
+		// Upper cap raised from the documented "<40" split (1-39 =
+		// normal/repeated-pulse, 40-49 = special/3-byte+confirm) after
+		// live-tracing a real v10.4.3 romset's "Launch Multiply" code
+		// (2026-10-29 session): it sends command 42 via this exact
+		// repeated-pulse mechanism (LD A,42 / LD HL,1 / LD B,A / DJNZ
+		// writing (HL),A 42 times), not via the special confirm-pulse
+		// transport -- so the split isn't a universal hardware rule for
+		// EVERY value >=40. Still excludes 40/46/52 specifically: those
+		// three are confirmed (the first two from ZEsarUX's reference
+		// source, 52 from this project's own stub test) to arrive via
+		// confirm-pulse ONLY, each write to addr 1 just latching
+		// pendingCmd_ once with data1_/data2_ following via addr 2/3 --
+		// letting them ALSO auto-fire here risks executing with
+		// stale/mismatched data1_/data2_ left over from a previous,
+		// unrelated write burst the instant pulseCount_ coincidentally
+		// reaches their value (confirmed live: removing this exclusion
+		// first made cmd 40 fire mid-pulse-count with a stale data1_,
+		// landing on an invalid bank).
+		if (pulseCount_ == value && value != 40 && value != 46 && value != 52) {
 			executeCommand();
 			pulseCount_ = 0;
 		}
@@ -243,8 +261,31 @@ void Dandanator::executeCommand()
 		if (data1_ == 1 && cmd52Sink_) cmd52Sink_->onDandanatorByte(data2_);
 	}
 	// 35, 37, 38, 39 (remember reset slot -- not implemented, matches
-	// ZEsarUX's own gap), 41-43 ("unusable on emulation" per ZEsarUX),
-	// 44-45, 47-51, 53+: no-op.
+	// ZEsarUX's own gap), 41-43/49/50 etc: a real v10.4.3 romset's
+	// "Launch Multiply" code sends these via the plain repeated-pulse
+	// channel (no data1/data2 payload at all), and two of the observed
+	// values (41, 49) are byte-identical to real Multiply Arduino
+	// firmware's own CMD_ZX2SD_BINARY_DATA (0x29=41) and
+	// CMD_ZX2SD_ROMSETBLKSER (0x31=49) constants (confirmed against
+	// github.com/mad3001/Multiply's incCmdsFileTypes.h). Routing any
+	// command Dandanator doesn't explicitly own straight to cmd52Sink_
+	// as a raw byte, same destination command 52 already uses, since
+	// these ARE real Multiply protocol bytes arriving over a transport
+	// this code didn't previously know to forward -- more correct than
+	// treating them as an "unknown Dandanator command" even though nothing
+	// can productively answer them yet: checked the real
+	// Multiply_Arduino.ino's dispatch switch (and its full git history,
+	// all 8 commits) and BINARY_INFO/BINARY_DATA/ROMSETBLKSER have never
+	// had a case handler, ever -- `default: break;`, no reply, same as
+	// here. Whatever UI action sends these in this specific romset would
+	// very likely hang identically on real hardware; this isn't a JASE
+	// gap to fix, it's a pre-existing incompleteness in the real
+	// Dandanator+Multiply ecosystem. See project memory for the full
+	// investigation (dead ends ruled out: SD card content doesn't change
+	// it).
+	else if (cmd52Sink_) {
+		cmd52Sink_->onDandanatorByte(cmd);
+	}
 }
 
 std::string Dandanator::debugCommand(const std::vector<std::string>& toks)
