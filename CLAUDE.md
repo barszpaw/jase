@@ -65,6 +65,19 @@
   `pump()` (ZiFi/Multiply) na zawsze, dopóki nie przyjdzie `CONT`. Testy
   protokołu Multiply/ZiFi NIE MOGĄ używać `STEP` — niech klatki lecą w
   czasie rzeczywistym (`running_` domyślnie `true`).
+- **Znaleziony i naprawiony bug 128K** (2026-10-29): prawdziwy romset
+  Dandanatora renderował się na 48K, ale dawał czarny ekran na
+  `--machine 128k`. Przyczyna: obsługa portu 0x7FFD w
+  `MinZX::processOutputPort()` bezwarunkowo przemapowywała strony 0/1
+  przy KAŻDYM zapisie na ten port, ignorując `isRomcsAsserted()` —
+  realne oprogramowanie 128K zapisuje na 0x7FFD bez przerwy (wybór
+  banku RAM/ekranu), więc pierwszy taki zapis po wstawieniu ROM-u
+  Dandanatora cicho go zrywał. **Nie jest to błąd specyficzny dla
+  Dandanatora** — ten sam bug psuł też Multiface na 128K (potwierdzone:
+  bajt znacznika z handlera NMI nigdy nie lądował). Naprawione:
+  przemapowanie stron 0/1 pomijane, gdy ROMCS jest aktywne. Zweryfikowane
+  na 48K (bez regresji) i 128K (menu renderuje się poprawnie, Multiface
+  też działa). Commit `b94a0f2`.
 - **Zaplanowane (user, "na sam koniec wdrożenia")**: zastąpić twardo
   zakodowaną kolejność konstrukcji peryferiów w `MinZX::init()`
   (dziś jedyne, co chroni przed cichym przegrywaniem portu 0x1F przez

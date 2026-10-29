@@ -275,10 +275,38 @@ nibble bytes).
   (Dandanator commands 36/40); polled once per instruction in both of
   MinZX's instruction loops (`update()` and `step()`).
 
+## 128K black-screen bug found + fixed (2026-10-29)
+Real Dandanator romset rendered fine on 48K, black screen on
+`--machine 128k`. Root cause: `MinZX::processOutputPort()`'s port
+0x7FFD handler unconditionally remapped pages 0/1 on EVERY write,
+ignoring `memory_.isRomcsAsserted()`. Real 128K software writes 0x7FFD
+constantly for RAM-bank/screen selection (unrelated to ROM paging), so
+the first such write after Dandanator paged its menu in stomped it
+back to the system ROM almost immediately. **Not Dandanator-specific**
+-- confirmed the same bug broke Multiface's NMI handler on 128K too
+(its 0x8000 marker byte never landed), just never exercised on 128K by
+any ROMCS peripheral before. Fixed: skip the pages-0/1 remap while
+ROMCS is asserted (RAM banks 6/7 + screen bank + paging value/lock
+still update unconditionally). Verified on both 48K (regression-clean)
+and 128K (real romset menu renders correctly, Multiface marker lands).
+Commit `b94a0f2`.
+
+## Multiply bridge: now a package, Z80/SNA/TAP loading implemented
+`tools/multiply_bridge.py` grew to ~750 lines then got split (user
+feedback: DRY/SOLID/YAGNI) into `tools/multiply_bridge/` -- protocol.py
+(wire constants), virtual_sdcard.py (`VirtualSDCard`, pure), snapshot.py
+(`Snapshot` class, SNA/Z80 parsing, pure), tap.py (`TapPlayer`, pure),
+session.py (dispatch + the only module touching sockets), and a thin
+multiply_bridge.py entrypoint. CMD_ZX2SD_SNA_48K/128K, Z80_16K/48K/128K
+(v1/v2/v3, RLE-compressed or not), and TAP now serve real content
+(previously just REQ_ID). Verified via direct unit-style tests against
+synthetic fixtures (fast, no TCP) plus live round-trip smoke tests.
+
 ## Not done yet
-Dan-SNAP (Multiface-like NMI freeze/snapshot), the real `CMD_ZX2SD_*`
-file-browsing/streaming command set (Multiply only answers REQ_ID so
-far), T-state confirmation-delay modeling (commands execute immediately
-on the final pulse instead of after the real ~35-121 T-state hardware
-latency), onboard-Kempston port 0x1F emulation, plugin `.so` split for
-either class.
+Dan-SNAP (Multiface-like NMI freeze/snapshot), T-state confirmation-
+delay modeling (commands execute immediately on the final pulse instead
+of after the real ~35-121 T-state hardware latency), onboard-Kempston
+port 0x1F emulation, plugin `.so` split for Dandanator/Multiply (only
+Kempston is split so far, itself still just a POC -- user flagged this
+explicitly, asked to revisit after functional testing), GETINFO,
+multi-chapter directory pagination.
