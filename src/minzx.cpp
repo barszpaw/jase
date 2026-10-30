@@ -363,7 +363,7 @@ void MinZX::update(uint8_t* screen)
 		// symptom this fixes.
 		tapeAdvance(tstates - prevTstates);
 		prevTstates = tstates;
-		if (breakpointsEnabled_ && isBreakpoint(z80->getRegPC()))
+		if ((breakpointsEnabled_ && isBreakpoint(z80->getRegPC())) || checkConditionalBreakpoint())
 		{
 			justHitBreakpoint_ = true;
 			lastBreakpointPC_ = z80->getRegPC();
@@ -426,6 +426,80 @@ void MinZX::removeBreakpoint(uint16_t pc)
 	breakpointsEnabled_ = !breakpoints_.empty();
 }
 
+// Adapts MinZX's own register/memory accessors to the narrow interface
+// BreakExpr needs, so BreakExpr.h/.cpp stay independent of the Z80/
+// MinZX classes entirely (same separation-of-concerns reasoning as
+// Peripheral.h). Local to this translation unit -- nothing outside
+// MinZX ever needs to see this.
+namespace {
+class MinZXBreakExprContext : public BreakExprContext {
+public:
+	MinZXBreakExprContext(Z80* z80, MinZX* mzx) : z80_(z80), mzx_(mzx) {}
+
+	int32_t reg(const std::string& name) const override
+	{
+		if (name == "PC") return z80_->getRegPC();
+		if (name == "SP") return z80_->getRegSP();
+		if (name == "AF") return z80_->getRegAF();
+		if (name == "BC") return z80_->getRegBC();
+		if (name == "DE") return z80_->getRegDE();
+		if (name == "HL") return z80_->getRegHL();
+		if (name == "IX") return z80_->getRegIX();
+		if (name == "IY") return z80_->getRegIY();
+		if (name == "AF2") return z80_->getRegAFx();
+		if (name == "BC2") return z80_->getRegBCx();
+		if (name == "DE2") return z80_->getRegDEx();
+		if (name == "HL2") return z80_->getRegHLx();
+		if (name == "A") return z80_->getRegA();
+		if (name == "B") return z80_->getRegB();
+		if (name == "C") return z80_->getRegC();
+		if (name == "D") return z80_->getRegD();
+		if (name == "E") return z80_->getRegE();
+		if (name == "H") return z80_->getRegH();
+		if (name == "L") return z80_->getRegL();
+		if (name == "I") return z80_->getRegI();
+		if (name == "R") return z80_->getRegR();
+		if (name == "IFF1") return z80_->isIFF1() ? 1 : 0;
+		if (name == "IFF2") return z80_->isIFF2() ? 1 : 0;
+		if (name == "IM") return (int32_t)z80_->getIM();
+		return 0; // unknown identifier -- treated as 0 rather than a hard parse-time error
+	}
+
+	uint8_t peek8(uint16_t addr) const override { return mzx_->peek8(addr); }
+
+private:
+	Z80* z80_;
+	MinZX* mzx_;
+};
+} // namespace
+
+bool MinZX::setConditionalBreakpoint(const std::string& expr, std::string* error)
+{
+	if (expr.empty()) { clearConditionalBreakpoint(); return true; }
+	auto parsed = BreakExpr::parse(expr, error);
+	if (!parsed) return false;
+	condBreakpoint_ = std::move(parsed);
+	condBreakpointText_ = expr;
+	return true;
+}
+
+void MinZX::clearConditionalBreakpoint()
+{
+	condBreakpoint_.reset();
+	condBreakpointText_.clear();
+}
+
+// Evaluated once per instruction (see update()/step()) alongside the
+// plain PC breakpoint check -- near-zero cost when unarmed (single
+// pointer null-check), same "cheap when inactive" shape as
+// breakpointsEnabled_ above.
+bool MinZX::checkConditionalBreakpoint()
+{
+	if (!condBreakpoint_) return false;
+	MinZXBreakExprContext ctx(z80, this);
+	return condBreakpoint_->evaluate(ctx) != 0;
+}
+
 void MinZX::step(int n)
 {
 	// Same execute-then-check order as update(), and for the same
@@ -455,7 +529,7 @@ void MinZX::step(int n)
 			if (p->takeNMIRequest()) triggerNMI();
 		}
 		z80->execute();
-		if (breakpointsEnabled_ && isBreakpoint(z80->getRegPC()))
+		if ((breakpointsEnabled_ && isBreakpoint(z80->getRegPC())) || checkConditionalBreakpoint())
 		{
 			justHitBreakpoint_ = true;
 			lastBreakpointPC_ = z80->getRegPC();

@@ -361,6 +361,34 @@ void DebugServer::handleLine(const std::string& line, MinZX& minZX)
         }
         reply(resp);
     }
+    else if (cmd == "BREAKIF") {
+        // Conditional breakpoint (see BreakExpr.h) -- an arbitrary
+        // boolean expression over registers/memory, checked once per
+        // instruction alongside the plain PC breakpoints above.
+        // "BREAKIF" with no expression reports the current one (if
+        // any) instead of arming/disarming -- same query-vs-set split
+        // SETREG doesn't need but this does, since an empty line is
+        // ambiguous between "no condition" and "clear the condition"
+        // otherwise. Use "BREAKIF CLEAR" to explicitly disarm.
+        if (line.size() <= 8) {
+            if (minZX.hasConditionalBreakpoint())
+                reply("OK " + minZX.conditionalBreakpointText());
+            else
+                reply("OK (none)");
+        } else {
+            std::string expr = line.substr(8);
+            if (expr == "CLEAR") {
+                minZX.clearConditionalBreakpoint();
+                reply("OK");
+            } else {
+                std::string error;
+                if (minZX.setConditionalBreakpoint(expr, &error))
+                    reply("OK");
+                else
+                    reply("ERR " + error);
+            }
+        }
+    }
     else if (cmd == "PRESSKEYS" && toks.size() >= 2) {
         // Comma-separated chords, '+' within a chord for simultaneous
         // keys: "J,ALT+P,ALT+P,RETURN" types LOAD "" + ENTER. Pacing
@@ -433,6 +461,13 @@ void DebugServer::handleLine(const std::string& line, MinZX& minZX)
             reply("OK");
         else
             reply("ERR loadZ80 failed");
+    }
+    else if (cmd == "LOADSNA" && toks.size() >= 2) {
+        FileMgr fileMgr;
+        if (fileMgr.loadSNA(toks[1].c_str(), &minZX))
+            reply("OK");
+        else
+            reply("ERR loadSNA failed");
     }
     else if (cmd == "SCREENSHOT" && toks.size() >= 2) {
         // Dumps the exact buffer generateScreen() wrote this frame -- unlike

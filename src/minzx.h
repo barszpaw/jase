@@ -2,6 +2,7 @@
 #define _MINZX_H_
 
 #include <inttypes.h>
+#include <memory>
 #include <string>
 #include <vector>
 #include <SDL.h>
@@ -9,6 +10,7 @@
 #include "Peripheral.h"
 #include "MemoryMap.h"
 #include "IAySound.h"
+#include "BreakExpr.h"
 
 // Agent/debug port tracing: when set (via --trace-port on the command
 // line, see main.cpp), every IN from this port that changes value gets
@@ -221,6 +223,17 @@ public:
 	bool justHitBreakpoint() const { return justHitBreakpoint_; }
 	uint16_t lastBreakpointPC() const { return lastBreakpointPC_; }
 
+	// Conditional breakpoint (BREAKIF, see debugserver.cpp) -- an
+	// arbitrary boolean expression over registers/memory (BreakExpr.h),
+	// evaluated once per instruction alongside the plain PC breakpoints
+	// above and firing the SAME justHitBreakpoint()/lastBreakpointPC()
+	// contract. Returns false with *error set on a malformed expression
+	// (nothing is armed in that case). Pass an empty string to disarm.
+	bool setConditionalBreakpoint(const std::string& expr, std::string* error);
+	void clearConditionalBreakpoint();
+	bool hasConditionalBreakpoint() const { return condBreakpoint_ != nullptr; }
+	const std::string& conditionalBreakpointText() const { return condBreakpointText_; }
+
 	// Per-instruction trace logger -- the thing SDI_IOTRACE (SDI.cpp)
 	// couldn't give us: IOTRACE only sees port I/O, so it's blind to
 	// everything a ROM does between one IN/OUT and the next (exactly
@@ -392,6 +405,10 @@ private:
 	bool justHitBreakpoint_ = false;
 	uint16_t lastBreakpointPC_ = 0;
 	bool isBreakpoint(uint16_t pc) const;
+
+	std::unique_ptr<BreakExpr> condBreakpoint_;
+	std::string condBreakpointText_;
+	bool checkConditionalBreakpoint(); // true if it just fired
 
 	bool instrTraceEnabled_ = false;
 	uint16_t instrTraceLow_ = 0x3000;
