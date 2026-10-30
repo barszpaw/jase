@@ -144,6 +144,32 @@ void Dandanator::onMemoryWrite(uint16_t addr, uint8_t value, MemoryMap& memory)
 	if (!enabled_ || !switchedOn_ || addr > 3 || state_ == Disabled) return;
 
 	switch (addr) {
+	case 0:
+		// Hardware reality check (2026-10-30, schematic + GAL PLD trace
+		// of a real PIC16F1826 unit pulled from its socket): the PIC
+		// has NO connection to the Z80 address or data bus at all. Its
+		// only input from this side is one generic `Rom_WR` pulse on
+		// RB0, defined by the GAL as `!(MREQ|A14|A15) & WR` -- identical
+		// for every address 0-3 and every value written. It physically
+		// cannot tell addr 0 apart from addr 1, nor see what byte was
+		// written. `dandanator_hw_90.asm`'s SENDNRCMD pulses address 0
+		// for ordinary repeated-pulse commands -- the exact same
+		// mechanism case 1 below implements for address 1 -- so addr 0
+		// must feed the SAME pulse-counting accumulator, not a separate
+		// one; the old model (addr 0 = confirm-only) assumed address
+		// decoding the hardware doesn't have.
+		// The one distinction that IS real is sequencing, not
+		// addressing: once a special command (>=40) has already
+		// latched pendingCmd_ via a prior burst and had data1_/data2_
+		// set via addr 2/3, a further addr-0 write is the documented
+		// confirm pulse -- its value is irrelevant, only the write
+		// event matters -- so it executes immediately instead of
+		// restarting the pulse count.
+		if (pendingCmd_ >= 40) {
+			executeCommand();
+			break;
+		}
+		[[fallthrough]];
 	case 1: // command byte -- confirmed by repeating the SAME byte `value` times
 		if (value != pendingCmd_ || pulseCount_ == 0) {
 			pendingCmd_ = value;
@@ -181,20 +207,6 @@ void Dandanator::onMemoryWrite(uint16_t addr, uint8_t value, MemoryMap& memory)
 
 	case 3:
 		data2_ = value;
-		break;
-
-	case 0:
-		// Confirmation pulse -- only meaningful for 3-byte "special"
-		// commands (40 and up: 40-49 plus 52/DANCMD_MULTIPLY, confirmed
-		// from Multiply's own firmware to use this exact same transport
-		// -- see DandanatorCmd52Sink). Open-ended on purpose rather than
-		// hard-capped at 49: a cmd<40 can never reach here anyway (it
-		// always self-executes from the pulse-count path in case 1
-		// above), so any cmd>=40 arriving via a confirm pulse is, by
-		// construction, meant to use this transport -- executeCommand()
-		// itself still no-ops anything it doesn't specifically recognize.
-		if (pendingCmd_ >= 40)
-			executeCommand();
 		break;
 	}
 }
