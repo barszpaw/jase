@@ -98,8 +98,39 @@ void Dandanator::applyPaging(MemoryMap& memory)
 
 void Dandanator::onInstructionFetch(uint16_t pc, MemoryMap& memory, uint32_t tstates)
 {
-	(void)pc; (void)tstates;
+	(void)pc;
 	if (!enabled_) return;
+	lastFetchTstates_ = tstates;
+
+	// Finalize the field currently being pulse-counted once a short
+	// quiet gap confirms pulsing has stopped (see class comment).
+	// Wraparound note: tstates resets to a small value at the start of
+	// each frame (see MinZX::update()), so a pulse recorded near the
+	// end of one frame and checked early in the next makes these
+	// subtractions "underflow" to a huge unsigned value -- which still
+	// correctly exceeds the threshold, so the field/timeout is
+	// (correctly) finalized rather than lost. tstates only increases
+	// within a frame, so there's no direction where this underflow
+	// could instead compute a falsely-small difference.
+	if (burstActive_ && (tstates - lastPulseTstate_) >= kPulseIdleTstates) {
+		uint8_t count = (uint8_t)(burstPulseCount_ & 0xFF); // 256 pulses -> 0, matching SENDNRCMD's own "0 is signaled by 256 pulses"
+		burstPulseCount_ = 0;
+		burstActive_ = false;
+		onFieldComplete(count, tstates);
+	}
+	else if (awaitingNextField_ && (tstates - lastFieldCompleteTstate_) >= kFieldTimeoutTstates) {
+		awaitingNextField_ = false;
+		onFieldTimeout(tstates);
+	}
+
+	// See class comment + scheduleExecute(): the command's effect is
+	// deliberately held back this long after the pulse that decided it,
+	// same wraparound-safe subtraction as the checks above.
+	if (commandPending_ && (tstates - pendingSinceTstate_) >= pendingDelayTstates_) {
+		commandPending_ = false;
+		executeCommand();
+	}
+
 	if (bankChangePending_) {
 		bankChangePending_ = false;
 		activeBank_ = pendingBank_;
@@ -126,89 +157,154 @@ void Dandanator::pressButton()
 	if (!enabled_) return;
 	switchedOn_ = true;
 	state_ = WaitNormal;
+	phase_ = PulsePhase::Command;
 	pendingCmd_ = 0;
-	pulseCount_ = 0;
+	burstPulseCount_ = 0;
+	burstActive_ = false;
+	awaitingNextField_ = false;
+	commandPending_ = false; // discard any still-delayed command -- the menu/game context it belonged to no longer exists
 	pendingBank_ = 0;
 	bankChangePending_ = true; // picked up by the very next onInstructionFetch(),
 	                           // which lands before the first post-reset fetch --
 	                           // main.cpp calls MinZX::reset() right alongside this.
 }
 
+// AUTHORITATIVE as of 2026-10-31: the real PIC firmware source
+// (`docs/2017.09.22 - Dandanator Mini PIC Firmware/XC8_Source/.../
+// main.c`+`commands.h`) confirms the protocol-level special range is
+// exactly 40-49 (`if ((SpectrumCommandCounter>39)&&(SpectrumCommandCounter<50))`
+// in the TMR0 timeout handler) -- commands 1-39 (including 39 itself,
+// CMD_SET_RESETSLOT, confirmed explicitly handled as a single-field
+// command in main.c's Pending_Processing switch) are ALWAYS 1-field,
+// firing immediately off their own pulse count with NO wait, same as
+// everything outside 40-49. A real v10.4.3 romset's idle-loop status
+// sender DOES send some of these (e.g. 39) via the full 4-field
+// transport anyway, via a generic helper used indiscriminately -- but
+// per this firmware source, those extra fields are harmless noise: a
+// non-special command fires immediately and disables further pulse
+// reception (`INTE=0`) until the main loop processes it, discarding
+// anything sent in that gap on real hardware.
+// Command 52 (DANCMD_MULTIPLY) is NOT part of this 2017 firmware's
+// range at all -- Multiply support postdates this dump (confirmed via
+// this project's own cmd52 stub test, see project memory: real
+// v10.4.3-era hardware unambiguously DOES treat 52 as 4-field). A newer
+// PIC firmware revision (not available to this project) almost
+// certainly extended the special range to include it; 52 is kept here
+// on that live evidence. 49/50 stay included on the same live-trace
+// basis (49 IS in the authoritative 40-49 range already; 50 isn't, but
+// is observed arriving 4-field in the same idle-sender trace as 49/52,
+// suggesting the same newer-firmware extension covers it too).
+bool Dandanator::needsMoreFields(uint8_t cmd)
+{
+	switch (cmd) {
+	case 40: case 41: case 42: case 43: case 46: case 49: case 50: case 52:
+		return true;
+	default:
+		return false;
+	}
+}
+
+// Dispatches one just-completed field (see class comment) through the
+// Command/Data1/Data2/Confirm sequence. `count` is address- and
+// value-blind by construction -- purely how many writes to addr 0-3
+// happened before a quiet gap, per real hardware's own mechanism.
+void Dandanator::onFieldComplete(uint8_t count, uint32_t tstates)
+{
+	switch (phase_) {
+	case PulsePhase::Command:
+		pendingCmd_ = count;
+		if (!needsMoreFields(count)) {
+			// Scheduled kNormalConfirmDelayTstates out, NOT fired here --
+			// the decision itself is still zero-latency (see class comment
+			// for why a tight loader retry loop can't tolerate delaying
+			// THAT), only the command's actual effect is now held back a
+			// few dozen T-states to match real hardware.
+			scheduleExecute(tstates, kNormalConfirmDelayTstates);
+			return;
+		}
+		phase_ = PulsePhase::Data1;
+		break;
+	case PulsePhase::Data1:
+		data1_ = count;
+		phase_ = PulsePhase::Data2;
+		break;
+	case PulsePhase::Data2:
+		data2_ = count;
+		phase_ = PulsePhase::Confirm;
+		break;
+	case PulsePhase::Confirm:
+		// The real confirm is documented as a single pulse (LONGSPCONF's
+		// bare `LD (0),A`, no DJNZ around it) -- any completed field here
+		// is treated as that confirm regardless of its own count, since
+		// the count itself carries no meaning in this phase.
+		scheduleExecute(tstates, kSpecialConfirmDelayTstates);
+		phase_ = PulsePhase::Command;
+		awaitingNextField_ = false;
+		return;
+	}
+	// Armed to wait for the next field; onFieldTimeout() fires what's
+	// been collected so far if nothing more arrives at all (safety net
+	// only -- see kFieldTimeoutTstates' own comment).
+	awaitingNextField_ = true;
+	lastFieldCompleteTstate_ = tstates;
+}
+
+// The longer of the two timers (see class comment) elapsed with no
+// further field arriving -- the command is complete with whatever
+// fields were collected. For a genuine 1-field command (the common
+// case: ordinary bank switches, and confirmed-live standalone sends
+// like command 42) this is simply pendingCmd_ alone; executeCommand()
+// only reads data1_/data2_ for commands confirmed to actually carry
+// them, so stale leftovers from an earlier burst are never consulted.
+// Scheduled with the "special" delay since only commands already routed
+// into the multi-field pipeline (needsMoreFields()==true) ever reach
+// this path.
+void Dandanator::onFieldTimeout(uint32_t tstates)
+{
+	scheduleExecute(tstates, kSpecialConfirmDelayTstates);
+	phase_ = PulsePhase::Command;
+}
+
+// Defers a just-decided command's effect by delayTstates, snapshotting
+// its cmd/data1/data2 into scheduled*_ so a NEW command's pulses
+// (already accumulating into pendingCmd_/data1_/data2_ via
+// onFieldComplete()) can't corrupt it before the delay elapses -- see
+// class comment and the scheduled*_ fields' own comment in Dandanator.h.
+void Dandanator::scheduleExecute(uint32_t tstates, uint32_t delayTstates)
+{
+	if (commandPending_) {
+		// A previous command's own delay hadn't elapsed yet -- real
+		// hardware's INTE=0 gating would make this impossible (no new
+		// pulses are even recognized until the pending one is processed),
+		// but flush it now rather than silently losing it if it ever
+		// does happen here.
+		commandPending_ = false;
+		executeCommand();
+	}
+	scheduledCmd_ = pendingCmd_;
+	scheduledData1_ = data1_;
+	scheduledData2_ = data2_;
+	commandPending_ = true;
+	pendingSinceTstate_ = tstates;
+	pendingDelayTstates_ = delayTstates;
+}
+
 // Writes to ROM address space are normally a hard no-op (see class
 // comment) -- MinZX::poke8()/MemoryMap::poke8() already handle the
 // "don't corrupt ROM content" half; this is purely the side-channel
-// command bus layered on top, via Peripheral::onMemoryWrite().
+// command bus layered on top, via Peripheral::onMemoryWrite(). Every
+// write to addr 0-3 is an indistinguishable raw pulse to real hardware
+// (see class comment) -- just count it and record when; dispatch
+// happens later in onInstructionFetch() once a field/command goes quiet.
 void Dandanator::onMemoryWrite(uint16_t addr, uint8_t value, MemoryMap& memory)
 {
-	(void)memory;
+	(void)memory; (void)value;
 	if (!enabled_ || !switchedOn_ || addr > 3 || state_ == Disabled) return;
 
-	switch (addr) {
-	case 0:
-		// Hardware reality check (2026-10-30, schematic + GAL PLD trace
-		// of a real PIC16F1826 unit pulled from its socket): the PIC
-		// has NO connection to the Z80 address or data bus at all. Its
-		// only input from this side is one generic `Rom_WR` pulse on
-		// RB0, defined by the GAL as `!(MREQ|A14|A15) & WR` -- identical
-		// for every address 0-3 and every value written. It physically
-		// cannot tell addr 0 apart from addr 1, nor see what byte was
-		// written. `dandanator_hw_90.asm`'s SENDNRCMD pulses address 0
-		// for ordinary repeated-pulse commands -- the exact same
-		// mechanism case 1 below implements for address 1 -- so addr 0
-		// must feed the SAME pulse-counting accumulator, not a separate
-		// one; the old model (addr 0 = confirm-only) assumed address
-		// decoding the hardware doesn't have.
-		// The one distinction that IS real is sequencing, not
-		// addressing: once a special command (>=40) has already
-		// latched pendingCmd_ via a prior burst and had data1_/data2_
-		// set via addr 2/3, a further addr-0 write is the documented
-		// confirm pulse -- its value is irrelevant, only the write
-		// event matters -- so it executes immediately instead of
-		// restarting the pulse count.
-		if (pendingCmd_ >= 40) {
-			executeCommand();
-			break;
-		}
-		[[fallthrough]];
-	case 1: // command byte -- confirmed by repeating the SAME byte `value` times
-		if (value != pendingCmd_ || pulseCount_ == 0) {
-			pendingCmd_ = value;
-			pulseCount_ = 1;
-		} else {
-			pulseCount_++;
-		}
-		// Upper cap raised from the documented "<40" split (1-39 =
-		// normal/repeated-pulse, 40-49 = special/3-byte+confirm) after
-		// live-tracing a real v10.4.3 romset's "Launch Multiply" code
-		// (2026-10-29 session): it sends command 42 via this exact
-		// repeated-pulse mechanism (LD A,42 / LD HL,1 / LD B,A / DJNZ
-		// writing (HL),A 42 times), not via the special confirm-pulse
-		// transport -- so the split isn't a universal hardware rule for
-		// EVERY value >=40. Still excludes 40/46/52 specifically: those
-		// three are confirmed (the first two from ZEsarUX's reference
-		// source, 52 from this project's own stub test) to arrive via
-		// confirm-pulse ONLY, each write to addr 1 just latching
-		// pendingCmd_ once with data1_/data2_ following via addr 2/3 --
-		// letting them ALSO auto-fire here risks executing with
-		// stale/mismatched data1_/data2_ left over from a previous,
-		// unrelated write burst the instant pulseCount_ coincidentally
-		// reaches their value (confirmed live: removing this exclusion
-		// first made cmd 40 fire mid-pulse-count with a stale data1_,
-		// landing on an invalid bank).
-		if (pulseCount_ == value && value != 40 && value != 46 && value != 52) {
-			executeCommand();
-			pulseCount_ = 0;
-		}
-		break;
-
-	case 2:
-		data1_ = value;
-		break;
-
-	case 3:
-		data2_ = value;
-		break;
-	}
+	burstPulseCount_++;
+	lastPulseTstate_ = lastFetchTstates_;
+	burstActive_ = true;
+	awaitingNextField_ = false; // a pulse arrived -- cancel any pending "nothing more is coming" timeout
 }
 
 // Command 46: lock (1), unlock (16), or permanently disable (31) future
@@ -217,15 +313,15 @@ void Dandanator::onMemoryWrite(uint16_t addr, uint8_t value, MemoryMap& memory)
 // though nothing in software generates mismatched copies deliberately.
 void Dandanator::runCommand46()
 {
-	if (data1_ != data2_) return;
-	if (data1_ == 1) state_ = Locked;
-	else if (data1_ == 16) state_ = WaitNormal;
-	else if (data1_ == 31) state_ = Disabled;
+	if (scheduledData1_ != scheduledData2_) return;
+	if (scheduledData1_ == 1) state_ = Locked;
+	else if (scheduledData1_ == 16) state_ = WaitNormal;
+	else if (scheduledData1_ == 31) state_ = Disabled;
 }
 
 void Dandanator::executeCommand()
 {
-	uint8_t cmd = pendingCmd_;
+	uint8_t cmd = scheduledCmd_;
 
 	// While Locked, ONLY command 46 is ever processed -- matches real
 	// hardware: a normal (1-39) command still gets pulse-counted and
@@ -252,15 +348,24 @@ void Dandanator::executeCommand()
 	else if (cmd == 36) {
 		wantsReset_ = true;
 	}
+	else if (cmd == 37) {
+		// CMD_NMI: confirmed via the real PIC firmware source
+		// (2026-10-31, `docs/2017.09.22 - Dandanator Mini PIC
+		// Firmware/.../commands.h`+`main.c`'s `case CMD_NMI:
+		// Z80_Send_NMI();`) -- a genuine single-field normal command,
+		// previously missing here entirely (fell through to the
+		// cmd52Sink_ forward like an unrecognized command).
+		wantsNMI_ = true;
+	}
 	else if (cmd == 40) {
 		// Fast switch: data1 = bank+1 (1-based, same encoding as the
 		// 1-33 bank-switch commands above), data2 = action bitmask.
-		pendingBank_ = data1_ - 1;
+		pendingBank_ = scheduledData1_ - 1;
 		bankChangePending_ = true;
-		if (data2_ & 0x08) state_ = Disabled;
-		if (data2_ & 0x04) state_ = Locked;
-		if (data2_ & 0x02) wantsNMI_ = true;
-		if (data2_ & 0x01) wantsReset_ = true;
+		if (scheduledData2_ & 0x08) state_ = Disabled;
+		if (scheduledData2_ & 0x04) state_ = Locked;
+		if (scheduledData2_ & 0x02) wantsNMI_ = true;
+		if (scheduledData2_ & 0x01) wantsReset_ = true;
 	}
 	else if (cmd == 46) {
 		runCommand46();
@@ -270,7 +375,7 @@ void Dandanator::executeCommand()
 		// in the real firmware) identifying this as Multiply-addressed
 		// traffic rather than a plain unrecognized command; data2 is the
 		// actual payload byte. See DandanatorCmd52Sink.
-		if (data1_ == 1 && cmd52Sink_) cmd52Sink_->onDandanatorByte(data2_);
+		if (scheduledData1_ == 1 && cmd52Sink_) cmd52Sink_->onDandanatorByte(scheduledData2_);
 	}
 	// 35, 37, 38, 39 (remember reset slot -- not implemented, matches
 	// ZEsarUX's own gap), 41-43/49/50 etc: a real v10.4.3 romset's
