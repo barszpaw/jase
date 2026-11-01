@@ -100,33 +100,39 @@ void Dandanator::onInstructionFetch(uint16_t pc, MemoryMap& memory, uint32_t tst
 {
 	(void)pc;
 	if (!enabled_) return;
-	lastFetchTstates_ = tstates;
+
+	// Advance monoTstates_ (see its own comment in Dandanator.h for why
+	// raw `tstates` can't be compared directly across a frame boundary).
+	// Same-frame: tstates only increases, so this is just the normal
+	// delta. Frame boundary (tstates < lastRawTstates_, i.e. it just
+	// reset): advance by `tstates` alone -- the new frame's elapsed
+	// T-states so far -- rather than the huge wrapped difference. This
+	// deliberately UNDERestimates the true elapsed time (it drops the
+	// untracked tail of the previous frame, from lastRawTstates_ up to
+	// that frame's own cycleTstates), which only ever errs toward NOT
+	// finalizing a field early -- the correct direction, unlike the bug
+	// this replaces.
+	uint32_t monoDelta = (tstates >= lastRawTstates_) ? (tstates - lastRawTstates_) : tstates;
+	monoTstates_ += monoDelta;
+	lastRawTstates_ = tstates;
+	lastFetchTstates_ = monoTstates_;
 
 	// Finalize the field currently being pulse-counted once a short
 	// quiet gap confirms pulsing has stopped (see class comment).
-	// Wraparound note: tstates resets to a small value at the start of
-	// each frame (see MinZX::update()), so a pulse recorded near the
-	// end of one frame and checked early in the next makes these
-	// subtractions "underflow" to a huge unsigned value -- which still
-	// correctly exceeds the threshold, so the field/timeout is
-	// (correctly) finalized rather than lost. tstates only increases
-	// within a frame, so there's no direction where this underflow
-	// could instead compute a falsely-small difference.
-	if (burstActive_ && (tstates - lastPulseTstate_) >= kPulseIdleTstates) {
+	if (burstActive_ && (monoTstates_ - lastPulseTstate_) >= kPulseIdleTstates) {
 		uint8_t count = (uint8_t)(burstPulseCount_ & 0xFF); // 256 pulses -> 0, matching SENDNRCMD's own "0 is signaled by 256 pulses"
 		burstPulseCount_ = 0;
 		burstActive_ = false;
-		onFieldComplete(count, tstates);
+		onFieldComplete(count, monoTstates_);
 	}
-	else if (awaitingNextField_ && (tstates - lastFieldCompleteTstate_) >= kFieldTimeoutTstates) {
+	else if (awaitingNextField_ && (monoTstates_ - lastFieldCompleteTstate_) >= kFieldTimeoutTstates) {
 		awaitingNextField_ = false;
-		onFieldTimeout(tstates);
+		onFieldTimeout(monoTstates_);
 	}
 
 	// See class comment + scheduleExecute(): the command's effect is
-	// deliberately held back this long after the pulse that decided it,
-	// same wraparound-safe subtraction as the checks above.
-	if (commandPending_ && (tstates - pendingSinceTstate_) >= pendingDelayTstates_) {
+	// deliberately held back this long after the pulse that decided it.
+	if (commandPending_ && (monoTstates_ - pendingSinceTstate_) >= pendingDelayTstates_) {
 		commandPending_ = false;
 		executeCommand();
 	}

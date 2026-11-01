@@ -22,6 +22,13 @@ bool Multiply::connectTo(const char* host, int port)
 		sockFd_ = -1;
 	}
 
+	// Remember the target regardless of outcome (see maybeAutoReconnect())
+	// -- a failed first attempt (e.g. the bridge process not up yet) must
+	// still leave something for the auto-retry/"MULTIPLY RECONNECT" path
+	// to redial.
+	lastHost_ = host;
+	lastPort_ = port;
+
 	int fd = socket(AF_INET, SOCK_STREAM, 0);
 	if (fd < 0)
 		return false;
@@ -45,8 +52,7 @@ bool Multiply::connectTo(const char* host, int port)
 	fcntl(fd, F_SETFL, O_NONBLOCK);
 
 	sockFd_ = fd;
-	lastHost_ = host;
-	lastPort_ = port;
+	autoReconnectAttempts_ = 0; // a successful connect, auto or manual, clears any prior give-up state
 	printf("Multiply: connected to %s:%d\n", host, port);
 	return true;
 }
@@ -61,7 +67,33 @@ bool Multiply::reconnect()
 	rxRing_.clear();
 	txRing_.clear();
 	rxPhase_ = RxPhase::Idle;
+	// An explicit reconnect (manual debug command, or MinZX::reset()'s own
+	// call) always gets a fresh run of auto-retry attempts afterward too,
+	// even if a prior auto-retry sequence had already given up.
+	autoReconnectAttempts_ = 0;
+	framesSinceLastAutoReconnect_ = 0;
 	return connectTo(lastHost_.c_str(), lastPort_);
+}
+
+// See the kMaxAutoReconnectAttempts/framesSinceLastAutoReconnect_ comment
+// in Multiply.h. Called from pump() before its usual socket I/O; a no-op
+// whenever already connected, never configured, or already given up.
+void Multiply::maybeAutoReconnect()
+{
+	if (sockFd_ >= 0 || lastHost_.empty() || lastPort_ <= 0) return;
+	if (autoReconnectAttempts_ >= kMaxAutoReconnectAttempts) return;
+
+	if (++framesSinceLastAutoReconnect_ < kAutoReconnectIntervalFrames) return;
+	framesSinceLastAutoReconnect_ = 0;
+
+	autoReconnectAttempts_++;
+	printf("Multiply: auto-reconnect attempt %d/%d to %s:%d\n",
+	       autoReconnectAttempts_, kMaxAutoReconnectAttempts, lastHost_.c_str(), lastPort_);
+	// connectTo() resets autoReconnectAttempts_ to 0 on success, so a
+	// successful retry here correctly clears the counter it just bumped.
+	if (!connectTo(lastHost_.c_str(), lastPort_) && autoReconnectAttempts_ >= kMaxAutoReconnectAttempts)
+		fprintf(stderr, "Multiply: giving up on %s:%d after %d attempts -- use \"MULTIPLY RECONNECT\" to retry\n",
+		        lastHost_.c_str(), lastPort_, kMaxAutoReconnectAttempts);
 }
 
 // Called synchronously from Dandanator::executeCommand() the moment a
@@ -144,8 +176,10 @@ bool Multiply::wantsPortRead(uint8_t& value)
 
 void Multiply::pump()
 {
-	if (sockFd_ < 0)
-		return;
+	if (sockFd_ < 0) {
+		maybeAutoReconnect();
+		if (sockFd_ < 0) return;
+	}
 
 	// Drain the TX ring to the socket.
 	while (!txRing_.empty()) {
@@ -156,9 +190,15 @@ void Multiply::pump()
 			break; // EAGAIN or error -- try again next frame
 	}
 
-	// Pull whatever's waiting into the RX ring (bounded).
+	// Pull whatever's waiting into the RX ring (bounded). Stops BEFORE
+	// calling recv() once the ring is full rather than recv()'ing and
+	// then discarding overflow -- see kRingCap's own comment: discarding
+	// after the fact silently loses bytes that are gone for good, while
+	// simply not reading them yet leaves them safely queued in the
+	// kernel's own TCP receive buffer for a later pump() call once
+	// wantsPortRead() has drained some room.
 	uint8_t buf[1024];
-	for (;;) {
+	while (rxRing_.size() < kRingCap) {
 		ssize_t n = recv(sockFd_, buf, sizeof(buf), 0);
 		if (n == 0) {
 			// Peer closed (e.g. the bridge process was killed) --
@@ -172,7 +212,7 @@ void Multiply::pump()
 		}
 		if (n < 0)
 			break;
-		for (ssize_t i = 0; i < n && rxRing_.size() < kRingCap; i++)
+		for (ssize_t i = 0; i < n; i++)
 			rxRing_.push_back(buf[i]);
 	}
 }

@@ -74,6 +74,14 @@ MSG_LEN = NAME_LEN + 4
 MAX_FILES = 253
 FILES_PER_PAGE = 23  # MultMenu's FilesPerPag/MaxFilePage (labels_multiply.asm)
 
+# CMD_ZX2SD_GETDIR's reply size. The real Arduino's GetDir() (libFileList.ino)
+# sends exactly this many bytes UNCONDITIONALLY regardless of the actual
+# name length (`for (i=0;i<maxFLen;i++) Send4bit(buf[i],...)`), since the
+# receiving Load4bitBlk call is given `LD DE,maxFLen` and only stops once
+# DE reaches 0 -- it has no other end-of-name signal. Sending fewer bytes
+# (e.g. just name+0x00) leaves the Z80 waiting forever for the remainder.
+MAX_FLEN = 256
+
 
 def encode_chapter_terminator(num_entries):
     """The FT_END_DIRECTORY record for a CMD_ZX2SD_LS_RELATIVE chapter-0

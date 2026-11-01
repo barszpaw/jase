@@ -281,7 +281,27 @@ private:
 	// and how their values were picked).
 	bool awaitingNextField_ = false;
 	uint32_t lastFieldCompleteTstate_ = 0;
-	uint32_t lastFetchTstates_ = 0; // onInstructionFetch()'s own tstates, cached for onMemoryWrite()'s use
+	uint32_t lastFetchTstates_ = 0; // onInstructionFetch()'s own monoTstates_, cached for onMemoryWrite()'s use
+
+	// monoTstates_: a monotonically increasing substitute for MinZX's own
+	// `tstates`, which resets to ~0 at the start of every frame (see
+	// MinZX::update()) -- comparing IT directly across a frame boundary
+	// is unsafe. Found live, 2026-11-01: a real pulse train (e.g. a
+	// 256-pulse burst encoding value 0 for a Multiply LS_RELATIVE
+	// payload byte, ~38 T-states between pulses -- comfortably under
+	// kPulseIdleTstates, see that constant's own comment) routinely
+	// spans a frame boundary just by chance; the original code treated
+	// that boundary itself as a genuine >=kPulseIdleTstates gap (via
+	// deliberate unsigned-underflow, see the removed comment this
+	// replaced), wrongly finalizing the field mid-burst -- confirmed via
+	// a temporary diagnostic: a Data2 field meant to carry 256 pulses
+	// got cut at 37 (finalized at the exact instant a new frame began,
+	// tstates==0) with the remaining 219 pulses then misattributed to
+	// the NEXT field (Confirm) entirely -- 37+219=256, the original
+	// burst, just split by this bug. See onInstructionFetch()'s own
+	// comment for how monoTstates_/lastRawTstates_ fix this.
+	uint32_t monoTstates_ = 0;
+	uint32_t lastRawTstates_ = 0;
 
 	// kPulseIdleTstates: AUTHORITATIVE value, not a guess -- the real PIC
 	// firmware source (2026-10-31 session: `docs/2017.09.22 - Dandanator

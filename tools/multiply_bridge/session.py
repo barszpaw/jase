@@ -71,7 +71,8 @@ def _handle_cd_ix(conn, session):
 
 
 def _handle_getdir(conn, session):
-    conn.sendall(session.sdcard.current_name().encode('ascii', errors='replace')[:255] + b'\x00')
+    name = session.sdcard.current_name().encode('ascii', errors='replace')[:proto.MAX_FLEN - 1] + b'\x00'
+    conn.sendall(name.ljust(proto.MAX_FLEN, b'\x00'))
 
 
 def _handle_ls_relative(conn, session):
@@ -144,6 +145,68 @@ def _handle_snapshot(conn, session, req_type, is_z80):
     print(f"[{kind}] block={c}")
 
 
+def _handle_getinfo(conn, session):
+    # CMD_ZX2SD_GETINFO -- the ROM's file-browser sends this when the
+    # cursor lands on a file entry (NOT a directory -- confirmed live,
+    # 2026-11-01: moving the cursor over FT_DIRECTORY entries never
+    # triggers this at all, matching GetMoreInfoIX()'s own OpenFileIX()
+    # call, which fails for a directory and sends nothing). Payload is a
+    # uint16 LE index into the CURRENT list_entries() result, same
+    # indexing convention as CD_IX/OFREAD_IX.
+    #
+    # This was previously an unimplemented stub (payload consumed, no
+    # reply) -- a real, confirmed-live hang: the ROM's receive routine
+    # (Load4bitBlk) blocks forever waiting for bytes that never arrive
+    # the instant the cursor touches any file (not just on open/load).
+    # Byte shapes below come from libSDFiles.ino's GetMoreInfoIX(), real
+    # Arduino firmware source (not guessed) -- only the FT_TAP and
+    # FT_Z80_* cases are implemented; GetMoreInfoIX()'s own switch has NO
+    # case at all (falls to `default: break`, i.e. sends nothing) for
+    # FT_DIRECTORY/FT_SCR/FT_SNA_*, so those are never a regression vs.
+    # real hardware. FT_ROMSET's case (8 +36*N bytes, game-table dump) is
+    # NOT implemented -- a real gap, flagged rather than guessed.
+    ix = struct.unpack('<H', proto.recv_exact(conn, 2))[0]
+    entries = session.sdcard.entries
+    if ix >= len(entries) or entries[ix].is_dir:
+        print(f"[GETINFO] {ix} out of range or a directory -- no reply (matches real firmware)")
+        return
+    entry = entries[ix]
+    try:
+        with open(entry.path, 'rb') as f:
+            data = f.read(38)
+    except OSError:
+        print(f"[GETINFO] {ix} ({entry.name!r}) failed to open -- no reply")
+        return
+    if entry.ft == proto.FT_TAP:
+        # 11 bytes: [0]=SCR-embedded-in-TAP flag (SCRposTAP() on real
+        # firmware -- NOT implemented here, always sent as 0/"no screen",
+        # a documented simplification, not a hang), [1..10]=10-char
+        # PROGRAM name from the TAP header block (offset 4-13), control
+        # bytes replaced with spaces same as real firmware.
+        name = bytearray(data[4:14].ljust(10, b' ')[:10])
+        for i in range(len(name)):
+            if name[i] < 32 or name[i] > 127:
+                name[i] = 32
+        conn.sendall(bytes([0]) + bytes(name))
+        print(f"[GETINFO] {ix} ({entry.name!r}) FT_TAP")
+    elif entry.ft in (proto.FT_Z80_16K, proto.FT_Z80_48K, proto.FT_Z80_128K):
+        # 3 bytes. Real firmware distinguishes v1 (bytes 6/7 nonzero --
+        # PC, absent in v2/v3) from v2/v3 by the exact same check
+        # snapshot.py's loader already uses (`is_v1`); v1 sends three
+        # 0xFF placeholder bytes (real firmware doesn't inspect v1
+        # further here either), v2/v3 sends the additional-header-length
+        # low byte, hardware-machine byte, and its bit-7 flag verbatim.
+        hdr = data.ljust(38, b'\x00')
+        is_v1 = hdr[6] != 0 or hdr[7] != 0
+        if is_v1:
+            conn.sendall(bytes([0xFF, 0xFF, 0xFF]))
+        else:
+            conn.sendall(bytes([hdr[30], hdr[34], hdr[37]]))
+        print(f"[GETINFO] {ix} ({entry.name!r}) FT_Z80 is_v1={is_v1}")
+    else:
+        print(f"[GETINFO] {ix} ({entry.name!r}) ft=0x{entry.ft:02x} not implemented (e.g. FT_ROMSET) -- no reply")
+
+
 def _handle_tap(conn, session):
     payload = proto.recv_exact(conn, 5)
     zx_flag = payload[0]
@@ -190,6 +253,8 @@ def handle_client(conn, session):
             _handle_snapshot(conn, session, cmd, is_z80=True)
         elif cmd == proto.CMD_ZX2SD_TAP:
             _handle_tap(conn, session)
+        elif cmd == proto.CMD_ZX2SD_GETINFO:
+            _handle_getinfo(conn, session)
         elif cmd == proto.CMD_ZX2SD_LS_ABSOLUTE:
             proto.recv_cstring(conn)
             print(f"[?] cmd 0x{cmd:02x} (LS_ABSOLUTE) recognized but not implemented yet -- payload consumed, no reply")

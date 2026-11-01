@@ -77,23 +77,27 @@ public:
 	void setEnabled(bool on) { enabled_ = on; }
 	bool isEnabled() const { return enabled_; }
 
-	// Connects (non-blocking) to tools/multiply_bridge/multiply_bridge.py or an
-	// equivalent companion process. Safe to call even if never
-	// configured -- just does nothing elsewhere. Remembers host/port on
-	// success, for reconnect().
+	// Connects (non-blocking once established) to tools/multiply_bridge/
+	// multiply_bridge.py or an equivalent companion process. Safe to call
+	// even if never configured -- just does nothing elsewhere. Remembers
+	// host/port regardless of outcome (see class comment on
+	// maybeAutoReconnect()) so a later retry/reconnect() always has a
+	// target, even if this very call is the one that failed.
 	bool connectTo(const char* host, int port);
 
-	// Re-dials whatever connectTo() last succeeded with -- lets a
-	// running JASE recover from killing/restarting the bridge without
-	// restarting JASE itself. False if connectTo() was never called
-	// successfully. Also exposed as the debug protocol's "MULTIPLY
-	// RECONNECT" (and "MULTIPLY CONNECT host port" to dial a fresh
-	// target without needing --multiply-bridge at startup).
+	// Re-dials whatever connectTo() last targeted (success or not). False
+	// if connectTo() was never called at all. Also exposed as the debug
+	// protocol's "MULTIPLY RECONNECT" (and "MULTIPLY CONNECT host port"
+	// to dial a fresh target without needing --multiply-bridge at
+	// startup) -- either resets the auto-reconnect give-up state below,
+	// letting a user force another round of attempts on demand.
 	bool reconnect();
 
-	// Call once per emulated frame (50Hz): drains the TX ring to the
-	// bridge socket and pulls any available reply bytes into the RX
-	// ring. Non-blocking either way, like ZiFi::pump()/DebugServer::poll().
+	// Call once per emulated frame (50Hz): if not currently connected,
+	// first gives maybeAutoReconnect() a chance (see its own comment),
+	// then -- same as always -- drains the TX ring to the bridge socket
+	// and pulls any available reply bytes into the RX ring. Non-blocking
+	// either way, like ZiFi::pump()/DebugServer::poll().
 	void pump();
 
 private:
@@ -104,9 +108,41 @@ private:
 	int sockFd_ = -1;
 	std::vector<uint8_t> rxRing_;
 	std::vector<uint8_t> txRing_;
-	static const size_t kRingCap = 4096;
+	// A single CMD_ZX2SD_TAP reply can be one whole Z80-address-space-
+	// bound block (up to just under 64K, e.g. a big CODE block loaded at
+	// 0x4000 -- confirmed live, 2026-11-01: a real 31041-byte block from
+	// a real .tap froze the Z80 solid (PC/SP/R completely static) because
+	// the OLD 4096-byte cap silently dropped everything past it in
+	// pump()'s recv() loop once full, instead of leaving the overflow in
+	// the kernel's own TCP receive buffer -- truncating the reply AND
+	// desyncing every later command on the connection (the dropped bytes
+	// are gone, not just delayed). 65536 comfortably covers any single
+	// reply this protocol can produce; pump() also now stops recv()'ing
+	// once full rather than reading-then-discarding, so even a
+	// hypothetical larger reply degrades to "wait for the next pump()
+	// once the consumer has drained some" instead of silent corruption.
+	static const size_t kRingCap = 65536;
 	std::string lastHost_;
 	int lastPort_ = 0;
+
+	// Convenience auto-redial, user-requested (2026-11-01): without this,
+	// a bridge that isn't up yet at --multiply-bridge startup time (or
+	// that dies/restarts mid-session -- see pump()'s own peer-closed
+	// handling) leaves Multiply silently disconnected forever, needing a
+	// manual "MULTIPLY RECONNECT" over the debug protocol to notice.
+	// pump() instead retries on its own, roughly once per second (50
+	// frames -- cheap enough not to matter, slow enough not to spam
+	// connect()/stderr 50x/sec while the bridge is down), up to
+	// kMaxAutoReconnectAttempts consecutive failures, then gives up and
+	// stays quiet (one final log line) until something explicit --
+	// reconnect()/connectTo(), i.e. "MULTIPLY RECONNECT"/"MULTIPLY
+	// CONNECT" -- resets autoReconnectAttempts_. A successful connect
+	// (auto or manual) always resets it to 0.
+	static const int kMaxAutoReconnectAttempts = 3;
+	static const int kAutoReconnectIntervalFrames = 50;
+	int autoReconnectAttempts_ = 0;
+	int framesSinceLastAutoReconnect_ = 0;
+	void maybeAutoReconnect();
 
 	// RX side (us -> Z80): which half of the CURRENT reply byte (popped
 	// from the front of rxRing_ the moment serving starts) port 0x1F
