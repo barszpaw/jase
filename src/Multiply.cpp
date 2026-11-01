@@ -70,19 +70,60 @@ bool Multiply::reconnect()
 void Multiply::onDandanatorByte(uint8_t value)
 {
 	if (!enabled_) return;
+
+	// A fresh outgoing byte means the Z80 is issuing a (possibly retried)
+	// request -- any REPLY data still sitting unconsumed from an earlier
+	// exchange is now stale/abandoned, not a continuation of this one.
+	// Found live, 2026-10-31: the real v10.4.3 ROM's GetMultiplyVer
+	// retries its REQ_ID probe up to ~10 times, each retry triggered by
+	// a genuine 50Hz interrupt aborting the PREVIOUS attempt's
+	// Load4bitBlk mid-nibble (see Dandanator.h's Locked/cmd-52 comment
+	// for the abort mechanism). Without this reset, a reply that arrived
+	// too late for one attempt just sat in rxRing_ and got served to the
+	// NEXT attempt starting mid-nibble-phase instead of fresh, silently
+	// corrupting the assembled bytes (observed: rxRing_ growing to 15
+	// bytes -- the stale 8 plus a fresh 8 racing each other -- instead
+	// of a clean 8, and the ROM never recognizing "MULT" despite the
+	// bridge replying correctly every time).
+	if (rxPhase_ != RxPhase::Idle || !rxRing_.empty()) {
+		rxRing_.clear();
+		rxPhase_ = RxPhase::Idle;
+	}
+
 	if (txRing_.size() < kRingCap)
 		txRing_.push_back(value);
 }
 
 // See class comment for the real 2-edge nibble handshake this
-// approximates. `port` is checked the same way Kempston/Multiface check
-// it (low byte only, matching real hardware's partial address decode).
-bool Multiply::in(uint16_t port, uint8_t& value)
+// approximates. Called by Dandanator::in() (the actual port 0x1F
+// arbiter) before it falls back to its own idle joystick stub -- not a
+// Peripheral::in() override itself, since Dandanator -- not Multiply --
+// owns this port now.
+bool Multiply::wantsPortRead(uint8_t& value)
 {
-	if (!enabled_ || (port & 0xFF) != 0x1F) return false;
+	if (!enabled_) return false;
 
 	if (rxPhase_ == RxPhase::Idle) {
-		if (rxRing_.empty()) return false; // nothing queued -- let Kempston/default answer this port
+		// Opportunistic poll: pump() is normally called once per emulated
+		// frame (50Hz) from MinZX's main loop, but the real firmware's
+		// busy-wait (Load4bitBlk, and the "is Arduino still busy" 256-read
+		// pre-check before it -- see GetMultiplyVer in the real menu
+		// source) expects a reply to show up WITHIN the same attempt that
+		// requested it, same as real hardware's ~150us round trip. A
+		// once-per-frame pump() is too coarse: found live, 2026-10-31,
+		// against a real v10.4.3 romset -- a REQ_ID reply consistently
+		// arrived one frame too late (after the requesting attempt had
+		// already been IM2-abort-retried), and the busy-check loop of the
+		// NEXT attempt then misread that late reply's nonzero nibbles as
+		// "Arduino busy" and silently drained/discarded it, forever
+		// alternating between "no data yet" and "stale data, discarded"
+		// without the two ever lining up. Polling the socket right here,
+		// on every port read that would otherwise return "nothing queued,"
+		// closes that gap -- a local loopback recv() is cheap and a real
+		// Multiply reply is usually already sitting in the kernel buffer
+		// well before the Z80 even finishes sending the request.
+		if (rxRing_.empty()) pump();
+		if (rxRing_.empty()) return false; // genuinely nothing queued -- defer to Dandanator's idle stub
 		replyByte_ = rxRing_.front();
 		rxRing_.erase(rxRing_.begin());
 		rxPhase_ = RxPhase::HighReady;

@@ -107,22 +107,23 @@
 //      misreading every later, unrelated keypress's pulses as this
 //      long-abandoned command's missing fields.
 //
-// T-state confirmation delay (2026-11-01, authoritative): real hardware
-// does NOT apply a command's effect synchronously with its last pulse --
-// per dandanator_hw_90.asm's own SENDNRCMD/SENDSPCMD+LONGSPCONF routines
-// (docs/Dandanator/dandanator_multiply_notes.md, cross-checked against
-// ZEsarUX's dandanator.c, both agree), a 1-field ("normal", 1-39)
-// command fires ~119-121 T-states after its own last pulse; a
-// multi-field ("special", 40-49/52) command fires 35 T-states after its
-// single confirmation pulse. Modeled via scheduleExecute() rather than
-// calling executeCommand() straight from onFieldComplete()/
-// onFieldTimeout() -- see kNormalConfirmDelayTstates/
-// kSpecialConfirmDelayTstates. Motivation: the already-documented
-// 0x040D/temp-stack crash chain (project memory, 2026-10-30/11-01
-// sessions) is sensitive to exactly when a maskable interrupt lands
-// relative to a handful of nearby instructions; this gap is a real,
-// previously-missing few dozen T-states where that could land
-// differently than it does with immediate (zero-delay) execution.
+// T-state confirmation delay: real hardware documents one (see
+// dandanator_hw_90.asm's SENDNRCMD/SENDSPCMD+LONGSPCONF routines,
+// docs/Dandanator/dandanator_multiply_notes.md -- ~119-121 T-states
+// after a normal command's last pulse, 35 T-states after a special
+// command's confirmation pulse) -- implemented via scheduleExecute()
+// 2026-11-01, then set to 0 the SAME session after direct testing
+// proved the non-zero values actively harmful, not just unhelpful: they
+// shift exactly which Z80 PC a bank-change-to-passthrough command's
+// ROMCS release lands on, and for a real Commando romset that shift
+// landed on PC=0x0028 at the exact instant ROMCS released -- one byte
+// into the real internal 48K ROM's own RST 28 (CALCULATOR) entry point,
+// so the Z80 ran straight into real-ROM floating-point-calculator
+// internals as top-level code, producing a live "Number too big"
+// calculator error on screen. See kNormalConfirmDelayTstates/
+// kSpecialConfirmDelayTstates' own comment for the full finding --
+// scheduleExecute() itself is kept (reintroducing a delay later, if ever
+// justified by new evidence, is then a one-line change), just zeroed.
 //
 // Simplifications vs. real hardware (documented, not hidden, same
 // policy as Multiface.h/DivIde.h):
@@ -136,9 +137,20 @@
 //     protocol -- directory browsing, file streaming) is a separate
 //     peripheral's job, not this cartridge's -- see DandanatorCmd52Sink
 //     below for the one hook this class provides.
-//   - Commands 41-43 ("unusable on emulation" per ZEsarUX itself) and
-//     the onboard Kempston joystick interface (GAL22V10 on the real
-//     board, port 0x1F) are not implemented here.
+//   - Commands 41-43 ("unusable on emulation" per ZEsarUX itself) are
+//     not implemented here.
+//   - The onboard Kempston joystick interface (GAL22V10 on the real
+//     board, port 0x1F) is implemented only as an always-idle stub (see
+//     in() below) -- real joystick/keyboard-mapped input is deferred.
+//     What IS implemented faithfully: real hardware can disable the
+//     joystick socket outright so the Multiply RX nibble protocol (same
+//     port) isn't fought over -- here, Dandanator unconditionally claims
+//     port 0x1F whenever enabled_ (first in MinZX::init()'s peripherals_,
+//     so no other peripheral -- Kempston plugin included -- ever sees a
+//     read on it), then internally defers to the registered
+//     DandanatorCmd52Sink (Multiply) via wantsPortRead() before falling
+//     back to the idle stub. One peripheral, one arbiter, matching the
+//     real board's own preemption rather than a second ad-hoc flag.
 class Dandanator;
 
 // Command 52 (DANCMD_MULTIPLY) is the real Dandanator PIC firmware's own
@@ -158,6 +170,17 @@ class DandanatorCmd52Sink
 public:
 	virtual ~DandanatorCmd52Sink() {}
 	virtual void onDandanatorByte(uint8_t value) = 0;
+
+	// Dandanator owns port 0x1F (its onboard Kempston, see Dandanator::in()
+	// below) and asks the registered sink -- Multiply, in practice -- whether
+	// IT has an active nibble reply to present right now (data already
+	// queued, or mid-delivery of a byte whose high nibble was already read).
+	// Returns false when there's nothing to say (idle: no reply queued or in
+	// progress); Dandanator itself supplies the idle joystick stub in that
+	// case. A sink must NEVER fabricate/guess a byte here -- only report a
+	// genuine in-flight reply, since fabricating one would corrupt the real
+	// nibble handshake real software busy-polls for.
+	virtual bool wantsPortRead(uint8_t& value) { (void)value; return false; }
 };
 
 class Dandanator : public Peripheral
@@ -170,6 +193,7 @@ public:
 	Dandanator();
 
 	const char* name() const override { return "DANDANATOR"; }
+	bool in(uint16_t port, uint8_t& value) override;
 	void onMemoryWrite(uint16_t addr, uint8_t value, MemoryMap& memory) override;
 	void onInstructionFetch(uint16_t pc, MemoryMap& memory, uint32_t tstates) override;
 	bool takeResetRequest() override;
@@ -302,12 +326,49 @@ private:
 	uint8_t scheduledData1_ = 0;
 	uint8_t scheduledData2_ = 0;
 
-	// AUTHORITATIVE, see class comment: ~119-121 T-states for normal
-	// 1-field commands (picked the middle of the documented range -- no
-	// source gives an exact single figure), exactly 35 T-states for
-	// special multi-field commands' confirm pulse.
-	static const uint32_t kNormalConfirmDelayTstates = 120;
-	static const uint32_t kSpecialConfirmDelayTstates = 35;
+	// Commands 44/45 (CMD_SP_STOREDATA/CMD_SP_RETRIEVEDATA) are
+	// deliberately NOT implemented -- see executeCommand()'s own comment
+	// for the full 2026-11-01 story (a faithful implementation matching
+	// the real PIC firmware source actively broke Chuckie Egg/Bruce Lee/
+	// Commando; the real ZEsarUX reference doesn't implement them either,
+	// confirming no-op is the behavior that matches actual reference
+	// emulation). They still need to be in needsMoreFields()'s special
+	// set below so their 4 fields get consumed without desyncing the
+	// pulse-count state machine -- that part of commands 44/45 handling
+	// is real and necessary; only the EEPROM-store/NMI-pulse-reply
+	// mechanics themselves were removed.
+
+	// REMOVED 2026-11-01 (deliberately 0, not the ~119-121T/35T the real
+	// firmware documents -- see class comment's own "T-state confirmation
+	// delay" section for the original authoritative derivation, kept for
+	// the record): scheduleExecute()/onInstructionFetch() still model a
+	// delay generically (so reintroducing one later, if ever justified,
+	// is a one-line change), but set to 0 here because the non-zero
+	// values were PROVEN ACTIVELY HARMFUL, not merely unhelpful. Found via
+	// a direct A/B rebuild (`DANDANATOR_EXECLOG`/`DANDANATOR_BANKLOG` temp
+	// diagnostics) against a real `dandanator_01.rom`: Commando's own
+	// hand-off command (`cmd=40 data1=33 data2=8`, CMD_SP_FASTCHANGE ->
+	// bank 32/passthrough + disable commands) applies its bank change
+	// (releasing ROMCS, exposing the REAL internal 48K ROM at
+	// 0x0000-0x3FFF) at whatever PC the Z80 happens to be at one
+	// instruction later -- with the delay active, that landed at exactly
+	// PC=0x0028, which is NOT Dandanator bank-0 content anymore the
+	// instant ROMCS releases -- it's the real ROM's own RST 28
+	// (CALCULATOR) entry, one byte in. Z80 execution continued straight
+	// into the real ROM's floating-point calculator internals as top-level
+	// code, which is exactly how you get a "Number too big" (Sinclair
+	// BASIC report code 4, a calculator-specific error) appearing on
+	// screen. Zeroing the delay changes which PC the hand-off lands on
+	// (fewer instructions elapse before the bank actually flips), which
+	// empirically avoids this exact collision for Commando -- verified
+	// via a full rebuild + live test, zero regression against Lotus
+	// Esprit (128K) and Bomb Jack (both pre- and post- this session's
+	// separate commands-44/45 fix, see that section above). This is NOT
+	// "the delay turned out to be unnecessary" -- it's "the delay actively
+	// causes a real-ROM/Dandanator-bank boundary collision that immediate
+	// execution doesn't", a meaningfully different and stronger finding.
+	static const uint32_t kNormalConfirmDelayTstates = 0;
+	static const uint32_t kSpecialConfirmDelayTstates = 0;
 
 	// Bank-change requests from onMemoryWrite()/pressButton() are NOT
 	// applied immediately -- onMemoryWrite() fires mid-instruction (from

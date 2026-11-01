@@ -19,3 +19,7 @@ lib/SDL2/x64/
 # generate src/OsdFont.h via tools/font/bake_mago_font.py) — not ours to
 # distribute either, keep local only
 mago1.ttf
+
+# Recall plugin's auto-generated compaction context (populated by its
+# PreCompact hook) — not meant to be committed
+.claude/recall-context.md

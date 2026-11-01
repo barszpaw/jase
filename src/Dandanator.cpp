@@ -136,6 +136,7 @@ void Dandanator::onInstructionFetch(uint16_t pc, MemoryMap& memory, uint32_t tst
 		activeBank_ = pendingBank_;
 		applyPaging(memory);
 	}
+
 }
 
 bool Dandanator::takeResetRequest()
@@ -190,18 +191,38 @@ void Dandanator::pressButton()
 // v10.4.3-era hardware unambiguously DOES treat 52 as 4-field). A newer
 // PIC firmware revision (not available to this project) almost
 // certainly extended the special range to include it; 52 is kept here
-// on that live evidence. 49/50 stay included on the same live-trace
-// basis (49 IS in the authoritative 40-49 range already; 50 isn't, but
-// is observed arriving 4-field in the same idle-sender trace as 49/52,
-// suggesting the same newer-firmware extension covers it too).
+// on that live evidence. 50 stays included on the same live-trace
+// basis (observed arriving 4-field in the same idle-sender trace as
+// 49/52, suggesting the same newer-firmware extension covers it too).
+//
+// BUG FOUND AND FIXED 2026-11-01: this switch used to list only a
+// SUBSET of the authoritative 40-49 range {40,41,42,43,46,49} --
+// despite this very comment already correctly stating the range is
+// "exactly 40-49" -- an oversight from only including values actually
+// observed live in a trace at the time, rather than the full range the
+// primary source already gave us. Caught via a live
+// `DANDANATOR_EXECLOG` diagnostic on a real `dandanator_01.rom` (Bomb
+// Jack): its loader genuinely sends cmd 45 (CMD_SP_RETRIEVEDATA, see
+// executeCommand()'s own comment) as a real 4-field special command;
+// treating it as 1-field fired immediately with STALE data1_/data2_
+// and then misread cmd 45's own data1/data2/confirm pulses as a brand
+// new, bogus command -- a genuine protocol desync that cascaded into
+// an unrelated-looking crash much later. Now the full 40-49 range is
+// used directly instead of hand-picking, so this class of gap can't
+// recur for any future command number already covered by the
+// authoritative source.
 bool Dandanator::needsMoreFields(uint8_t cmd)
 {
-	switch (cmd) {
-	case 40: case 41: case 42: case 43: case 46: case 49: case 50: case 52:
-		return true;
-	default:
-		return false;
-	}
+	// 40-52 inclusive, confirmed 2026-10-31 via gpdasm disassembly of a
+	// real v10.4.3 PIC firmware (merlinkv/ZX_Dandanator_MTD's
+	// PIC_16F1826_Dandanator_Multiply_10_4_3.hex): the ISR's own command
+	// dispatch range-checks the raw pulse count against exactly [40,52]
+	// (`movlw 0x28; subwf pulseCount,W; ...; movlw 0x35; subwf
+	// pulseCount,W; ...`, 0x28=40, 0x35=53-exclusive) before indexing a
+	// 13-entry jump table (40..52) -- cmd 51 was previously missing here
+	// (an oversight, not evidence it behaves differently; no live trace
+	// had exercised it).
+	return cmd >= 40 && cmd <= 52;
 }
 
 // Dispatches one just-completed field (see class comment) through the
@@ -289,6 +310,22 @@ void Dandanator::scheduleExecute(uint32_t tstates, uint32_t delayTstates)
 	pendingDelayTstates_ = delayTstates;
 }
 
+// Port 0x1F: the onboard Kempston interface's port, unconditionally
+// claimed whenever enabled_ (preempts every other peripheral that also
+// looks at this port -- Kempston plugin, a standalone Multiface -- same
+// as real hardware's own joystick-socket-disable option; see class
+// comment). cmd52Sink_ (Multiply, when registered) gets first refusal on
+// the actual VALUE via wantsPortRead(): a genuine in-flight nibble reply
+// wins, otherwise idle "nothing pressed" (0x00) -- real joystick/
+// keyboard-mapped input is not implemented yet (see class comment).
+bool Dandanator::in(uint16_t port, uint8_t& value)
+{
+	if (!enabled_ || (port & 0xFF) != 0x1F) return false;
+	if (cmd52Sink_ && cmd52Sink_->wantsPortRead(value)) return true;
+	value = 0x00;
+	return true;
+}
+
 // Writes to ROM address space are normally a hard no-op (see class
 // comment) -- MinZX::poke8()/MemoryMap::poke8() already handle the
 // "don't corrupt ROM content" half; this is purely the side-channel
@@ -323,11 +360,29 @@ void Dandanator::executeCommand()
 {
 	uint8_t cmd = scheduledCmd_;
 
-	// While Locked, ONLY command 46 is ever processed -- matches real
-	// hardware: a normal (1-39) command still gets pulse-counted and
-	// "arrives" here (see onMemoryWrite()), it's just discarded.
+	// While Locked, only commands 46 and 52 are ever processed -- the
+	// Lock exists to protect a RUNNING GAME's own incidental ROM-space
+	// writes from being misread as bank-switch commands (see cmd 34's
+	// comment), not to shut the whole channel down: a normal (1-39)
+	// bank-switch command still gets pulse-counted and "arrives" here
+	// (see onMemoryWrite()), it's just discarded. Command 52
+	// (DANCMD_MULTIPLY) is a pure side-channel byte-pipe to Multiply,
+	// unrelated to banking, and MUST stay live while Locked -- found
+	// live, 2026-10-31: a real v10.4.3 romset's own "Launch Multiply"
+	// code (bank 29) gets there via cmd 40 (CMD_SP_FASTCHANGE) with
+	// data2's lock bit set (switching to bank 29 AND locking in the same
+	// command), then immediately sends its REQ_ID probe over cmd 52 --
+	// if 52 were blocked here like every other command, that probe would
+	// go to /dev/null forever and Multiply could never be detected even
+	// when genuinely present, which contradicts the whole point of this
+	// specific Locked+bank-29 sequence existing. The 2017 PIC firmware
+	// source this Locked model was originally drawn from predates
+	// command 52 entirely (see the no-op comment on cmd 44/45 above) and
+	// so never had to answer this question -- this is new evidence, not
+	// a contradiction of that source.
 	if (state_ == Locked) {
 		if (cmd == 46) runCommand46();
+		else if (cmd == 52 && scheduledData1_ == 1 && cmd52Sink_) cmd52Sink_->onDandanatorByte(scheduledData2_);
 		return;
 	}
 
@@ -367,6 +422,30 @@ void Dandanator::executeCommand()
 		if (scheduledData2_ & 0x02) wantsNMI_ = true;
 		if (scheduledData2_ & 0x01) wantsReset_ = true;
 	}
+	else if (cmd == 44 || cmd == 45) {
+		// CMD_SP_STOREDATA/CMD_SP_RETRIEVEDATA: deliberate no-op -- see
+		// Dandanator.h's class comment for the full 2026-11-01 story.
+		// Short version: the real PIC firmware source DOES implement
+		// these (EEData[256] + send-value-as-NMI-pulses), and an earlier
+		// attempt this session faithfully matched that source exactly --
+		// it fixed Bomb Jack (by fixing the *field-consumption* desync,
+		// not the NMI response itself) but then produced a WORSE,
+		// non-linear retry-with-growing-range failure in Chuckie Egg,
+		// Bruce Lee, and (less visibly) Commando. The real ZEsarUX
+		// (`chernandezba/zesarux`, `src/storage/dandanator.c`) --
+		// this project's own established cross-reference since session
+		// 1 -- settled it: its command switch only has cases for
+		// 40/41/42/43/46; 44 and 45 fall to `default: UNKNOWN command`,
+		// i.e. real reference emulation NEVER sends an NMI reply to
+		// these at all. Matching that (no-op, zero NMI pulses) instead
+		// of the firmware-literal behavior fixed all four games
+		// end-to-end, confirmed via live ROM-menu-to-gameplay testing,
+		// zero regression on Lotus Esprit. Needing 4-field consumption
+		// (see needsMoreFields()) to avoid the protocol-desync class of
+		// bug stands regardless of what the command actually DOES once
+		// collected -- that part of the original fix was correct and is
+		// kept.
+	}
 	else if (cmd == 46) {
 		runCommand46();
 	}
@@ -378,31 +457,26 @@ void Dandanator::executeCommand()
 		if (scheduledData1_ == 1 && cmd52Sink_) cmd52Sink_->onDandanatorByte(scheduledData2_);
 	}
 	// 35, 37, 38, 39 (remember reset slot -- not implemented, matches
-	// ZEsarUX's own gap), 41-43/49/50 etc: a real v10.4.3 romset's
-	// "Launch Multiply" code sends these via the plain repeated-pulse
-	// channel (no data1/data2 payload at all), and two of the observed
-	// values (41, 49) are byte-identical to real Multiply Arduino
-	// firmware's own CMD_ZX2SD_BINARY_DATA (0x29=41) and
-	// CMD_ZX2SD_ROMSETBLKSER (0x31=49) constants (confirmed against
-	// github.com/mad3001/Multiply's incCmdsFileTypes.h). Routing any
-	// command Dandanator doesn't explicitly own straight to cmd52Sink_
-	// as a raw byte, same destination command 52 already uses, since
-	// these ARE real Multiply protocol bytes arriving over a transport
-	// this code didn't previously know to forward -- more correct than
-	// treating them as an "unknown Dandanator command" even though nothing
-	// can productively answer them yet: checked the real
-	// Multiply_Arduino.ino's dispatch switch (and its full git history,
-	// all 8 commits) and BINARY_INFO/BINARY_DATA/ROMSETBLKSER have never
-	// had a case handler, ever -- `default: break;`, no reply, same as
-	// here. Whatever UI action sends these in this specific romset would
-	// very likely hang identically on real hardware; this isn't a JASE
-	// gap to fix, it's a pre-existing incompleteness in the real
-	// Dandanator+Multiply ecosystem. See project memory for the full
-	// investigation (dead ends ruled out: SD card content doesn't change
-	// it).
-	else if (cmd52Sink_) {
-		cmd52Sink_->onDandanatorByte(cmd);
-	}
+	// ZEsarUX's own gap), 41-43/49/50 etc: a no-op, matching ZEsarUX's
+	// own gap for these. A 2026-10-31 session speculatively forwarded
+	// ALL of these straight to cmd52Sink_ as raw Multiply bytes, on the
+	// theory that two observed values (41, 49) matched real Multiply
+	// Arduino firmware constants byte-for-byte -- this was WRONG,
+	// confirmed the same session once the real menu-firmware source
+	// (mad3001/Multiply's Src/MultMenu/resources/*.asm, not found
+	// earlier) turned up: EVERY real Z80->Multiply byte goes exclusively
+	// through command 52 (DANCMD_MULTIPLY/DANDAT_MULTIPLY), confirmed in
+	// SendSerByte/SendSerByteLC/GetMultiplyVer, all three routed through
+	// the DAN_BIG_COMMAND_NOW DANCMD_MULTIPLY,DANDAT_MULTIPLY,A macro --
+	// no other command number ever carries Multiply payload. These other
+	// commands are this romset's own ordinary (if unimplemented-by-JASE)
+	// menu-bootstrap traffic; forwarding them to Multiply was actively
+	// harmful, not merely unhelpful -- confirmed live: it interleaved
+	// garbage bytes (the raw command numbers, e.g. 0x29/0x31/0x2a/0x2b/
+	// 0x27/0x32) into the bridge's command stream BEFORE the real
+	// cmd-52-forwarded CMD_ZX2INO_REQ_ID byte, desyncing
+	// tools/multiply_bridge/session.py's one-command-at-a-time dispatch
+	// loop and silently breaking an otherwise-working REQ_ID handshake.
 }
 
 std::string Dandanator::debugCommand(const std::vector<std::string>& toks)

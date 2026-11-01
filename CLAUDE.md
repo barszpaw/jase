@@ -1,3 +1,5 @@
+@.claude/recall-context.md
+
 # CRITICAL SYSTEM INSTRUCTION: MEMORY RECOVERY
 - After any context compaction, session reset, or when starting a complex task, ALWAYS read `MEMORY.md` before taking action.
 - `MEMORY.md` contains the active state of the architecture (addresses, CBM IEC protocol state, SDI ROM hooks).

@@ -76,18 +76,26 @@ def _handle_getdir(conn, session):
 
 def _handle_ls_relative(conn, session):
     chapter = struct.unpack('<H', proto.recv_exact(conn, 2))[0]
+    # SOLVED 2026-11-01 (was previously just worked around -- see git
+    # history): the varying "garbage" chapter values the ROM sent here on
+    # every run (24, 124, 7, 37...) were not uninitialized Z80 RAM at all.
+    # A chapter-0 request's reply MUST carry chapter/page bookkeeping
+    # (see proto.encode_chapter_terminator's own comment) that this
+    # server used to omit entirely -- so the ROM's own chapter table
+    # (ChapTable) was never populated, and the NEXT chapter it asked for
+    # was computed from THAT garbage table, different every run. Now that
+    # encode_chapter_terminator() fills it in correctly, a well-behaved
+    # ROM should only ever ask for chapter 0 here (this server still has
+    # no real multi-chapter support -- v2, for directories over
+    # MAX_FILES entries -- so any other value is still just treated as 0,
+    # but shouldn't normally occur anymore).
     if chapter not in (0, 0xFFFF):
-        # v1 limitation -- see VirtualSDCard/protocol.MAX_FILES. Reply with
-        # an immediate end-of-directory marker rather than hang the Z80
-        # side waiting for entries that will never come.
-        print(f"[LS_RELATIVE] chapter {chapter} not supported (v1: chapter 0 only)")
-        conn.sendall(proto.encode_entry("", proto.FT_END_DIRECTORY, 0))
-        return
+        print(f"[LS_RELATIVE] chapter {chapter} (treating as 0 -- see comment)")
     entries = session.sdcard.list_entries()
     print(f"[LS_RELATIVE] {session.sdcard.cwd}: {len(entries)} entries")
     for index, entry in enumerate(entries):
         conn.sendall(proto.encode_entry(entry.name, entry.ft, index))
-    conn.sendall(proto.encode_entry("", proto.FT_END_DIRECTORY, 0))
+    conn.sendall(proto.encode_chapter_terminator(len(entries)))
 
 
 def _handle_ofread(conn, session):

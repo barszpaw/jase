@@ -72,6 +72,48 @@ MSG_LEN = NAME_LEN + 4
 # One "chapter" (libFileList.ino: entriesPerPage=23 * pagesPerChapter=11).
 # v1 limitation: only chapter 0 is served -- see virtual_sdcard.py.
 MAX_FILES = 253
+FILES_PER_PAGE = 23  # MultMenu's FilesPerPag/MaxFilePage (labels_multiply.asm)
+
+
+def encode_chapter_terminator(num_entries):
+    """The FT_END_DIRECTORY record for a CMD_ZX2SD_LS_RELATIVE chapter-0
+    reply -- NOT just a bare terminator. Taken DIRECTLY from the real
+    Arduino source, mad3001/Multiply's Src/Multiply_Arduino/
+    libFileList.ino (`FirstChapterScan()`/`ListDir()`'s "folder doesn't
+    exist" fallback, which writes this same structure) -- a first attempt
+    at this function was reverse-engineered from the CONSUMING side
+    instead (MultMenu.asm's `Chapter0:` handler) and got the byte offsets
+    wrong by one (derived 3/4/5/11, real firmware uses 2/3/4/10) because
+    the Z80-side HL arithmetic is easy to mis-trace; always check the
+    generating source first when it's available; see `incCmdsFileTypes.h`
+    for the shared `tChaptersOffset`/`tPagesOffset`/`tFilesOffset`/
+    `indexOffset` constants this mirrors 1:1.
+    Byte 0 = FT_END_DIRECTORY (satisfied by zero-init, same as a plain
+    terminator); byte 2 = total chapters; byte 3 = total pages
+    (FILES_PER_PAGE entries per page); byte 4 = file count; bytes 10-11 =
+    chapter 1's own "index" slot, which the real firmware sets to the
+    literal sentinel 0xFFFF (`FakeIndex`) rather than a real seek offset
+    -- chapter 1 always starts via `rewindDirectory()`, never a seek, so
+    this value is never actually used as an index, just checked against
+    the sentinel. Chapters 2-9 (bytes 12-27, in the same 9-chapter x
+    2-byte table) are left at 0x0000 -- the real firmware only ever
+    writes them when a folder has MORE than MAX_FILES (253) entries,
+    which this server already truncates to, so they'd never be read
+    anyway (LastChapter stays 1). Leaving this whole record out entirely
+    (the original v1 bug) left the ROM's own chapter/index tables full of
+    whatever was in RAM beforehand -- live-observed as a different
+    garbage "chapter" number requested on every run, and a CD_IX sent
+    with a wildly out-of-range index when picking a directory from the
+    listing.
+    """
+    buf = bytearray(MSG_LEN)
+    buf[0] = FT_END_DIRECTORY
+    pages = max(1, (num_entries + FILES_PER_PAGE - 1) // FILES_PER_PAGE)
+    buf[2] = 1
+    buf[3] = pages & 0xFF
+    buf[4] = min(num_entries, 255)
+    struct.pack_into('<H', buf, 10, 0xFFFF)
+    return bytes(buf)
 
 SNA_48K_SIZE   = 49179
 SNA_128K_SIZE  = 131103

@@ -1,6 +1,7 @@
 #include <iostream>
 #include <iomanip>
 #include <vector>
+#include <fstream>
 
 #pragma comment(lib, "SDL2.lib")
 #pragma comment(lib, "SDL2main.lib")
@@ -16,10 +17,125 @@
 #include "Multiply.h"
 #include "SDI_8255.h"
 #include "OsdMenu.h"
+#include <nlohmann/json.hpp> // nlohmann-json3-dev (apt) -- see Makefile's INCLUDES comment
 #include <cstdlib>
 #include <cstring>
 #include <strings.h>
 #include <cctype>
+
+using json = nlohmann::json;
+
+// Helpers for settingsToArgs() below: nlohmann::json's own .value(key,
+// default) throws if the key IS present but holds `null` (our schema's
+// convention for "not set" -- e.g. "rom": null), not just when it's
+// absent -- these treat missing-or-null identically, returning `def`
+// for both, which is what every call site below actually wants.
+static std::string jStr(const json& j, const char* key)
+{
+	if (!j.contains(key) || j[key].is_null()) return "";
+	return j[key].get<std::string>();
+}
+static bool jBool(const json& j, const char* key)
+{
+	if (!j.contains(key) || j[key].is_null()) return false;
+	return j[key].get<bool>();
+}
+static const json& jObj(const json& j, const char* key)
+{
+	static const json kEmpty = json::object();
+	if (!j.contains(key) || !j[key].is_object()) return kEmpty;
+	return j[key];
+}
+
+// --settings PATH: reads a settings.json (see that file's own
+// "_description" fields for the schema) and expands it into the exact
+// same flags the rest of this file already parses from argv --
+// deliberately NOT a separate code path, so settings.json can never
+// drift out of sync with what --help documents. Returned args are
+// prepended to the real argv (settings.json first, real CLI flags
+// after), so an explicit flag on the command line always overrides the
+// matching settings.json value -- every parsing loop below takes the
+// LAST matching occurrence for value flags, and repeating a boolean
+// flag is harmless.
+static std::vector<std::string> settingsToArgs(const json& root)
+{
+	std::vector<std::string> args;
+	auto flag = [&](bool cond, const char* f) { if (cond) args.push_back(f); };
+	auto valFlag = [&](const json& section, const char* key, const char* f) {
+		std::string s = jStr(section, key);
+		if (!s.empty()) { args.push_back(f); args.push_back(s); }
+	};
+	auto hostPort = [&](const json& section, const char* hostKey, const char* portKey, const char* f) {
+		std::string h = jStr(section, hostKey);
+		if (!h.empty() && section.contains(portKey) && !section[portKey].is_null()) {
+			args.push_back(f);
+			args.push_back(h + ":" + std::to_string(section[portKey].get<int>()));
+		}
+	};
+
+	const json& machine = jObj(root, "machine");
+	valFlag(machine, "machine", "--machine");
+	valFlag(machine, "rom", "--rom");
+	flag(jBool(machine, "turbosound"), "--turbosound");
+	flag(jBool(machine, "timexHires"), "--timex-hires");
+	flag(jBool(machine, "pcKeys"), "--pc-keys");
+
+	const json& media = jObj(root, "media");
+	valFlag(media, "tape", "--tape");
+	valFlag(media, "loadTape", "--load-tape");
+	valFlag(media, "loadSna", "--load-sna");
+	valFlag(media, "loadZ80", "--load-z80");
+	flag(jBool(media, "tapeFastload"), "--tape-fastload");
+	valFlag(media, "dockCartridge", "--dock-cartridge");
+
+	const json& periph = jObj(root, "peripherals");
+	hostPort(jObj(periph, "zifi"), "host", "port", "--zifi");
+
+	const json& mf1 = jObj(periph, "multiface1");
+	flag(jBool(mf1, "enabled"), "--multiface1");
+	valFlag(mf1, "rom", "--multiface1-rom");
+
+	const json& divide = jObj(periph, "divide");
+	flag(jBool(divide, "enabled"), "--divide");
+	valFlag(divide, "rom", "--divide-rom");
+	valFlag(divide, "disk", "--divide-disk");
+
+	const json& dandanator = jObj(periph, "dandanator");
+	flag(jBool(dandanator, "enabled"), "--dandanator");
+	valFlag(dandanator, "rom", "--dandanator-rom");
+
+	const json& multiply = jObj(periph, "multiply");
+	flag(jBool(multiply, "enabled"), "--multiply");
+	hostPort(multiply, "bridgeHost", "bridgePort", "--multiply-bridge");
+
+	const json& sdi = jObj(periph, "sdi8255");
+	flag(jBool(sdi, "enabled"), "--sdi8255");
+	valFlag(sdi, "rom", "--sdi8255-rom");
+	hostPort(sdi, "bridgeHost", "bridgePort", "--sdi8255-bridge");
+
+	const json& dbg = jObj(root, "debugging");
+	if (dbg.contains("debugPort") && !dbg["debugPort"].is_null()) {
+		args.push_back("--debug-port");
+		args.push_back(std::to_string(dbg["debugPort"].get<int>()));
+	}
+	if (dbg.contains("poke") && dbg["poke"].is_array())
+		for (const auto& p : dbg["poke"]) { args.push_back("--poke"); args.push_back(p.get<std::string>()); }
+	valFlag(dbg, "pc", "--pc");
+	if (dbg.contains("out") && dbg["out"].is_array())
+		for (const auto& o : dbg["out"]) { args.push_back("--out"); args.push_back(o.get<std::string>()); }
+	valFlag(dbg, "tracePort", "--trace-port");
+
+	const json& trace = jObj(dbg, "instrtrace");
+	if (jBool(trace, "enabled")) {
+		args.push_back("--debug-instrtrace");
+		std::string lo = jStr(trace, "rangeLow"), hi = jStr(trace, "rangeHigh");
+		if (!lo.empty() && !hi.empty()) args.push_back(lo + "-" + hi);
+	}
+	flag(jBool(dbg, "iectrace"), "--debug-iectrace");
+	flag(jBool(dbg, "iotrace"), "--debug-iotrace");
+
+	return args;
+}
 
 bool isLittleEndian()
 {
@@ -125,6 +241,14 @@ static void printUsage(const char* argv0)
 {
 	std::cout <<
 		"Usage: " << argv0 << " [options]\n"
+		"\n"
+		"Config file:\n"
+		"  --settings PATH        load settings.json (see that file's own\n"
+		"                         \"_description\" fields) and expand it into\n"
+		"                         the exact same flags listed below -- an\n"
+		"                         explicit flag on the real command line\n"
+		"                         always overrides the matching settings.json\n"
+		"                         value.\n"
 		"\n"
 		"Machine selection:\n"
 		"  --machine NAME         48k (default), tc2048, or 128k\n"
@@ -302,6 +426,52 @@ int main(int argc, char *argv[])
 			printUsage(argv[0]);
 			return 0;
 		}
+
+	// --settings PATH: expand into equivalent flags and splice them in
+	// right after argv[0], ahead of the real CLI args -- every parsing
+	// loop below is a plain left-to-right scan that keeps overwriting
+	// value flags and no-ops on repeated boolean flags, so putting the
+	// real args LAST means they always win over settings.json on any
+	// conflict. ownedArgs/argvStorage own the merged argument strings
+	// for the rest of main()'s lifetime; argc/argv are reassigned below,
+	// so every later argv[i] use in this function automatically sees
+	// the merged list.
+	std::vector<std::string> ownedArgs;
+	std::vector<char*> argvStorage;
+	for (int i = 1; i < argc; i++)
+	{
+		if (0 == strcmp(argv[i], "--settings") && i + 1 < argc)
+		{
+			std::ifstream f(argv[i + 1]);
+			if (!f) {
+				std::cerr << "FATAL: --settings: failed to open " << argv[i + 1] << std::endl;
+				return 1;
+			}
+			json settings;
+			try {
+				f >> settings;
+			} catch (const json::parse_error& e) {
+				std::cerr << "FATAL: --settings: " << argv[i + 1] << ": " << e.what() << std::endl;
+				return 1;
+			}
+			ownedArgs = settingsToArgs(settings);
+			break; // only one --settings; first match wins
+		}
+	}
+	if (!ownedArgs.empty())
+	{
+		ownedArgs.insert(ownedArgs.begin(), argv[0]);
+		for (int i = 1; i < argc; i++)
+		{
+			if (0 == strcmp(argv[i], "--settings")) { i++; continue; } // drop the flag and its path, already consumed
+			ownedArgs.push_back(argv[i]);
+		}
+		argvStorage.reserve(ownedArgs.size() + 1);
+		for (auto& a : ownedArgs) argvStorage.push_back(const_cast<char*>(a.c_str()));
+		argvStorage.push_back(nullptr);
+		argc = (int)ownedArgs.size();
+		argv = argvStorage.data();
+	}
 
 	if (isLittleEndian()) std::cout << "Running on little endian machine" << std::endl;
 	else                  std::cout << "Running on big endian machine"    << std::endl;

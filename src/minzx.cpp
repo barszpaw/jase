@@ -298,6 +298,27 @@ void MinZX::reset()
 
 	ports[0x001F] = 0;
 	ports[0x011F] = 0;
+
+	// A Z80 reset (F9/Dandanator button, or a ROM-triggered reset via
+	// Dandanator command 36/40) restarts the ROM's OWN protocol state
+	// (e.g. a fresh "Launch Multiply" expects to start its REQ_ID/
+	// SETZXTYPE/CD_ROOT handshake from scratch) -- but Multiply's TCP
+	// connection and the bridge's per-connection Session (current
+	// directory, open file, etc.) are untouched by a Z80 reset, so they
+	// silently carry OLD state into the new session. Found live,
+	// 2026-10-31: F9 back to the Dandanator menu, then "Launch Multiply"
+	// a second time, crashed the Z80 outright (PC wandered into
+	// uninitialized RAM and hit a stray HALT with interrupts disabled --
+	// a permanent freeze, not a busy-wait) -- the fresh ROM-side
+	// handshake was almost certainly desyncing against the bridge's
+	// stale Session (still wherever the first session's navigation left
+	// it, including an earlier CD_IX call that failed with an
+	// out-of-range index) rather than matching it. reconnect() is
+	// exactly "lastHost_/lastPort_ already remembered, drop and redial
+	// clean" -- same remedy as ZiFi's own reconnect(), safe to call even
+	// if Multiply was never configured (does nothing) or isn't currently
+	// connected.
+	if (multiply_) multiply_->reconnect();
 }
 
 void MinZX::update(uint8_t* screen)

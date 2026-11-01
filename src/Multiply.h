@@ -39,18 +39,20 @@
 //   - Multiply -> Z80 (RX): a custom 4-bit-per-edge protocol read
 //     through IN A,(0x1F) -- the SAME port the Dandanator's own onboard
 //     Kempston interface (and a real Multiface ONE) also use, a
-//     documented conflict (see Peripheral::in()'s own comment, and the
-//     Multiply readme's own compatibility warning about machines with a
-//     built-in Kempston). Real firmware's Load4bitBlk busy-polls bit 0
-//     of the port until it sees a 0->1 transition (captures the high
-//     nibble from bits 4-1 of THAT exact read), then busy-polls again
-//     for a 1->0 transition (captures the low nibble) -- a pure
-//     asynchronous ready-flag handshake, no shared clock involved at
-//     all. This stand-in exploits that directly: since nothing
-//     observable depends on how many iterations real software spins
-//     before seeing each edge, the edge is simply presented on the very
-//     first poll of each phase, sourcing each byte from the front of
-//     rxRing_ (filled by pump() from the bridge) rather than modeling
+//     documented conflict (see the Multiply readme's own compatibility
+//     warning about machines with a built-in Kempston). Dandanator is
+//     the arbiter for this port (see Dandanator::in()): it calls
+//     wantsPortRead() below FIRST and only falls back to its own idle
+//     joystick stub when this returns false. Real firmware's
+//     Load4bitBlk busy-polls bit 0 of the port until it sees a 0->1
+//     transition (captures the high nibble from bits 4-1 of THAT exact
+//     read), then busy-polls again for a 1->0 transition (captures the
+//     low nibble) -- a pure asynchronous ready-flag handshake, no shared
+//     clock involved at all. This stand-in exploits that directly: since
+//     nothing observable depends on how many iterations real software
+//     spins before seeing each edge, the edge is simply presented on the
+//     very first poll of each phase, sourcing each byte from the front
+//     of rxRing_ (filled by pump() from the bridge) rather than modeling
 //     the PIC's actual ~9us-per-nibble pacing (Dly4NIBBLEus in the real
 //     Arduino firmware) -- same "immediate response" simplification
 //     this codebase already uses for other asynchronous ready-flag
@@ -61,8 +63,8 @@ public:
 	~Multiply() override;
 
 	const char* name() const override { return "MULTIPLY"; }
-	bool in(uint16_t port, uint8_t& value) override;
 	void onDandanatorByte(uint8_t value) override;
+	bool wantsPortRead(uint8_t& value) override;
 	std::string debugCommand(const std::vector<std::string>& toks) override;
 
 	// --multiply on the command line -- off by default, same convention

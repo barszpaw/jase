@@ -1,0 +1,87 @@
+{
+  "_description": "Reference/template for every JASE CLI parameter (src/main.cpp), grouped the same way as --help's own sections. Not consumed by JASE itself (no --settings loader exists yet) -- hand values from here to the actual `./jase ...` invocation. null/false/[] means 'flag omitted'.",
+
+  "machine": {
+    "_description": "Machine selection -- must be decided before anything else; --machine picks the ROM that boots.",
+    "machine": "48k",
+    "rom": null,
+    "turbosound": false,
+    "timexHires": false,
+    "pcKeys": false
+  },
+
+  "media": {
+    "_description": "Tape/snapshot/cartridge content to stage or load at startup.",
+    "tape": null,
+    "loadTape": null,
+    "loadSna": null,
+    "loadZ80": null,
+    "tapeFastload": false,
+    "dockCartridge": null
+  },
+
+  "peripherals": {
+    "_description": "Optional hardware add-ons. Each *Rom/*Bridge value implies enabling its own peripheral even if \"enabled\" is left false.",
+    "zifi": {
+      "host": null,
+      "port": null
+    },
+    "multiface1": {
+      "enabled": false,
+      "rom": null
+    },
+    "divide": {
+      "enabled": false,
+      "rom": null,
+      "disk": null
+    },
+    "dandanator": {
+      "enabled": false,
+      "rom": null
+    },
+    "multiply": {
+      "enabled": false,
+      "bridgeHost": null,
+      "bridgePort": null
+    },
+    "sdi8255": {
+      "enabled": false,
+      "rom": null,
+      "bridgeHost": null,
+      "bridgePort": null
+    }
+  },
+
+  "debugging": {
+    "_description": "Debug-protocol server, pre-boot memory/port pokes, and instruction/bus tracing.",
+    "debugPort": null,
+    "poke": [],
+    "pc": null,
+    "out": [],
+    "tracePort": null,
+    "instrtrace": {
+      "enabled": false,
+      "rangeLow": null,
+      "rangeHigh": null
+    },
+    "iectrace": false,
+    "iotrace": false
+  },
+
+  "_examples": {
+    "_description": "A few full settings snapshots actually used during 2026-10-31/11-01 Dandanator+Multiply sessions, for reference.",
+    "dandanatorMenuOnly": {
+      "machine": { "machine": "48k" },
+      "peripherals": { "dandanator": { "enabled": true, "rom": "games/dandanator_04.rom" } },
+      "debugging": { "debugPort": 9030 }
+    },
+    "dandanatorPlusMultiplyBridge": {
+      "machine": { "machine": "48k" },
+      "peripherals": {
+        "dandanator": { "enabled": true, "rom": "games/dandanator_04.rom" },
+        "multiply": { "enabled": true, "bridgeHost": "127.0.0.1", "bridgePort": 9701 }
+      },
+      "debugging": { "debugPort": 9030 }
+    }
+  }
+}
