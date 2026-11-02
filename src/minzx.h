@@ -86,6 +86,7 @@ public:
 	// AY-3-8912) or TurboSound (two, NedoPC chip-select convention -- see
 	// TurboSound.h) gets constructed as ay_. Off by default (plain AyPsg).
 	void setTurboSound(bool on) { turboSoundRequested_ = on; }
+	bool isTurboSound() const { return turboSoundRequested_; }
 
 	// Can be called any time (unlike setMachine()/setTurboSound(), this
 	// doesn't affect init()'s own setup) -- enables the Timex SCLD video
@@ -93,6 +94,7 @@ public:
 	// as pico-spec's Config::timex_video toggle. See timexVideoEnabled_'s
 	// comment for why DOCK paging (port 0xF4) isn't included.
 	void setTimexVideo(bool on) { timexVideoEnabled_ = on; }
+	bool isTimexVideo() const { return timexVideoEnabled_; }
 
 	// Opt-in "type punctuation like a PC keyboard": the live keyboard
 	// matrix scan normally only maps letters/digits/RETURN/SPACE/shifts
@@ -110,6 +112,7 @@ public:
 	// behavior (some emulators' "Spectrum keyboard" mode, as opposed to
 	// this "PC keyboard" mode) is unaffected.
 	void setPcKeys(bool on) { pcKeysEnabled_ = on; }
+	bool isPcKeys() const { return pcKeysEnabled_; }
 
 	// Opt-in: restores the old instant-delivery shortcut at PC==0x0556
 	// (checkFastLoad()) on top of the real pulse engine, same as JASE had
@@ -118,6 +121,7 @@ public:
 	// -- this flag exists to A/B the two against each other, not to be
 	// the normal way to load tapes.
 	void setTapeFastload(bool on) { tapeFastloadEnabled_ = on; }
+	bool isTapeFastload() const { return tapeFastloadEnabled_; }
 
 	// Test/debug override: replaces ROM pair 0 (the one setMachine() just
 	// picked). For standalone diagnostic ROMs (e.g. Brendan Alford's
@@ -526,6 +530,10 @@ public:
 	// init() constructs it, for --sdi8255/--sdi8255-rom.
 	class SDI_8255* getSDI8255() const { return sdi8255_; }
 
+	// Same idea: main.cpp calls setEnabled()/loadInterfaceRom() on this
+	// after init() constructs it, for --fdd3000/--fdd3000-rom.
+	class Fdd3000* getFdd3000() const { return fdd3000_; }
+
 private:
 	class ZiFi* zifi_ = nullptr;
 	class Multiface* multiface_ = nullptr;
@@ -533,6 +541,7 @@ private:
 	class Dandanator* dandanator_ = nullptr;
 	class Multiply* multiply_ = nullptr;
 	class SDI_8255* sdi8255_ = nullptr;
+	class Fdd3000* fdd3000_ = nullptr;
 };
 
 #endif // _MINZX_H_

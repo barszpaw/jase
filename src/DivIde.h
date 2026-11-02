@@ -59,11 +59,18 @@ public:
 	// works without saying which.
 	bool insertDisk(const char* path);
 
+	// Last successfully loaded ROM/disk path, "" if never set -- OsdMenu's
+	// own peripheral config screens read these to show/persist state.
+	const std::string& getRomPath() const { return romPath_; }
+	const std::string& getDiskPath() const { return diskPath_; }
+
 private:
 	void refreshPaging(MemoryMap& memory);
 	void executeCommand(uint8_t cmd);
 	uint32_t lba() const;
 
+	std::string romPath_;
+	std::string diskPath_;
 	MemoryMap::Bank rom_{};
 	MemoryMap::Bank ram_[4]{};
 	bool active_ = false;    // currently has pages 0/1 + ROMCS, see onInstructionFetch

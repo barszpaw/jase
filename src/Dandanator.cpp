@@ -74,6 +74,7 @@ bool Dandanator::loadRom(const char* path)
 		fprintf(stderr, "Dandanator::loadRom: %s is larger than expected %d bytes\n", path, ROM_SIZE);
 		return false;
 	}
+	romPath_ = path;
 	printf("Dandanator::loadRom: loaded 512K romset from %s\n", path);
 	return true;
 }

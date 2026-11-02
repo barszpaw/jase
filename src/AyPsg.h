@@ -39,6 +39,7 @@ public:
 	// additively (so the caller can layer this on top of the beeper's own
 	// contribution already in the buffer) with clamping to avoid wraparound.
 	void generate(uint8_t* buffer, int count, int sampleRate) override;
+	void reset() override { chip_.reset(); selectedRegister_ = 0; }
 
 private:
 	AyChipCore chip_;

@@ -1,5 +1,11 @@
 #include "AyChipCore.h"
 
+void AyChipCore::reset()
+{
+	for (int reg = 0; reg < 14; reg++)
+		writeRegister(reg, 0);
+}
+
 void AyChipCore::writeRegister(int reg, uint8_t value)
 {
 	if (reg < 0 || reg > 13)

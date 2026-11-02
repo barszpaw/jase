@@ -62,6 +62,7 @@ bool Multiface::loadRom(const char* path)
 	}
 	memcpy(rom_.data, buf, sizeof(buf));
 	rom_.isRom = true;
+	romPath_ = path;
 	printf("Multiface::loadRom: loaded real Multiface ONE ROM from %s\n", path);
 	return true;
 }

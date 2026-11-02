@@ -32,6 +32,7 @@ bool DivIde::loadRom(const char* path)
 		return false;
 	}
 	memcpy(rom_.data, buf, sizeof(buf));
+	romPath_ = path;
 	printf("DivIde::loadRom: loaded esxDOS (IDE) ROM from %s\n", path);
 	return true;
 }
@@ -68,6 +69,7 @@ bool DivIde::insertDisk(const char* path)
 	diskSectors_ = (uint32_t)((fileSize - diskDataOffset_) / 512);
 	printf("DivIde::insertDisk: %u sectors (%lu MB) available\n",
 	       diskSectors_, (unsigned long)((uint64_t)diskSectors_ * 512 / (1024 * 1024)));
+	diskPath_ = path;
 	return true;
 }
 

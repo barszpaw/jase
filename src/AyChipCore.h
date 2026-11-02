@@ -19,6 +19,16 @@ public:
 	void writeRegister(int reg, uint8_t value);
 	uint8_t readRegister(int reg) const { return (reg >= 0 && reg < 14) ? registers_[reg] : 0xFF; }
 
+	// Matches real AY-3-8912 hardware: its own RESET pin (tied to the same
+	// line as the Z80's on 128K/+2/+3) clears all 14 registers to 0 --
+	// volumes included, so this is what actually silences the chip on a
+	// machine reset. Routed through writeRegister() for each register
+	// (not a raw registers_.fill(0)) so every derived field it already
+	// knows how to update (tonePeriod clamped to 1, envelope restarted,
+	// etc.) stays consistent -- the same reasoning a real reset's
+	// register-clear has, just reusing the one place that logic lives.
+	void reset();
+
 	void stepOneClock();
 
 	// 0-45: sum of the three channels' gated volume/envelope level (0-15

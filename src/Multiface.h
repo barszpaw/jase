@@ -62,11 +62,17 @@ public:
 	// be read or isn't exactly 8192 bytes.
 	bool loadRom(const char* path);
 
+	// The path a real ROM was last successfully loaded from, "" if only
+	// the built-in placeholder is active -- OsdMenu's own peripheral
+	// config screens read this to show/persist current state.
+	const std::string& getRomPath() const { return romPath_; }
+
 private:
 	void initPlaceholderRom();
 	void pageIn(MemoryMap& memory);
 	void pageOut(MemoryMap& memory);
 
+	std::string romPath_;
 	MemoryMap::Bank rom_{};
 	MemoryMap::Bank ram_{};
 	bool active_ = false;    // currently has pages 0/1 + ROMCS, see pageIn/pageOut

@@ -11,4 +11,10 @@ class IAySound
 public:
 	virtual ~IAySound() {}
 	virtual void generate(uint8_t* buffer, int count, int sampleRate) = 0;
+
+	// Silences the chip and clears its register state -- see
+	// AyChipCore::reset()'s own comment for why this matters on a machine
+	// reset (real 128K/+2/+3 hardware ties the AY's RESET pin to the same
+	// line as the Z80's).
+	virtual void reset() = 0;
 };

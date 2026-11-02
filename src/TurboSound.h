@@ -43,6 +43,7 @@ public:
 	std::string debugCommand(const std::vector<std::string>& toks) override;
 
 	void generate(uint8_t* buffer, int count, int sampleRate) override;
+	void reset() override { chips_[0].reset(); chips_[1].reset(); selectedChip_ = 0; selectedRegister_ = 0; }
 
 private:
 	std::array<AyChipCore, 2> chips_;

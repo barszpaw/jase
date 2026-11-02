@@ -93,6 +93,11 @@ public:
 	// letting a user force another round of attempts on demand.
 	bool reconnect();
 
+	// Last connectTo() target ("" / 0 if never called) -- OsdMenu's own
+	// peripheral config screens read this to show/persist current state.
+	const std::string& getBridgeHost() const { return lastHost_; }
+	int getBridgePort() const { return lastPort_; }
+
 	// Call once per emulated frame (50Hz): if not currently connected,
 	// first gives maybeAutoReconnect() a chance (see its own comment),
 	// then -- same as always -- drains the TX ring to the bridge socket

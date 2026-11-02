@@ -64,6 +64,11 @@ public:
 	// target without needing --zifi at startup).
 	bool reconnect();
 
+	// Last connectTo() target ("" / 0 if never called) -- OsdMenu's own
+	// peripheral config screens read this to show/persist current state.
+	const std::string& getLastHost() const { return lastHost_; }
+	int getLastPort() const { return lastPort_; }
+
 	// Call once per emulated frame (50Hz): drains the TX ring to the
 	// socket and pulls any available bytes into the RX ring. Non-blocking
 	// either way, like DebugServer::poll().

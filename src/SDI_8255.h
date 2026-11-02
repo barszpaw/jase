@@ -82,7 +82,18 @@ public:
 	bool loadRom(const char* path);
 
 	// --sdi8255-bridge HOST:PORT -- see IecBridgeClient.
-	bool connectBridge(const char* host, int port) { return bridge_.connect(host, port); }
+	bool connectBridge(const char* host, int port)
+	{
+		bridgeHost_ = host; bridgePort_ = port;
+		return bridge_.connect(host, port);
+	}
+
+	// Last successfully loaded ROM path / last connectBridge() target
+	// ("" / 0 if never set) -- OsdMenu's own peripheral config screens
+	// read these to show/persist current state.
+	const std::string& getRomPath() const { return romPath_; }
+	const std::string& getBridgeHost() const { return bridgeHost_; }
+	int getBridgePort() const { return bridgePort_; }
 
 	I8255& chip() { return chip_; }
 
@@ -119,6 +130,9 @@ private:
 
 	uint8_t eprom_[2][0x1000] = {};
 	bool romLoaded_ = false;
+	std::string romPath_;
+	std::string bridgeHost_;
+	int bridgePort_ = 0;
 	bool romBank1Selected_ = false; // PC1 -- live, even though nothing toggles it yet
 
 	// page1_'s lower half ($2000-$2FFF) is a one-time snapshot of

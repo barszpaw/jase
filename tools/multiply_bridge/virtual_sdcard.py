@@ -57,10 +57,20 @@ class VirtualSDCard:
     def __init__(self, root):
         self.root = os.path.abspath(root)
         self.cwd = self.root
-        self.entries = []  # last list_entries() result -- what CD_IX/OFREAD_IX/GETINFO index into
+        # Always kept in sync with self.cwd -- cd()/cd_root()/cd_ix() all
+        # call list_entries() themselves right after changing cwd (see
+        # their own comments: the real ROM's "go to parent" sequence
+        # replays CD_IX calls against the real SD card's OWN live FAT
+        # index -- SdFat's File::open(Dir, index) -- with NO intervening
+        # LS_RELATIVE, so CD_IX must resolve correctly without one here
+        # too; a cache only refreshed by an explicit LS_RELATIVE request
+        # would resolve a post-CD_ROOT replay CD_IX against a stale
+        # listing from whatever directory was last explicitly listed).
+        self.entries = []
 
     def cd_root(self):
         self.cwd = self.root
+        self.list_entries()
 
     def cd(self, name):
         """Returns True if `name` was a valid subdirectory (or ".." when not
@@ -69,6 +79,7 @@ class VirtualSDCard:
         target = os.path.abspath(target)
         if target.startswith(self.root) and os.path.isdir(target):
             self.cwd = target
+            self.list_entries()
             return True
         return False
 
@@ -78,9 +89,17 @@ class VirtualSDCard:
         if ix >= len(self.entries) or not self.entries[ix].is_dir:
             return False
         self.cwd = os.path.abspath(self.entries[ix].path)
+        self.list_entries()
         return True
 
     def current_name(self):
+        # The real ROM's UpdatePath (PathRoutines.asm) checks GETDIR's reply
+        # for a literal leading "/" to mean "this is the root -- skip
+        # updating the breadcrumb"; `os.path.basename(self.root)` would
+        # instead return the root folder's own name (e.g. "Games"), which
+        # the ROM would misread as a real subdirectory name.
+        if self.cwd == self.root:
+            return '/'
         return os.path.basename(self.cwd) or '/'
 
     def resolve(self, path_or_name):

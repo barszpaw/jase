@@ -9,6 +9,7 @@
 #include "Dandanator.h"
 #include "Multiply.h"
 #include "SDI_8255.h"
+#include "Fdd3000.h"
 #include <SDL.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -197,6 +198,18 @@ void MinZX::init()
 		ay_ = ay;
 		peripherals_.push_back(ay);
 	}
+	// FDD3000 is constructed -- and pushed -- BEFORE ZiFi on purpose: both
+	// are real, independent peripherals that decode the SAME low port
+	// byte 0xEF (confirmed live, 2026-11-01: ZiFi's own in()/out() match
+	// on "(port & 0xFF) == 0xEF" UNCONDITIONALLY, regardless of whether
+	// ZiFi itself is connected -- see ZiFi.cpp). On real hardware these
+	// two devices genuinely can't coexist on the same Spectrum without a
+	// physical bus conflict either; same class of documented conflict as
+	// Kempston/Multiface on 0x1F (see Peripheral.h's own comment) --
+	// resolved the same way, by ordering, not by changing either
+	// device's decode logic.
+	fdd3000_ = new Fdd3000();
+	peripherals_.push_back(fdd3000_);
 	zifi_ = new ZiFi();
 	peripherals_.push_back(zifi_);
 	multiface_ = new Multiface();
@@ -298,6 +311,13 @@ void MinZX::reset()
 
 	ports[0x001F] = 0;
 	ports[0x011F] = 0;
+
+	// Real 128K/+2/+3 hardware ties the AY-3-8912's own RESET pin to the
+	// same line as the Z80's, so a reset silences it (all 14 registers,
+	// volumes included, clear to 0) -- without this, F9/Dandanator-button
+	// or a plain machine reset left whatever the previous game had
+	// playing audibly running, since nothing here ever touched ay_.
+	if (ay_) ay_->reset();
 
 	// A Z80 reset (F9/Dandanator button, or a ROM-triggered reset via
 	// Dandanator command 36/40) restarts the ROM's OWN protocol state

@@ -238,7 +238,13 @@ public:
 	// unrecognized command number.
 	void setCmd52Sink(DandanatorCmd52Sink* sink) { cmd52Sink_ = sink; }
 
+	// Last successfully loaded romset path, "" if only the built-in
+	// placeholder is active -- OsdMenu's own peripheral config screens
+	// read this to show/persist current state.
+	const std::string& getRomPath() const { return romPath_; }
+
 private:
+	std::string romPath_;
 	enum State { Disabled, Locked, WaitNormal };
 	enum class PulsePhase { Command, Data1, Data2, Confirm };
 

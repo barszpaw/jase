@@ -49,6 +49,15 @@
       "rom": null,
       "bridgeHost": null,
       "bridgePort": null
+    },
+    "fdd3000": {
+      "enabled": false,
+      "rom": null,
+      "stationRom": null,
+      "diskA": null,
+      "diskB": null,
+      "diskC": null,
+      "diskD": null
     }
   },
 
@@ -65,7 +74,8 @@
       "rangeHigh": null
     },
     "iectrace": false,
-    "iotrace": false
+    "iotrace": false,
+    "fdd3000LinkTrace": false
   },
 
   "_examples": {

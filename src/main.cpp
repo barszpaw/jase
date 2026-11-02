@@ -16,6 +16,7 @@
 #include "Dandanator.h"
 #include "Multiply.h"
 #include "SDI_8255.h"
+#include "Fdd3000.h"
 #include "OsdMenu.h"
 #include <nlohmann/json.hpp> // nlohmann-json3-dev (apt) -- see Makefile's INCLUDES comment
 #include <cstdlib>
@@ -113,6 +114,15 @@ static std::vector<std::string> settingsToArgs(const json& root)
 	valFlag(sdi, "rom", "--sdi8255-rom");
 	hostPort(sdi, "bridgeHost", "bridgePort", "--sdi8255-bridge");
 
+	const json& fdd3000 = jObj(periph, "fdd3000");
+	flag(jBool(fdd3000, "enabled"), "--fdd3000");
+	valFlag(fdd3000, "rom", "--fdd3000-rom");
+	valFlag(fdd3000, "stationRom", "--fdd3000-station-rom");
+	valFlag(fdd3000, "diskA", "--fdd3000-disk-a");
+	valFlag(fdd3000, "diskB", "--fdd3000-disk-b");
+	valFlag(fdd3000, "diskC", "--fdd3000-disk-c");
+	valFlag(fdd3000, "diskD", "--fdd3000-disk-d");
+
 	const json& dbg = jObj(root, "debugging");
 	if (dbg.contains("debugPort") && !dbg["debugPort"].is_null()) {
 		args.push_back("--debug-port");
@@ -133,6 +143,7 @@ static std::vector<std::string> settingsToArgs(const json& root)
 	}
 	flag(jBool(dbg, "iectrace"), "--debug-iectrace");
 	flag(jBool(dbg, "iotrace"), "--debug-iotrace");
+	flag(jBool(dbg, "fdd3000LinkTrace"), "--debug-fdd3000-linktrace");
 
 	return args;
 }
@@ -157,6 +168,68 @@ bool isLittleEndian()
 // Example: test the Kempston port without a working keyboard matrix —
 //   --poke 8000=DB,1F,18,FC --pc 8000
 // (IN A,(0x1F) ; JR 0x8000 — an infinite loop re-reading the port)
+// Every flag name main.cpp's various parsing loops recognize ANYWHERE
+// (applyDebugArgs() + every loop inside main() below, including whatever
+// --settings expands into via settingsToArgs() -- that function only
+// ever emits names from this exact list, by construction). Used solely
+// by validateArgs() below to catch a misspelled/unknown flag up front
+// instead of it being silently ignored by every one of those loops in
+// turn (none of them has an else-branch for "I don't recognize this" --
+// each only cares about its own subset, by design, since several passes
+// share the same argv). User, 2026-11-01: "walidacja parametrów
+// wejściowych na CLI" -- this was the concrete gap behind that ask: a
+// typo like "--fdd3000-rm" previously produced no error at all.
+static const char* const kKnownFlags[] = {
+	"--help", "-h",
+	"--settings",
+	"--machine", "--rom", "--turbosound", "--timex-hires", "--pc-keys",
+	"--tape", "--load-tape", "--load-sna", "--load-z80", "--tape-fastload", "--dock-cartridge",
+	"--zifi",
+	"--multiface1", "--multiface1-rom",
+	"--divide", "--divide-rom", "--divide-disk",
+	"--dandanator", "--dandanator-rom",
+	"--multiply", "--multiply-bridge",
+	"--sdi8255", "--sdi8255-rom", "--sdi8255-bridge",
+	"--fdd3000", "--fdd3000-rom", "--fdd3000-station-rom",
+	"--fdd3000-disk-a", "--fdd3000-disk-b", "--fdd3000-disk-c", "--fdd3000-disk-d",
+	"--debug-port", "--poke", "--pc", "--out", "--trace-port",
+	"--debug-instrtrace", "--debug-iectrace", "--debug-iotrace", "--debug-fdd3000-linktrace",
+};
+
+static bool isKnownFlag(const char* s)
+{
+	for (const char* f : kKnownFlags)
+		if (0 == strcmp(s, f)) return true;
+	return false;
+}
+
+// Called once, on the FINAL argv (after any --settings expansion has
+// already been spliced in -- see main(), this runs right after that
+// merge) -- rejects anything that LOOKS like a flag (starts with '-')
+// but isn't in kKnownFlags above. Deliberately does NOT try to track
+// which flags consume a following value (that bookkeeping would have to
+// exactly mirror every parsing loop's own i++ logic, a second place to
+// keep in sync and get subtly wrong) -- a flag's VALUE token (e.g. a
+// hex address, a HOST:PORT, a bare file path) essentially never starts
+// with '-' in practice, so skipping that tracking entirely still catches
+// the real failure mode (a misspelled/unknown FLAG) without false
+// positives on legitimate values. argv[1] is exempt when it doesn't
+// start with '-' -- the one positional-argument fallback (a bare
+// snapshot/tape path, see the bottom of main()) -- every single
+// argument after FORCES normal flag form.
+static void validateArgs(int argc, char* argv[])
+{
+	int start = (argc > 1 && argv[1][0] != '-') ? 2 : 1;
+	for (int i = start; i < argc; i++)
+	{
+		if (argv[i][0] == '-' && !isKnownFlag(argv[i]))
+		{
+			std::cerr << "FATAL: unrecognized option '" << argv[i] << "' -- see --help" << std::endl;
+			exit(1);
+		}
+	}
+}
+
 // Returns the --debug-port value, or -1 if not given.
 static int applyDebugArgs(int argc, char* argv[], MinZX& minZX)
 {
@@ -361,6 +434,25 @@ static void printUsage(const char* argv0)
 		"                         implies --sdi8255.\n"
 		"  --sdi8255-bridge HOST:PORT connect to tools/sdi_bridge/sdi_bridge.py\n"
 		"                         (or an equivalent companion) for OPEN/CLOSE.\n"
+		"  --fdd3000               enable the Timex FDD 3000 disk station\n"
+		"                         stand-in: interface ROMCS + link port +\n"
+		"                         a real second Z80 + WD1772 driving real\n"
+		"                         CPCEMU/Extended DSK disk images.\n"
+		"  --fdd3000-rom PATH     the real INTERFACE ROM -- 8192 bytes\n"
+		"                         preferred (the real full ROMCS window),\n"
+		"                         32768 accepted (a full 27C256 EPROM dump,\n"
+		"                         only its first 8K is used), or 4096 (older\n"
+		"                         fdd3stavi.rom/fdd3timex.rom dumps, mirrored\n"
+		"                         -- a known-approximate fallback). Implies\n"
+		"                         --fdd3000.\n"
+		"  --fdd3000-station-rom PATH  the real STATION's own internal boot\n"
+		"                         ROM (exactly 2048 bytes) -- a SEPARATE real\n"
+		"                         chip from the interface ROM above; without\n"
+		"                         it the station CPU just idles. Implies\n"
+		"                         --fdd3000.\n"
+		"  --fdd3000-disk-a/b/c/d PATH  a real .dsk image for that station\n"
+		"                         drive (CPCEMU/Extended DSK); implies\n"
+		"                         --fdd3000.\n"
 		"\n"
 		"Debugging:\n"
 		"  --debug-port PORT      listen for the line-based debug protocol:\n"
@@ -390,6 +482,12 @@ static void printUsage(const char* argv0)
 		"                         bus lines) with the resolved bus state (atn/clk/\n"
 		"                         dat per side, role, rxPhase/txPhase) and the\n"
 		"                         current PC; toggle live via \"IECTRACE ON\"/\"OFF\"\n"
+		"  --debug-fdd3000-linktrace  log every host<->station link-byte\n"
+		"                         exchange (port 0xEF on the host, I/O block 1\n"
+		"                         on the station) with both CPUs' PC and the\n"
+		"                         raw/binary byte value; toggle live via\n"
+		"                         \"FDD3000 LINKTRACE ON\"/\"OFF\" (see\n"
+		"                         tools/fdd3000_linktrace_decode.py to pretty-print)\n"
 		"\n"
 		"Window hotkeys:\n"
 		"  F1                     toggle the on-screen menu -- Storage (load/\n"
@@ -398,12 +496,17 @@ static void printUsage(const char* argv0)
 		"                         (Symbol Shift legend). Matches pico-spec-\n"
 		"                         drewpo's own HK_MAIN_MENU. This is JASE's\n"
 		"                         own OSD, not a card -- see Peripherals.\n"
-		"  F5                     also opens the menu when closed; once open,\n"
-		"                         it's context-specific inside a remote file\n"
-		"                         browser (Save a copy locally), matching\n"
-		"                         pico-spec's own F2 Reload/F5 Save/F8 Forget\n"
-		"                         file-browser convention (also F2 Reload,\n"
-		"                         F8 Forget-connection in the Network menus).\n"
+		"  F5                     opens straight into STORAGE when closed;\n"
+		"                         once open, it's context-specific inside a\n"
+		"                         remote file browser (Save a copy locally),\n"
+		"                         matching pico-spec's own F2 Reload/F5 Save/\n"
+		"                         F8 Forget file-browser convention (also\n"
+		"                         F2 Reload, F8 Forget-connection in the\n"
+		"                         Network menus).\n"
+		"  F8                     FDD3000 station reset (see --fdd3000 above\n"
+		"                         -- NOT a Z80 reset; only while the menu is\n"
+		"                         closed, it's \"forget remote\" inside the\n"
+		"                         Network > Remote list when the menu is open)\n"
 		"  F9                     Dandanator button (see --dandanator above;\n"
 		"                         also resets the Z80, like real hardware)\n"
 		"  F11                    RESET (full machine reset)\n"
@@ -438,6 +541,12 @@ int main(int argc, char *argv[])
 	// the merged list.
 	std::vector<std::string> ownedArgs;
 	std::vector<char*> argvStorage;
+	// Whatever --settings named, so the OSD menu's "RESET > SAVE CONFIG"
+	// (see OsdMenu::setSettingsPath()) writes back to the SAME file this
+	// run was configured from, not always the repo-root template -- falls
+	// back to "settings.json" (that template's own name) if --settings
+	// was never passed, same default OsdMenu.h's own member uses.
+	std::string settingsJsonPath = "settings.json";
 	for (int i = 1; i < argc; i++)
 	{
 		if (0 == strcmp(argv[i], "--settings") && i + 1 < argc)
@@ -455,7 +564,35 @@ int main(int argc, char *argv[])
 				return 1;
 			}
 			ownedArgs = settingsToArgs(settings);
+			settingsJsonPath = argv[i + 1];
 			break; // only one --settings; first match wins
+		}
+	}
+	if (ownedArgs.empty())
+	{
+		// No EXPLICIT --settings PATH -- silently try the default
+		// "settings.json" in the current directory (the same file
+		// OsdMenu's own "RESET > SAVE CONFIG" and settingsJsonPath's own
+		// default both already assume) if it happens to exist, so
+		// "configure once via the OSD menu, just relaunch later" actually
+		// works without remembering to type --settings by hand every
+		// time (user, 2026-11-01: "ustawienia fdd3000 nie zachowują się
+		// między uruchomieniami JASE"). Unlike an EXPLICIT --settings, a
+		// missing file here is simply not there (every fresh checkout
+		// starts with no peripherals enabled, same as always) and a
+		// malformed one is a warning, not a FATAL exit -- this path is a
+		// convenience default, not a user-requested, must-succeed load.
+		std::ifstream f(settingsJsonPath);
+		if (f)
+		{
+			json settings;
+			try {
+				f >> settings;
+				ownedArgs = settingsToArgs(settings);
+			} catch (const json::parse_error& e) {
+				std::cerr << "WARNING: " << settingsJsonPath << " exists but failed to parse (" << e.what()
+				          << ") -- starting with defaults instead" << std::endl;
+			}
 		}
 	}
 	if (!ownedArgs.empty())
@@ -473,6 +610,10 @@ int main(int argc, char *argv[])
 		argv = argvStorage.data();
 	}
 
+	// On the FINAL argv -- after any --settings expansion -- so a typo
+	// inside settings.json would be caught too, not just real CLI flags.
+	validateArgs(argc, argv);
+
 	if (isLittleEndian()) std::cout << "Running on little endian machine" << std::endl;
 	else                  std::cout << "Running on big endian machine"    << std::endl;
 
@@ -482,8 +623,6 @@ int main(int argc, char *argv[])
 	SDL_Init(SDL_INIT_EVERYTHING);
 
 	MinZX minZX;
-	OsdMenu osdMenu(&minZX);
-
 	// --machine must be applied before init() -- it picks the ROM that
 	// loadROM() reads during init().
 	for (int i = 1; i < argc; i++)
@@ -511,6 +650,14 @@ int main(int argc, char *argv[])
 			minZX.setPcKeys(true);
 		}
 	}
+
+	// Constructed AFTER the --machine/--turbosound loop above, not right
+	// after `MinZX minZX;` -- OsdMenu's constructor seeds its own OPTIONS
+	// shadow preferences (see OsdMenu.h) straight from minZX.getMachine()/
+	// isTurboSound(), which only reflect what the command line actually
+	// asked for once that loop has run.
+	OsdMenu osdMenu(&minZX);
+	osdMenu.setSettingsPath(settingsJsonPath);
 
 	minZX.init();
 
@@ -618,6 +765,34 @@ int main(int argc, char *argv[])
 			*colon = '\0';
 			minZX.getSDI8255()->connectBridge(arg, atoi(colon + 1));
 		}
+		else if (0 == strcmp(argv[i], "--fdd3000"))
+			minZX.getFdd3000()->setEnabled(true);
+		else if (0 == strcmp(argv[i], "--fdd3000-rom") && i + 1 < argc) {
+			// Implies --fdd3000, same reasoning as --sdi8255-rom implying
+			// --sdi8255.
+			minZX.getFdd3000()->setEnabled(true);
+			if (!minZX.getFdd3000()->loadInterfaceRom(argv[++i])) {
+				std::cerr << "FATAL: --fdd3000-rom: failed to load " << argv[i] << std::endl;
+				exit(1);
+			}
+		}
+		else if (0 == strcmp(argv[i], "--fdd3000-station-rom") && i + 1 < argc) {
+			minZX.getFdd3000()->setEnabled(true);
+			if (!minZX.getFdd3000()->loadStationBootRom(argv[++i])) {
+				std::cerr << "FATAL: --fdd3000-station-rom: failed to load " << argv[i] << std::endl;
+				exit(1);
+			}
+		}
+		else if ((0 == strcmp(argv[i], "--fdd3000-disk-a") || 0 == strcmp(argv[i], "--fdd3000-disk-b") ||
+		          0 == strcmp(argv[i], "--fdd3000-disk-c") || 0 == strcmp(argv[i], "--fdd3000-disk-d")) &&
+		         i + 1 < argc) {
+			int drive = argv[i][strlen(argv[i]) - 1] - 'a';
+			minZX.getFdd3000()->setEnabled(true);
+			if (!minZX.getFdd3000()->insertDisk(drive, argv[++i])) {
+				std::cerr << "FATAL: " << argv[i - 1] << ": failed to load " << argv[i] << std::endl;
+				exit(1);
+			}
+		}
 		else if (0 == strcmp(argv[i], "--debug-instrtrace")) {
 			minZX.setInstrTraceEnabled(true);
 			// Optional "LOW-HIGH" hex range right after the flag (e.g.
@@ -646,6 +821,9 @@ int main(int argc, char *argv[])
 		}
 		else if (0 == strcmp(argv[i], "--debug-iotrace")) {
 			minZX.getSDI8255()->setIotraceEnabled(true);
+		}
+		else if (0 == strcmp(argv[i], "--debug-fdd3000-linktrace")) {
+			minZX.getFdd3000()->setLinkTraceEnabled(true);
 		}
 	}
 
@@ -779,15 +957,17 @@ int main(int argc, char *argv[])
 				osdMenu.toggle();
 				continue;
 			}
-			// F5 ALSO opens the menu when closed (common "quick menu"
-			// convention elsewhere), but once open it's a context-specific
+			// F5 jumps straight into STORAGE (skips TopMenu entirely) --
+			// used to just reopen the menu identically to F1, which had
+			// gone stale as a second binding for the exact same thing
+			// (user, 2026-11-01). Still must NOT fire while the menu is
+			// already open: once open, F5 is a DIFFERENT, context-specific
 			// action key (pico-spec's own convention: F2 Reload/F5 Save/
-			// F8 Forget inside a file browser) -- so it must NOT be
-			// intercepted here while the menu is already open, or it could
-			// never reach osdMenu.handleKey() to do anything else.
+			// F8 Forget inside a file browser), handled entirely inside
+			// osdMenu.handleKey().
 			if (SDL_KEYDOWN == event.type && SDL_SCANCODE_F5 == event.key.keysym.scancode && !osdMenu.isOpen())
 			{
-				osdMenu.toggle();
+				osdMenu.openStorage();
 				continue;
 			}
 
@@ -837,11 +1017,35 @@ int main(int argc, char *argv[])
 			// from under the running program) -- same two-calls-together
 			// split main.cpp already uses for F11/Alt+F10 above, since
 			// Peripheral itself never calls back into MinZX directly.
-			if (SDL_KEYDOWN == event.type && SDL_SCANCODE_F9 == event.key.keysym.scancode)
+			// Gated on isEnabled() -- pressButton() itself already no-ops
+			// while disabled (see Dandanator.cpp), but minZX.reset() is a
+			// FULL machine reset and must not fire just because someone
+			// hit F9 with no cartridge "installed" at all.
+			if (SDL_KEYDOWN == event.type && SDL_SCANCODE_F9 == event.key.keysym.scancode
+				&& minZX.getDandanator()->isEnabled())
 			{
 				minZX.getDandanator()->pressButton();
 				minZX.reset();
 				std::cout << "DANDANATOR BUTTON" << std::endl;
+			}
+			// F8 = FDD3000's OWN physical reset button -- deliberately NOT
+			// minZX.reset() (unlike F9 above): see Fdd3000::stationReset()'s
+			// own comment, the real workflow is "swap which disk image is
+			// in drive A, THEN press this" to switch the station between
+			// booting TOS and CP/M, leaving the host Z80 (and whatever
+			// terminal/monitor program is running on it) untouched. Added
+			// as a direct hotkey because the OSD menu path to it (F1 >
+			// STORAGE > FDD3000 > down to the last row) is long enough to
+			// be annoying for something meant to be pressed often.
+			// Gated on isEnabled() -- same reasoning as F9/Dandanator above:
+			// a peripheral-specific button shouldn't do anything at all
+			// when that peripheral was never "installed" in the first
+			// place (user, 2026-11-01).
+			if (SDL_KEYDOWN == event.type && SDL_SCANCODE_F8 == event.key.keysym.scancode
+				&& minZX.getFdd3000()->isEnabled())
+			{
+				minZX.getFdd3000()->stationReset();
+				std::cout << "FDD3000 STATION RESET" << std::endl;
 			}
 		}
 

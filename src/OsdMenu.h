@@ -24,15 +24,32 @@ class MinZX;
 class OsdMenu
 {
 public:
-	explicit OsdMenu(MinZX* minZX) : minZX_(minZX) {}
+	explicit OsdMenu(MinZX* minZX);
 
 	bool isOpen() const { return mode_ != Mode::Closed; }
 
-	// F1 (and F5 when closed -- see main.cpp): opens to the top-level
-	// menu if closed, closes outright if already open (same effect as
-	// Esc at the top level). Reopening always starts back at the top --
-	// no "resume where I left off".
+	// The settings.json path peripheral/machine config screens read from
+	// and "RESET > SAVE CONFIG" writes to -- whatever --settings named,
+	// or "settings.json" (the repo-root template/reference file) if the
+	// process was started without one. main.cpp calls this once, right
+	// after parsing argv, before the main loop. A read-modify-write (not
+	// a from-scratch rebuild) -- see saveConfig() -- so this file's own
+	// "_description"/"_examples" fields survive every save.
+	void setSettingsPath(const std::string& path) { settingsPath_ = path; }
+
+	// F1: opens to the top-level menu if closed, closes outright if
+	// already open (same effect as Esc at the top level). Reopening
+	// always starts back at the top -- no "resume where I left off".
 	void toggle();
+
+	// F5 (main.cpp, only while closed -- see its own comment): jumps
+	// straight into STORAGE, skipping TopMenu entirely. Used to be a
+	// second "also opens the menu" binding identical to F1 (stale --
+	// user, 2026-11-01: "miałby być tylko dla storage"), now genuinely
+	// distinct from F1. F5's OTHER job (context-specific action inside
+	// an open menu, e.g. "save a copy locally" in the remote file
+	// browser) is unrelated and still lives entirely in handleKey().
+	void openStorage();
 
 	// One call per SDL_KEYDOWN while isOpen(). Up/Down move the cursor,
 	// Enter activates, Esc goes back a level (or closes, from the top).
@@ -51,8 +68,11 @@ public:
 	void render(uint8_t* pixels, int texW, int texH);
 
 private:
-	enum class Mode { Closed, TopMenu, StorageMenu, FileBrowser, NetworkMenu, RemoteList, ProtoPicker, TextInput, RemoteBrowser, ZxKeyboard };
-	enum class Action { None, LoadSnapshot, LoadTape };
+	enum class Mode { Closed, TopMenu, StorageMenu, FileBrowser, NetworkMenu, RemoteList, ProtoPicker, TextInput, RemoteBrowser, ZxKeyboard,
+	                   OptionsMenu, MachinePicker, ResetMenu, PeriphDetail };
+	enum class Action { None, LoadSnapshot, LoadTape,
+	                     LoadMultiface1Rom, LoadDivideRom, LoadDivideDisk, LoadDandanatorRom, LoadSdi8255Rom,
+	                     LoadFdd3000Rom, LoadFdd3000StationRom, LoadFdd3000Disk };
 	enum class Proto { Gopher, Tnfs };
 
 	MinZX* minZX_;
@@ -70,20 +90,95 @@ private:
 	std::vector<uint8_t> background_;
 	bool haveBackground_ = false;
 
-	// Top-level categories mirror pico-spec's own OSD (Volume/Storage/
-	// Audio/Video/Machine/Reset/Options/Debug/Hardware/Network/ZX
-	// Keyboard/Help/About, minus ESPectrum branding) -- but only the
-	// categories that actually correspond to something JASE has: no
-	// Volume/Audio/Video (no mixer), Options/Debug/Hardware (nothing to
-	// show), Help/About (not written yet). ZX Keyboard IS kept, as a
+	// Top-level categories mirror pico-spec's own real OSD structure
+	// (messages.h's MENU_MAIN: Volume/Storage/Audio/Video/Machine/Reset/
+	// Options/Debug/Hardware/Network/ZX Keyboard/Help/About -- read for
+	// this category breakdown only, no code copied, same policy as
+	// everywhere else in this GPL-adjacent reading) -- kept only the
+	// categories that correspond to something JASE actually has: no
+	// Volume/Audio/Video (no mixer), Debug/Hardware (ESP32-specific, no
+	// JASE analog), Help/About (not written yet). "Machine" is folded
+	// into Options (see below) rather than kept as its own top entry,
+	// since JASE's machine type is fixed at construction (MinZX::
+	// setMachine() must run before init()) -- unlike pico-spec, which
+	// really can hot-swap architecture, so there's nothing live for a
+	// standalone "Machine" entry to DO here beyond what Options already
+	// covers as a next-boot preference. ZX Keyboard IS kept, as a
 	// read-only Symbol Shift legend -- even with a real SDL keyboard,
 	// finding which PC key types which punctuation symbol isn't obvious
 	// (Pawel's point: the keyboard view helps locate multi-symbol keys).
+	//
+	// STORAGE folds in every disk/ROM-cartridge peripheral as its own
+	// sub-row, matching pico-spec's real Storage submenu shape exactly
+	// (Tape>/Betadisk>/esxDOS>/MB-02+>/Z-Controller>/IDE-HDD>/Snapshot>
+	// -- one row per storage-capable piece of hardware, not a separate
+	// top-level "Peripherals" category). FDD3000 specifically has no
+	// pico-spec analog at all (it's Fuse's own peripheral, not
+	// pico-spec's) -- its drive A-D row shape instead matches Fuse's own
+	// real `ui/options.dat` entries for it (Checkbox "FDD(3)000
+	// interface" + per-drive Combo rows), found while reading Fuse's GPL
+	// patch for the emulation itself (see Fdd3000.h) -- same "facts not
+	// code" policy once again.
 	int topSel_ = 0;
-	static const int kTopItemCount = 6; // Storage, Machine, Reset, Network, ZX Keyboard, Close
+	static const int kTopItemCount = 6; // Storage, Options, Reset, Network, ZX Keyboard, Close
 
 	int storageSel_ = 0;
-	static const int kStorageItemCount = 4; // Load Snapshot/Tape, Save SNA/Z80
+	static const int kStorageItemCount = 9; // Load Snapshot/Tape, Save SNA/Z80, then one row per disk/cartridge peripheral
+
+	// ---- OPTIONS (next-boot machine preference + live-applicable toggles) --
+
+	// Preferred machine/turbosound are next-BOOT preferences, never
+	// applied live (MinZX::setMachine()/setTurboSound() must run before
+	// init() -- see their own comments) -- shadowed here, seeded from
+	// MinZX's actual current state at construction (so a value passed
+	// via --machine/--turbosound already shows correctly before the user
+	// ever touches this menu), only ever changed by the picker/toggle
+	// below, and written out by saveConfig() -- never applied to the
+	// running machine. Timex Hires/PC Keys/Tape Fastload DO have live
+	// setters (MinZX::setTimexVideo()/setPcKeys()/setTapeFastload(), see
+	// their own comments -- callable any time) and need no shadow: the
+	// Options screen toggles them immediately AND reads them back
+	// straight from MinZX for both display and saveConfig().
+	int optionsSel_ = 0;
+	static const int kOptionsItemCount = 5; // Preferred Machine, Turbosound, Timex Hires, PC Keys, Tape Fastload
+	int prefMachineIdx_ = 0; // 0=48k, 1=tc2048, 2=128k
+	bool prefTurboSound_ = false;
+	int machinePickerSel_ = 0;
+
+	int resetSel_ = 0;
+	static const int kResetItemCount = 2; // Reset, Save Config
+
+	// ---- peripheral detail screens (reached from Storage or Network) ----
+
+	// One id per peripheral with a detail screen; ZiFi (5) is reached
+	// from NETWORK, not STORAGE (it's not a disk/cartridge device -- see
+	// class comment), everything else (0-4) from STORAGE.
+	enum class PeriphId { Multiface1, DivIde, Dandanator, Sdi8255, Fdd3000, ZiFi };
+	PeriphId detailPeriphId_ = PeriphId::Multiface1;
+	int periphDetailSel_ = 0;
+	int fdd3000DriveSlot_ = 0; // which of A-D the file browser is currently targeting, see openPeriphFileBrowser()
+
+	void openPeriphDetail(PeriphId id);
+	int periphDetailRowCount(PeriphId id) const;
+	void periphDetailRows(PeriphId id, std::vector<std::string>& rows) const;
+	void activatePeriphDetailRow(PeriphId id, int row);
+	void openPeriphFileBrowser(Action action, int driveSlot = 0);
+
+	void activateOptions();   // Enter in OptionsMenu
+	void activateMachinePicker(); // Enter in MachinePicker
+	void activateReset();     // Enter in ResetMenu
+
+	// Settings.json path (see setSettingsPath()) and the read-modify-
+	// write that persists ALL current config into it: machine.{machine,
+	// turbosound,timexHires,pcKeys}, media.tapeFastload, and one
+	// peripherals.<name> object per peripheral (enabled + whatever
+	// paths/bridge targets it has -- read back from each peripheral's
+	// own getRomPath()/getDiskPath()/getBridgeHost()/getBridgePort(), see
+	// those classes). A plain nlohmann::json read+merge+dump(2), not a
+	// from-scratch rebuild, so unrelated keys (_description, _examples)
+	// survive untouched. Sets status_ with the result either way.
+	std::string settingsPath_ = "settings.json";
+	void saveConfig();
 
 	Action browseAction_ = Action::None;
 	std::string cwd_ = ".";
@@ -113,7 +208,6 @@ private:
 	void rescan();
 	void activateTop();
 	void activateStorage(); // Enter in StorageMenu
-	void showMachineInfo(); // "MACHINE" row -- read-only (JASE's machine type is fixed at startup, see MinZX::setMachine())
 	// "ZX KEYBOARD" row -- not pico-spec's bitmap keyboard overlay image
 	// (that's a copyrighted/hand-drawn asset, not something to copy), but
 	// a text table of the same information that actually matters day to
@@ -162,11 +256,15 @@ private:
 
 	void loadRemotes();
 	void saveRemotes() const;
-	int networkMenuItemCount() const { return 2; } // "REMOTE", "ZIFI RECONNECT"
+	int networkMenuItemCount() const { return 2; } // "REMOTE", "ZIFI"
 
 	// Re-dials ZiFi's last --zifi target -- lets killing/restarting the
 	// bridge or virtual_esp01 mock on the other end be recovered from
 	// without restarting JASE. Sets status_/statusOk_ with the result.
+	// Exposed both as ZiFi's own detail-screen "RECONNECT" row and kept
+	// as a standalone method (not folded into activatePeriphDetailRow())
+	// since it's also reachable with zero setup, unlike every other
+	// peripheral's rows.
 	void reconnectZiFi();
 
 	// Add-Remote wizard: ProtoPicker picks pendingProto_, then TextInput
@@ -183,6 +281,16 @@ private:
 	void beginAddRemote();
 	void advanceTextField(); // called on Enter in TextInput mode
 	void startTextField(TextField f);
+
+	// Mode::TextInput is also reused for every peripheral/ZiFi "HOST:PORT"
+	// field (Multiply's bridge, SDI8255's bridge, ZiFi itself) -- a single
+	// one-shot field (not the 4-step Add-Remote wizard above), entered
+	// via startHostPortField() and completed by the SAME advanceTextField()
+	// Enter handler, branching on textPurpose_ at the top. Esc from this
+	// purpose returns to PeriphDetail, not RemoteList (see handleKey()).
+	enum class TextPurpose { AddRemote, PeriphHostPort };
+	TextPurpose textPurpose_ = TextPurpose::AddRemote;
+	void startHostPortField(const std::string& label, const std::string& initial);
 
 	// The live connection, if any -- at most one of these is meaningful
 	// at a time, selected by activeProto_. Concrete members (not a

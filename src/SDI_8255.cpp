@@ -182,6 +182,7 @@ bool SDI_8255::loadRom(const char* path)
 		return false;
 	}
 	romLoaded_ = true;
+	romPath_ = path;
 	printf("SDI_8255::loadRom: loaded SDI103J ROM (bank 0) from %s\n", path);
 	return true;
 }

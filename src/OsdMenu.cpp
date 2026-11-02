@@ -3,6 +3,13 @@
 #include "minzx.h"
 #include "filemgr.h"
 #include "ZiFi.h"
+#include "Multiface.h"
+#include "DivIde.h"
+#include "Dandanator.h"
+#include "Multiply.h"
+#include "SDI_8255.h"
+#include "Fdd3000.h"
+#include <nlohmann/json.hpp>
 #include <filesystem>
 #include <algorithm>
 #include <cstdio>
@@ -14,10 +21,33 @@
 #include <unistd.h>
 
 namespace fs = std::filesystem;
+// ordered_json, not plain json -- saveConfig() read-modify-writes the
+// user's own settings.json, and plain nlohmann::json re-serializes
+// object keys alphabetically (its underlying std::map), which would
+// needlessly reshuffle every key on the very first save even where
+// nothing actually changed. ordered_json preserves insertion order
+// (existing keys keep their original position; saveConfig()'s own new
+// assignments land in the order it makes them), keeping a save's diff
+// limited to what actually changed.
+using json = nlohmann::ordered_json;
 
 // std::min<int>(..., kFileRows) binds by reference -- needs an out-of-line
 // definition for the static const int, not just the in-class initializer.
 const int OsdMenu::kFileRows;
+
+OsdMenu::OsdMenu(MinZX* minZX) : minZX_(minZX)
+{
+	// Seed the next-boot shadow preferences from MinZX's actual current
+	// state (see OsdMenu.h's own comment) -- so a value already set via
+	// --machine/--turbosound shows correctly the first time OPTIONS is
+	// opened, not just after the user picks it through the menu.
+	switch (minZX_->getMachine()) {
+		case MachineType::TimexTC2048:  prefMachineIdx_ = 1; break;
+		case MachineType::Spectrum128K: prefMachineIdx_ = 2; break;
+		default:                        prefMachineIdx_ = 0; break; // Spectrum48K
+	}
+	prefTurboSound_ = minZX_->isTurboSound();
+}
 
 static bool hasExt(const std::string& name, const char* ext)
 {
@@ -38,6 +68,15 @@ void OsdMenu::toggle()
 	}
 }
 
+void OsdMenu::openStorage()
+{
+	// Only meaningful from Closed -- main.cpp's own F5 handler already
+	// guards on !isOpen(), same as toggle()'s F1 caller does.
+	mode_ = Mode::StorageMenu;
+	storageSel_ = 0;
+	topSel_ = 0; // so Esc-ing back out of Storage lands on TopMenu's first row, not a stale cursor
+}
+
 void OsdMenu::setStatus(const std::string& s, bool ok)
 {
 	status_ = s;
@@ -53,6 +92,14 @@ bool OsdMenu::matchesFilter(const std::string& name) const
 	{
 		case Action::LoadSnapshot: return hasExt(name, ".sna") || hasExt(name, ".z80");
 		case Action::LoadTape:     return hasExt(name, ".tap") || hasExt(name, ".tzx");
+		case Action::LoadMultiface1Rom:
+		case Action::LoadDandanatorRom:
+		case Action::LoadSdi8255Rom:
+		case Action::LoadFdd3000Rom:
+		case Action::LoadFdd3000StationRom:
+		case Action::LoadDivideRom:  return hasExt(name, ".rom") || hasExt(name, ".bin");
+		case Action::LoadFdd3000Disk: return hasExt(name, ".dsk");
+		case Action::LoadDivideDisk: return hasExt(name, ".hdf") || hasExt(name, ".img") || hasExt(name, ".raw");
 		default: return true;
 	}
 }
@@ -119,8 +166,8 @@ void OsdMenu::activateTop()
 	switch (topSel_)
 	{
 		case 0: mode_ = Mode::StorageMenu; storageSel_ = 0; break;
-		case 1: showMachineInfo(); break;
-		case 2: minZX_->reset(); close(); break;
+		case 1: mode_ = Mode::OptionsMenu; optionsSel_ = 0; break;
+		case 2: mode_ = Mode::ResetMenu; resetSel_ = 0; break;
 		case 3: activateNetwork(); break;
 		case 4: mode_ = Mode::ZxKeyboard; break;
 		case 5: close(); break;
@@ -135,19 +182,44 @@ void OsdMenu::activateStorage()
 		case 1: openBrowser(Action::LoadTape); break;
 		case 2: doSave(false); break;
 		case 3: doSave(true); break;
+		case 4: openPeriphDetail(PeriphId::Multiface1); break;
+		case 5: openPeriphDetail(PeriphId::DivIde); break;
+		case 6: openPeriphDetail(PeriphId::Dandanator); break;
+		case 7: openPeriphDetail(PeriphId::Sdi8255); break;
+		case 8: openPeriphDetail(PeriphId::Fdd3000); break;
 	}
 }
 
-void OsdMenu::showMachineInfo()
+// ---- OPTIONS / MACHINE PICKER / RESET ----------------------------------
+
+static const char* kMachineNames[3] = { "48K", "TC2048", "128K" };
+static const char* kMachineSettingsValues[3] = { "48k", "tc2048", "128k" };
+
+void OsdMenu::activateOptions()
 {
-	const char* name = "48K";
-	switch (minZX_->getMachine())
+	switch (optionsSel_)
 	{
-		case MachineType::Spectrum128K: name = "128K"; break;
-		case MachineType::TimexTC2048:  name = "TC2048"; break;
-		default: break; // Spectrum48K
+		case 0: mode_ = Mode::MachinePicker; machinePickerSel_ = prefMachineIdx_; break;
+		case 1: prefTurboSound_ = !prefTurboSound_; break; // next-boot only, see OsdMenu.h
+		case 2: minZX_->setTimexVideo(!minZX_->isTimexVideo()); break;    // live
+		case 3: minZX_->setPcKeys(!minZX_->isPcKeys()); break;             // live
+		case 4: minZX_->setTapeFastload(!minZX_->isTapeFastload()); break; // live
 	}
-	setStatus(std::string("Machine: ") + name + " (fixed at startup -- see --machine)", true);
+}
+
+void OsdMenu::activateMachinePicker()
+{
+	prefMachineIdx_ = machinePickerSel_;
+	mode_ = Mode::OptionsMenu;
+}
+
+void OsdMenu::activateReset()
+{
+	switch (resetSel_)
+	{
+		case 0: minZX_->reset(); close(); break;
+		case 1: saveConfig(); break; // stays in ResetMenu -- see its own comment
+	}
 }
 
 void OsdMenu::activateFile()
@@ -171,6 +243,56 @@ void OsdMenu::activateFile()
 	}
 
 	std::string fullPath = (fs::path(cwd_) / e.name).string();
+
+	// Peripheral ROM/disk pickers: load into the peripheral, enable it if
+	// it's a ROM (same "implies enable" convention main.cpp's own CLI
+	// flags use), and return to that peripheral's detail screen instead
+	// of closing the whole menu -- there's usually more to set (e.g.
+	// FDD3000's other 3 drives) right after picking one file.
+	if (browseAction_ == Action::LoadMultiface1Rom || browseAction_ == Action::LoadDivideRom ||
+	    browseAction_ == Action::LoadDivideDisk || browseAction_ == Action::LoadDandanatorRom ||
+	    browseAction_ == Action::LoadSdi8255Rom || browseAction_ == Action::LoadFdd3000Rom ||
+	    browseAction_ == Action::LoadFdd3000StationRom || browseAction_ == Action::LoadFdd3000Disk)
+	{
+		bool ok = false;
+		switch (browseAction_)
+		{
+			case Action::LoadMultiface1Rom:
+				ok = minZX_->getMultiface()->loadRom(fullPath.c_str());
+				if (ok) minZX_->getMultiface()->setEnabled(true);
+				break;
+			case Action::LoadDivideRom:
+				ok = minZX_->getDivIde()->loadRom(fullPath.c_str());
+				if (ok) minZX_->getDivIde()->setEnabled(true);
+				break;
+			case Action::LoadDivideDisk:
+				ok = minZX_->getDivIde()->insertDisk(fullPath.c_str());
+				break;
+			case Action::LoadDandanatorRom:
+				ok = minZX_->getDandanator()->loadRom(fullPath.c_str());
+				if (ok) minZX_->getDandanator()->setEnabled(true);
+				break;
+			case Action::LoadSdi8255Rom:
+				ok = minZX_->getSDI8255()->loadRom(fullPath.c_str());
+				if (ok) minZX_->getSDI8255()->setEnabled(true);
+				break;
+			case Action::LoadFdd3000Rom:
+				ok = minZX_->getFdd3000()->loadInterfaceRom(fullPath.c_str());
+				if (ok) minZX_->getFdd3000()->setEnabled(true);
+				break;
+			case Action::LoadFdd3000StationRom:
+				ok = minZX_->getFdd3000()->loadStationBootRom(fullPath.c_str());
+				break;
+			case Action::LoadFdd3000Disk:
+				ok = minZX_->getFdd3000()->insertDisk(fdd3000DriveSlot_, fullPath.c_str());
+				break;
+			default: break;
+		}
+		setStatus(ok ? (std::string("Loaded: ") + e.name) : (std::string("Load FAILED: ") + e.name), ok);
+		mode_ = Mode::PeriphDetail;
+		return;
+	}
+
 	FileMgr fileMgr;
 	bool ok = false;
 	if (browseAction_ == Action::LoadSnapshot)
@@ -184,6 +306,233 @@ void OsdMenu::activateFile()
 		close(); // load succeeded -- resume play immediately, same as a real emulator's file menu
 	else
 		setStatus(std::string("Load FAILED: ") + e.name, false);
+}
+
+// ---- Peripheral detail screens (Storage > */Network > ZiFi) -----------
+
+static std::string pathOrNone(const std::string& p) { return p.empty() ? std::string("(not set)") : p; }
+static std::string rawHostPort(const std::string& h, int p) { return h.empty() ? std::string() : (h + ":" + std::to_string(p)); }
+static std::string hostPortOrNone(const std::string& h, int p) { std::string r = rawHostPort(h, p); return r.empty() ? std::string("(not set)") : r; }
+
+void OsdMenu::openPeriphDetail(PeriphId id)
+{
+	detailPeriphId_ = id;
+	periphDetailSel_ = 0;
+	mode_ = Mode::PeriphDetail;
+}
+
+int OsdMenu::periphDetailRowCount(PeriphId id) const
+{
+	switch (id)
+	{
+		case PeriphId::Multiface1: return 2; // Enabled, ROM
+		case PeriphId::DivIde:     return 3; // Enabled, ROM, Disk
+		case PeriphId::Dandanator: return 4; // Enabled, ROM, Multiply Enabled, Multiply Bridge
+		case PeriphId::Sdi8255:    return 3; // Enabled, ROM, Bridge
+		case PeriphId::Fdd3000:    return 8; // Enabled, ROM, Station ROM, Disk A-D, Reset FDD3000
+		case PeriphId::ZiFi:       return 2; // Host:Port, Reconnect
+	}
+	return 0;
+}
+
+void OsdMenu::periphDetailRows(PeriphId id, std::vector<std::string>& rows) const
+{
+	rows.clear();
+	switch (id)
+	{
+		case PeriphId::Multiface1:
+		{
+			Multiface* p = minZX_->getMultiface();
+			rows.push_back(std::string("ENABLED: ") + (p->isEnabled() ? "YES" : "NO"));
+			rows.push_back("ROM: " + pathOrNone(p->getRomPath()));
+			break;
+		}
+		case PeriphId::DivIde:
+		{
+			DivIde* p = minZX_->getDivIde();
+			rows.push_back(std::string("ENABLED: ") + (p->isEnabled() ? "YES" : "NO"));
+			rows.push_back("ROM: " + pathOrNone(p->getRomPath()));
+			rows.push_back("DISK: " + pathOrNone(p->getDiskPath()));
+			break;
+		}
+		case PeriphId::Dandanator:
+		{
+			Dandanator* p = minZX_->getDandanator();
+			Multiply* m = minZX_->getMultiply();
+			rows.push_back(std::string("ENABLED: ") + (p->isEnabled() ? "YES" : "NO"));
+			rows.push_back("ROM: " + pathOrNone(p->getRomPath()));
+			rows.push_back(std::string("MULTIPLY: ") + (m->isEnabled() ? "YES" : "NO"));
+			rows.push_back("MULTIPLY BRIDGE: " + hostPortOrNone(m->getBridgeHost(), m->getBridgePort()));
+			break;
+		}
+		case PeriphId::Sdi8255:
+		{
+			SDI_8255* p = minZX_->getSDI8255();
+			rows.push_back(std::string("ENABLED: ") + (p->isEnabled() ? "YES" : "NO"));
+			rows.push_back("ROM: " + pathOrNone(p->getRomPath()));
+			rows.push_back("BRIDGE: " + hostPortOrNone(p->getBridgeHost(), p->getBridgePort()));
+			break;
+		}
+		case PeriphId::Fdd3000:
+		{
+			Fdd3000* p = minZX_->getFdd3000();
+			rows.push_back(std::string("ENABLED: ") + (p->isEnabled() ? "YES" : "NO"));
+			rows.push_back("ROM: " + pathOrNone(p->getRomPath()));
+			// SEPARATE real chip from the interface ROM above -- see
+			// Fdd3000::loadStationBootRom()'s own comment.
+			rows.push_back("STATION ROM: " + pathOrNone(p->getStationRomPath()));
+			static const char* kDriveLetter[4] = { "A", "B", "C", "D" };
+			for (int i = 0; i < 4; i++)
+				rows.push_back(std::string("DISK ") + kDriveLetter[i] + ": " + pathOrNone(p->getDiskPath(i)));
+			// FDD3000's OWN physical reset button, separate from F11/
+			// MinZX::reset() -- see Fdd3000::stationReset()'s own
+			// comment: the real workflow is "swap which disk image is in
+			// drive A, THEN press this", not the main machine reset. Also
+			// bound directly to F8 (main.cpp) since this menu path is
+			// long for something meant to be pressed often -- shown here
+			// so it's discoverable from inside the menu too.
+			rows.push_back("RESET FDD3000 (F8)");
+			break;
+		}
+		case PeriphId::ZiFi:
+		{
+			ZiFi* z = minZX_->getZiFi();
+			rows.push_back("HOST:PORT: " + hostPortOrNone(z->getLastHost(), z->getLastPort()));
+			rows.push_back("RECONNECT");
+			break;
+		}
+	}
+}
+
+void OsdMenu::openPeriphFileBrowser(Action action, int driveSlot)
+{
+	fdd3000DriveSlot_ = driveSlot;
+	openBrowser(action);
+}
+
+void OsdMenu::activatePeriphDetailRow(PeriphId id, int row)
+{
+	switch (id)
+	{
+		case PeriphId::Multiface1:
+		{
+			Multiface* p = minZX_->getMultiface();
+			if (row == 0) p->setEnabled(!p->isEnabled());
+			else if (row == 1) openPeriphFileBrowser(Action::LoadMultiface1Rom);
+			break;
+		}
+		case PeriphId::DivIde:
+		{
+			DivIde* p = minZX_->getDivIde();
+			if (row == 0) p->setEnabled(!p->isEnabled());
+			else if (row == 1) openPeriphFileBrowser(Action::LoadDivideRom);
+			else if (row == 2) openPeriphFileBrowser(Action::LoadDivideDisk);
+			break;
+		}
+		case PeriphId::Dandanator:
+		{
+			Dandanator* p = minZX_->getDandanator();
+			Multiply* m = minZX_->getMultiply();
+			if (row == 0) p->setEnabled(!p->isEnabled());
+			else if (row == 1) openPeriphFileBrowser(Action::LoadDandanatorRom);
+			else if (row == 2) m->setEnabled(!m->isEnabled());
+			else if (row == 3) startHostPortField("MULTIPLY BRIDGE HOST:PORT", rawHostPort(m->getBridgeHost(), m->getBridgePort()));
+			break;
+		}
+		case PeriphId::Sdi8255:
+		{
+			SDI_8255* p = minZX_->getSDI8255();
+			if (row == 0) p->setEnabled(!p->isEnabled());
+			else if (row == 1) openPeriphFileBrowser(Action::LoadSdi8255Rom);
+			else if (row == 2) startHostPortField("SDI8255 BRIDGE HOST:PORT", rawHostPort(p->getBridgeHost(), p->getBridgePort()));
+			break;
+		}
+		case PeriphId::Fdd3000:
+		{
+			Fdd3000* p = minZX_->getFdd3000();
+			if (row == 0) p->setEnabled(!p->isEnabled());
+			else if (row == 1) openPeriphFileBrowser(Action::LoadFdd3000Rom);
+			else if (row == 2) openPeriphFileBrowser(Action::LoadFdd3000StationRom);
+			else if (row >= 3 && row <= 6) openPeriphFileBrowser(Action::LoadFdd3000Disk, row - 3);
+			else if (row == 7) { p->stationReset(); setStatus("FDD3000 station reset", true); }
+			break;
+		}
+		case PeriphId::ZiFi:
+		{
+			ZiFi* z = minZX_->getZiFi();
+			if (row == 0) startHostPortField("ZIFI HOST:PORT", rawHostPort(z->getLastHost(), z->getLastPort()));
+			else if (row == 1) reconnectZiFi();
+			break;
+		}
+	}
+}
+
+void OsdMenu::startHostPortField(const std::string& label, const std::string& initial)
+{
+	textPurpose_ = TextPurpose::PeriphHostPort;
+	textLabel_ = label;
+	textBuf_ = initial;
+	mode_ = Mode::TextInput;
+}
+
+// ---- RESET > SAVE CONFIG: settings.json read-modify-write --------------
+
+static json jopt(const std::string& s) { return s.empty() ? json(nullptr) : json(s); }
+static json joptPort(int v) { return v == 0 ? json(nullptr) : json(v); }
+
+void OsdMenu::saveConfig()
+{
+	json j;
+	std::ifstream in(settingsPath_);
+	if (in) { try { in >> j; } catch (...) { j = json::object(); } }
+	in.close();
+
+	j["machine"]["machine"] = kMachineSettingsValues[prefMachineIdx_];
+	j["machine"]["turbosound"] = prefTurboSound_;
+	j["machine"]["timexHires"] = minZX_->isTimexVideo();
+	j["machine"]["pcKeys"] = minZX_->isPcKeys();
+	j["media"]["tapeFastload"] = minZX_->isTapeFastload();
+
+	Multiface* mf = minZX_->getMultiface();
+	j["peripherals"]["multiface1"]["enabled"] = mf->isEnabled();
+	j["peripherals"]["multiface1"]["rom"] = jopt(mf->getRomPath());
+
+	DivIde* di = minZX_->getDivIde();
+	j["peripherals"]["divide"]["enabled"] = di->isEnabled();
+	j["peripherals"]["divide"]["rom"] = jopt(di->getRomPath());
+	j["peripherals"]["divide"]["disk"] = jopt(di->getDiskPath());
+
+	Dandanator* da = minZX_->getDandanator();
+	j["peripherals"]["dandanator"]["enabled"] = da->isEnabled();
+	j["peripherals"]["dandanator"]["rom"] = jopt(da->getRomPath());
+
+	Multiply* mu = minZX_->getMultiply();
+	j["peripherals"]["multiply"]["enabled"] = mu->isEnabled();
+	j["peripherals"]["multiply"]["bridgeHost"] = jopt(mu->getBridgeHost());
+	j["peripherals"]["multiply"]["bridgePort"] = joptPort(mu->getBridgePort());
+
+	SDI_8255* sdi = minZX_->getSDI8255();
+	j["peripherals"]["sdi8255"]["enabled"] = sdi->isEnabled();
+	j["peripherals"]["sdi8255"]["rom"] = jopt(sdi->getRomPath());
+	j["peripherals"]["sdi8255"]["bridgeHost"] = jopt(sdi->getBridgeHost());
+	j["peripherals"]["sdi8255"]["bridgePort"] = joptPort(sdi->getBridgePort());
+
+	Fdd3000* fd = minZX_->getFdd3000();
+	j["peripherals"]["fdd3000"]["enabled"] = fd->isEnabled();
+	j["peripherals"]["fdd3000"]["rom"] = jopt(fd->getRomPath());
+	j["peripherals"]["fdd3000"]["stationRom"] = jopt(fd->getStationRomPath());
+	static const char* kDiskKeys[4] = { "diskA", "diskB", "diskC", "diskD" };
+	for (int i = 0; i < 4; i++)
+		j["peripherals"]["fdd3000"][kDiskKeys[i]] = jopt(fd->getDiskPath(i));
+
+	ZiFi* zf = minZX_->getZiFi();
+	j["peripherals"]["zifi"]["host"] = jopt(zf->getLastHost());
+	j["peripherals"]["zifi"]["port"] = joptPort(zf->getLastPort());
+
+	std::ofstream out(settingsPath_, std::ios::trunc);
+	if (!out) { setStatus("Save FAILED: " + settingsPath_, false); return; }
+	out << j.dump(2) << "\n";
+	setStatus("Saved to " + settingsPath_, true);
 }
 
 // ---- NETWORK -> REMOTE (Gopher/TNFS) -----------------------------------
@@ -447,6 +796,7 @@ void OsdMenu::activateProto()
 void OsdMenu::startTextField(TextField f)
 {
 	pendingField_ = f;
+	textPurpose_ = TextPurpose::AddRemote;
 	mode_ = Mode::TextInput;
 	switch (f)
 	{
@@ -468,6 +818,29 @@ void OsdMenu::startTextField(TextField f)
 
 void OsdMenu::advanceTextField()
 {
+	if (textPurpose_ == TextPurpose::PeriphHostPort)
+	{
+		size_t colon = textBuf_.rfind(':');
+		if (colon == std::string::npos || colon == 0 || colon == textBuf_.size() - 1)
+		{
+			setStatus("Expected HOST:PORT", false);
+			return;
+		}
+		std::string host = textBuf_.substr(0, colon);
+		int port = atoi(textBuf_.substr(colon + 1).c_str());
+		bool ok = false;
+		switch (detailPeriphId_)
+		{
+			case PeriphId::ZiFi:       ok = minZX_->getZiFi()->connectTo(host.c_str(), port); break;
+			case PeriphId::Dandanator: ok = minZX_->getMultiply()->connectTo(host.c_str(), port); break;
+			case PeriphId::Sdi8255:    ok = minZX_->getSDI8255()->connectBridge(host.c_str(), port); break;
+			default: break;
+		}
+		setStatus(ok ? "Connected" : "Connect FAILED", ok);
+		mode_ = Mode::PeriphDetail;
+		return;
+	}
+
 	switch (pendingField_)
 	{
 		case TextField::Host:
@@ -515,13 +888,31 @@ void OsdMenu::handleKey(SDL_Scancode sc)
 		switch (mode_)
 		{
 			case Mode::StorageMenu:   mode_ = Mode::TopMenu; break;
-			case Mode::FileBrowser:   mode_ = Mode::StorageMenu; break;
+			case Mode::FileBrowser:
+				// Peripheral ROM/disk pickers return to that peripheral's
+				// own detail screen, same as a successful load does (see
+				// activateFile()) -- everything else (Snapshot/Tape) goes
+				// back to StorageMenu as before.
+				mode_ = (browseAction_ == Action::LoadSnapshot || browseAction_ == Action::LoadTape)
+				      ? Mode::StorageMenu : Mode::PeriphDetail;
+				break;
 			case Mode::NetworkMenu:   mode_ = Mode::TopMenu; break;
 			case Mode::RemoteList:    mode_ = Mode::NetworkMenu; break;
 			case Mode::ProtoPicker:   mode_ = Mode::RemoteList; break;
-			case Mode::TextInput:     mode_ = Mode::RemoteList; break; // abandons the whole add-remote flow
+			case Mode::TextInput:
+				// AddRemote abandons the whole wizard back to RemoteList;
+				// a peripheral HOST:PORT field just goes back to that
+				// peripheral's own detail screen (see startHostPortField()).
+				mode_ = (textPurpose_ == TextPurpose::PeriphHostPort) ? Mode::PeriphDetail : Mode::RemoteList;
+				break;
 			case Mode::RemoteBrowser: remoteDisconnect(); mode_ = Mode::RemoteList; break;
 			case Mode::ZxKeyboard:    mode_ = Mode::TopMenu; break;
+			case Mode::OptionsMenu:   mode_ = Mode::TopMenu; break;
+			case Mode::MachinePicker: mode_ = Mode::OptionsMenu; break;
+			case Mode::ResetMenu:     mode_ = Mode::TopMenu; break;
+			case Mode::PeriphDetail:
+				mode_ = (detailPeriphId_ == PeriphId::ZiFi) ? Mode::NetworkMenu : Mode::StorageMenu;
+				break;
 			default:                  close(); break; // TopMenu
 		}
 		return;
@@ -569,8 +960,45 @@ void OsdMenu::handleKey(SDL_Scancode sc)
 		else if (sc == SDL_SCANCODE_RETURN || sc == SDL_SCANCODE_KP_ENTER)
 		{
 			if (netSel_ == 0) { loadRemotes(); mode_ = Mode::RemoteList; remoteSel_ = 0; }
-			else if (netSel_ == 1) reconnectZiFi();
+			else if (netSel_ == 1) openPeriphDetail(PeriphId::ZiFi);
 		}
+	}
+	else if (mode_ == Mode::OptionsMenu)
+	{
+		if (sc == SDL_SCANCODE_UP)
+			optionsSel_ = (optionsSel_ - 1 + kOptionsItemCount) % kOptionsItemCount;
+		else if (sc == SDL_SCANCODE_DOWN)
+			optionsSel_ = (optionsSel_ + 1) % kOptionsItemCount;
+		else if (sc == SDL_SCANCODE_RETURN || sc == SDL_SCANCODE_KP_ENTER)
+			activateOptions();
+	}
+	else if (mode_ == Mode::MachinePicker)
+	{
+		if (sc == SDL_SCANCODE_UP)
+			machinePickerSel_ = (machinePickerSel_ - 1 + 3) % 3;
+		else if (sc == SDL_SCANCODE_DOWN)
+			machinePickerSel_ = (machinePickerSel_ + 1) % 3;
+		else if (sc == SDL_SCANCODE_RETURN || sc == SDL_SCANCODE_KP_ENTER)
+			activateMachinePicker();
+	}
+	else if (mode_ == Mode::ResetMenu)
+	{
+		if (sc == SDL_SCANCODE_UP)
+			resetSel_ = (resetSel_ - 1 + kResetItemCount) % kResetItemCount;
+		else if (sc == SDL_SCANCODE_DOWN)
+			resetSel_ = (resetSel_ + 1) % kResetItemCount;
+		else if (sc == SDL_SCANCODE_RETURN || sc == SDL_SCANCODE_KP_ENTER)
+			activateReset();
+	}
+	else if (mode_ == Mode::PeriphDetail)
+	{
+		int n = periphDetailRowCount(detailPeriphId_);
+		if (sc == SDL_SCANCODE_UP)
+			periphDetailSel_ = (periphDetailSel_ - 1 + n) % n;
+		else if (sc == SDL_SCANCODE_DOWN)
+			periphDetailSel_ = (periphDetailSel_ + 1) % n;
+		else if (sc == SDL_SCANCODE_RETURN || sc == SDL_SCANCODE_KP_ENTER)
+			activatePeriphDetailRow(detailPeriphId_, periphDetailSel_);
 	}
 	else if (mode_ == Mode::RemoteList)
 	{
@@ -810,7 +1238,7 @@ void OsdMenu::render(uint8_t* pixels, int texW, int texH)
 
 	if (mode_ == Mode::NetworkMenu)
 	{
-		renderSimpleList(pixels, texW, texH, "NETWORK", { "REMOTE", "ZIFI RECONNECT" }, netSel_,
+		renderSimpleList(pixels, texW, texH, "NETWORK", { "REMOTE >", "ZIFI >" }, netSel_,
 			statusFramesLeft_ > 0 ? status_ : "", statusOk_);
 		return;
 	}
@@ -843,13 +1271,14 @@ void OsdMenu::render(uint8_t* pixels, int texW, int texH)
 	if (mode_ == Mode::TextInput)
 	{
 		std::string line = textLabel_ + ": " + textBuf_ + "_";
-		renderSimpleList(pixels, texW, texH, "ADD REMOTE", { line }, -1);
+		const char* title = (textPurpose_ == TextPurpose::PeriphHostPort) ? "CONNECT" : "ADD REMOTE";
+		renderSimpleList(pixels, texW, texH, title, { line }, -1);
 		return;
 	}
 	if (mode_ == Mode::TopMenu)
 	{
 		static const char* kItems[kTopItemCount] = {
-			"STORAGE", "MACHINE", "RESET", "NETWORK", "ZX KEYBOARD", "CLOSE MENU",
+			"STORAGE >", "OPTIONS >", "RESET >", "NETWORK >", "ZX KEYBOARD", "CLOSE MENU",
 		};
 		renderSimpleList(pixels, texW, texH, "JASE MENU",
 			std::vector<std::string>(kItems, kItems + kTopItemCount), topSel_,
@@ -863,9 +1292,49 @@ void OsdMenu::render(uint8_t* pixels, int texW, int texH)
 			"LOAD TAPE (.TAP/.TZX)",
 			"SAVE SNAPSHOT AS .SNA",
 			"SAVE SNAPSHOT AS .Z80",
+			"MULTIFACE ONE >",
+			"DIVIDE >",
+			"DANDANATOR >",
+			"SDI8255 >",
+			"FDD3000 >",
 		};
 		renderSimpleList(pixels, texW, texH, "STORAGE",
 			std::vector<std::string>(kItems, kItems + kStorageItemCount), storageSel_,
+			statusFramesLeft_ > 0 ? status_ : "", statusOk_);
+		return;
+	}
+	if (mode_ == Mode::OptionsMenu)
+	{
+		std::vector<std::string> items = {
+			std::string("PREFERRED MACHINE: ") + kMachineNames[prefMachineIdx_] + " >",
+			std::string("TURBOSOUND (RESTART): ") + (prefTurboSound_ ? "ON" : "OFF"),
+			std::string("TIMEX HIRES: ") + (minZX_->isTimexVideo() ? "ON" : "OFF"),
+			std::string("PC KEYS: ") + (minZX_->isPcKeys() ? "ON" : "OFF"),
+			std::string("TAPE FASTLOAD: ") + (minZX_->isTapeFastload() ? "ON" : "OFF"),
+		};
+		renderSimpleList(pixels, texW, texH, "OPTIONS", items, optionsSel_,
+			statusFramesLeft_ > 0 ? status_ : "", statusOk_);
+		return;
+	}
+	if (mode_ == Mode::MachinePicker)
+	{
+		renderSimpleList(pixels, texW, texH, "PREFERRED MACHINE (RESTART)",
+			{ kMachineNames[0], kMachineNames[1], kMachineNames[2] }, machinePickerSel_);
+		return;
+	}
+	if (mode_ == Mode::ResetMenu)
+	{
+		renderSimpleList(pixels, texW, texH, "RESET",
+			{ "RESET (F11)", "SAVE CONFIG" }, resetSel_,
+			statusFramesLeft_ > 0 ? status_ : "", statusOk_);
+		return;
+	}
+	if (mode_ == Mode::PeriphDetail)
+	{
+		std::vector<std::string> items;
+		periphDetailRows(detailPeriphId_, items);
+		static const char* kTitles[] = { "MULTIFACE ONE", "DIVIDE", "DANDANATOR", "SDI8255", "FDD3000", "ZIFI" };
+		renderSimpleList(pixels, texW, texH, kTitles[(int)detailPeriphId_], items, periphDetailSel_,
 			statusFramesLeft_ > 0 ? status_ : "", statusOk_);
 		return;
 	}
