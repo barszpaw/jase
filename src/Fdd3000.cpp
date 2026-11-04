@@ -7,8 +7,13 @@
 #include <vector>
 #include <SDL2/SDL.h>
 
+// Z80free's own API (Z80free_Rd/Wr/In/Out) is a single global instance,
+// no per-call context pointer -- see Fdd3000.h's class comment. JASE only
+// ever has one FDD3000 peripheral active at a time (same as Fuse), so a
+// single static pointer to "whichever Fdd3000 is current" is enough.
+static Fdd3000* s_activeForZ80free = nullptr;
+
 Fdd3000::Fdd3000()
-	: stationOps_(*this)
 {
 	memset(interfaceRom_.data, 0xFF, MemoryMap::PAGE_SIZE);
 	interfaceRom_.isRom = true;
@@ -24,13 +29,13 @@ Fdd3000::Fdd3000()
 	bootRom_[1] = 0x18; // JR
 	bootRom_[2] = 0xFE; // -2 (jump to self)
 
-	stationCpu_ = new Z80(&stationOps_);
-	stationCpu_->reset();
+	s_activeForZ80free = this;
+	Z80free_reset(&stationCpu_);
 }
 
 Fdd3000::~Fdd3000()
 {
-	delete stationCpu_;
+	if (s_activeForZ80free == this) s_activeForZ80free = nullptr;
 }
 
 // Accepts three real file shapes, all confirmed against docs/FDD3000/M397
@@ -124,7 +129,7 @@ bool Fdd3000::insertDisk(int driveIndex, const char* path)
 
 void Fdd3000::stationReset()
 {
-	stationCpu_->reset();
+	Z80free_reset(&stationCpu_);
 	stationPaged_ = true;
 	linkToStation_ = 0;
 	linkFromStation_ = 0;
@@ -161,7 +166,7 @@ void Fdd3000::logLinkTrace(const char* side, const char* direction, uint8_t valu
 	bin[8] = '\0';
 	fprintf(stderr,
 	        "FDD3000LINK ts=%.6f hostPC=%04x stnPC=%04x side=%s dir=%s val=%02x bin=%s\n",
-	        ts, lastHostPc_, stationCpu_->getRegPC(), side, direction, value, bin);
+	        ts, lastHostPc_, stationCpu_.PC, side, direction, value, bin);
 }
 
 bool Fdd3000::in(uint16_t port, uint8_t& value)
@@ -249,12 +254,27 @@ void Fdd3000::stepStationForOneHostInstruction(uint32_t hostTstates)
 	// budget to the next call, keeps the two CPUs interleaved as finely as
 	// the host's own per-instruction granularity allows.
 	if (stationTstateBudget_ > 0.0) {
-		uint32_t before = stationTstates_;
-		stationCpu_->execute();
-		uint32_t spent = stationTstates_ - before;
-		if (spent == 0) spent = 4; // defensive floor -- a real opcode always costs T-states
+		syncStationInterrupt();
+		int spent = Z80free_step(&stationCpu_); // real Z80free timing tables, see class comment
+		if (spent <= 0) spent = 4; // defensive floor -- a real opcode always costs T-states
 		stationTstateBudget_ -= (double)spent;
 	}
+}
+
+// Z80free needs an explicit set/clear of INT_P (Z80free.h) rather than a
+// polled "is the line active" callback the way z80cpp's isActiveINT()
+// worked -- and, unlike z80cpp, it does NOT auto-clear INT_P once an
+// interrupt is serviced (see Z80free.c: IFF1 just goes to 0, INT_P stays
+// 1), so a stale INT_P would immediately re-fire the moment the station's
+// program re-enables interrupts. Call this once per step to mirror the
+// real WD1772 INTRQ line's LEVEL semantics: raise while intrq() is true
+// (idempotent -- Z80free_INT just sets a flag), explicitly clear the
+// instant it goes low (real hardware: cleared by the station reading its
+// own status register, same as Wd1772::readStatus() already does).
+void Fdd3000::syncStationInterrupt()
+{
+	if (wd_.intrq()) Z80free_INT(&stationCpu_, 0xFF);
+	else Z80free_INTserved(&stationCpu_);
 }
 
 // Sub-commands below give the SAME station-side access the top-level
@@ -277,7 +297,7 @@ std::string Fdd3000::debugCommand(const std::vector<std::string>& toks)
 		         "OK enabled=%d active=%d linkToStation=%02x linkFromStation=%02x stationPaged=%d stationPC=%04x "
 		         "wdStatus=%02x wdTrack=%02x wdSector=%02x wdDrq=%d wdIntrq=%d",
 		         enabled_ ? 1 : 0, active_ ? 1 : 0, linkToStation_, linkFromStation_,
-		         stationPaged_ ? 1 : 0, stationCpu_->getRegPC(),
+		         stationPaged_ ? 1 : 0, stationCpu_.PC,
 		         wd_.peekStatus(), wd_.readTrackReg(), wd_.readSectorReg(), wd_.drq() ? 1 : 0, wd_.intrq() ? 1 : 0);
 		return out;
 	}
@@ -286,14 +306,20 @@ std::string Fdd3000::debugCommand(const std::vector<std::string>& toks)
 	for (char& c : sub) c = (char)toupper((unsigned char)c);
 
 	if (sub == "REGS") {
+		// R is split across R (lower 7 bits, incremented per opcode/prefix)
+		// and R2 (bit 7, set only by an explicit LD R,A) -- same real-Z80
+		// quirk z80cpp's own getRegR() reproduces; combined by hand here
+		// since Z80free_readR() has LD-A,R-style flag side effects we don't
+		// want for a passive debug read.
+		uint8_t r = (stationCpu_.R & 0x7F) | (stationCpu_.R2 & 0x80);
 		snprintf(out, sizeof(out),
 		         "OK AF=%04x BC=%04x DE=%04x HL=%04x AFx=%04x BCx=%04x DEx=%04x HLx=%04x "
 		         "IX=%04x IY=%04x SP=%04x PC=%04x I=%02x R=%02x IFF1=%d IFF2=%d IM=%d",
-		         stationCpu_->getRegAF(), stationCpu_->getRegBC(), stationCpu_->getRegDE(), stationCpu_->getRegHL(),
-		         stationCpu_->getRegAFx(), stationCpu_->getRegBCx(), stationCpu_->getRegDEx(), stationCpu_->getRegHLx(),
-		         stationCpu_->getRegIX(), stationCpu_->getRegIY(), stationCpu_->getRegSP(), stationCpu_->getRegPC(),
-		         stationCpu_->getRegI(), stationCpu_->getRegR(),
-		         stationCpu_->isIFF1() ? 1 : 0, stationCpu_->isIFF2() ? 1 : 0, (int)stationCpu_->getIM());
+		         stationCpu_.Rm.wr.AF, stationCpu_.Rm.wr.BC, stationCpu_.Rm.wr.DE, stationCpu_.Rm.wr.HL,
+		         stationCpu_.Ra.wr.AF, stationCpu_.Ra.wr.BC, stationCpu_.Ra.wr.DE, stationCpu_.Ra.wr.HL,
+		         stationCpu_.Rm.wr.IX, stationCpu_.Rm.wr.IY, stationCpu_.Rm.wr.SP, stationCpu_.PC,
+		         stationCpu_.I, r,
+		         stationCpu_.IFF1 ? 1 : 0, stationCpu_.IFF2 ? 1 : 0, (int)stationCpu_.IM);
 		return out;
 	}
 
@@ -306,26 +332,26 @@ std::string Fdd3000::debugCommand(const std::vector<std::string>& toks)
 		std::string reg = toks[2];
 		for (char& c : reg) c = (char)toupper((unsigned char)c);
 		bool ok = true;
-		if (reg == "AF") stationCpu_->setRegAF(val);
-		else if (reg == "BC") stationCpu_->setRegBC(val);
-		else if (reg == "DE") stationCpu_->setRegDE(val);
-		else if (reg == "HL") stationCpu_->setRegHL(val);
-		else if (reg == "AFX") stationCpu_->setRegAFx(val);
-		else if (reg == "BCX") stationCpu_->setRegBCx(val);
-		else if (reg == "DEX") stationCpu_->setRegDEx(val);
-		else if (reg == "HLX") stationCpu_->setRegHLx(val);
-		else if (reg == "IX") stationCpu_->setRegIX(val);
-		else if (reg == "IY") stationCpu_->setRegIY(val);
-		else if (reg == "SP") stationCpu_->setRegSP(val);
-		else if (reg == "PC") stationCpu_->setRegPC(val);
+		if (reg == "AF") stationCpu_.Rm.wr.AF = val;
+		else if (reg == "BC") stationCpu_.Rm.wr.BC = val;
+		else if (reg == "DE") stationCpu_.Rm.wr.DE = val;
+		else if (reg == "HL") stationCpu_.Rm.wr.HL = val;
+		else if (reg == "AFX") stationCpu_.Ra.wr.AF = val;
+		else if (reg == "BCX") stationCpu_.Ra.wr.BC = val;
+		else if (reg == "DEX") stationCpu_.Ra.wr.DE = val;
+		else if (reg == "HLX") stationCpu_.Ra.wr.HL = val;
+		else if (reg == "IX") stationCpu_.Rm.wr.IX = val;
+		else if (reg == "IY") stationCpu_.Rm.wr.IY = val;
+		else if (reg == "SP") stationCpu_.Rm.wr.SP = val;
+		else if (reg == "PC") stationCpu_.PC = val;
 		else ok = false;
 		return ok ? "OK" : "ERR unknown register";
 	}
 
 	if (sub == "MEM" && toks.size() >= 4) {
-		// Reads through StationOps::peek8() -- i.e. whatever the station
-		// CPU itself currently sees (boot-ROM view while stationPaged_,
-		// RAM otherwise), same as the host's own MEM reading through
+		// Reads through stationPeek8() -- i.e. whatever the station CPU
+		// itself currently sees (boot-ROM view while stationPaged_, RAM
+		// otherwise), same as the host's own MEM reading through
 		// MinZX::peek8() rather than a raw array. Same hex-string shape
 		// and length cap as the host command.
 		uint16_t addr = (uint16_t)strtoul(toks[2].c_str(), nullptr, 16);
@@ -335,15 +361,15 @@ std::string Fdd3000::debugCommand(const std::vector<std::string>& toks)
 		std::string resp = "OK ";
 		char hex[3];
 		for (long i = 0; i < len; i++) {
-			snprintf(hex, sizeof(hex), "%02x", stationOps_.peek8((uint16_t)(addr + i)));
+			snprintf(hex, sizeof(hex), "%02x", stationPeek8((uint16_t)(addr + i)));
 			resp += hex;
 		}
 		return resp;
 	}
 
 	if (sub == "POKE" && toks.size() >= 4) {
-		// Writes through StationOps::poke8() -- always lands in the
-		// underlying RAM regardless of stationPaged_ (see poke8()'s own
+		// Writes through stationPoke8() -- always lands in the underlying
+		// RAM regardless of stationPaged_ (see stationPoke8()'s own
 		// comment), same real-hardware shadowing behavior Dandanator's
 		// onMemoryWrite() relies on for the host side.
 		uint16_t addr = (uint16_t)strtoul(toks[2].c_str(), nullptr, 16);
@@ -351,7 +377,7 @@ std::string Fdd3000::debugCommand(const std::vector<std::string>& toks)
 		std::string b;
 		int count = 0;
 		while (std::getline(bs, b, ',')) {
-			stationOps_.poke8((uint16_t)(addr + count), (uint8_t)strtoul(b.c_str(), nullptr, 16));
+			stationPoke8((uint16_t)(addr + count), (uint8_t)strtoul(b.c_str(), nullptr, 16));
 			count++;
 		}
 		return "OK";
@@ -366,7 +392,7 @@ std::string Fdd3000::debugCommand(const std::vector<std::string>& toks)
 		// onInstructionFetch(), which keeps advancing regardless.
 		int n = toks.size() >= 3 ? atoi(toks[2].c_str()) : 1;
 		if (n < 1) n = 1;
-		for (int i = 0; i < n; i++) stationCpu_->execute();
+		for (int i = 0; i < n; i++) { syncStationInterrupt(); Z80free_step(&stationCpu_); }
 		return "OK";
 	}
 
@@ -389,75 +415,47 @@ std::string Fdd3000::debugCommand(const std::vector<std::string>& toks)
 	return "ERR unknown FDD3000 sub-command";
 }
 
-// ---- StationOps: the station's own, entirely private 64K address space ----
-//
-// T-state accounting below mirrors MinZX's own peek8/poke8/inPort/outPort
-// (minzx.cpp) exactly -- same base costs, no contention (the station has
-// none) -- so stationTstates_ is a real, comparable running counter, the
-// same way MinZX's own `tstates` member is. See Fdd3000::
-// stepStationForOneHostInstruction() for how this drives the station's
-// clock-ratio-proportional stepping.
+// ---- Station memory/port access -- the station's own, entirely private
+// 64K address space. No T-state accounting needed here any more: Z80free's
+// own internal, table-generated timing (see Z80free_step()'s return value
+// in stepStationForOneHostInstruction()) replaces the hand-counted model
+// StationOps used to maintain by hand -- the exact kind of bookkeeping
+// that hid the 1-T-state IN bug fixed in minzx.cpp. ----
 
-uint8_t Fdd3000::StationOps::fetchOpcode(uint16_t address)
+uint8_t Fdd3000::stationPeek8(uint16_t address)
 {
-	uint8_t v = peek8(address); // peek8 already accounts the shared 3 T-states
-	owner_.stationTstates_ += 1; // M1 cycle's extra T-state over a plain memory read
-	return v;
+	if (stationPaged_ && address < sizeof(bootRom_))
+		return bootRom_[address];
+	return stationRam_[address];
 }
 
-uint8_t Fdd3000::StationOps::peek8(uint16_t address)
+void Fdd3000::stationPoke8(uint16_t address, uint8_t value)
 {
-	owner_.stationTstates_ += 3;
-	if (owner_.stationPaged_ && address < sizeof(owner_.bootRom_))
-		return owner_.bootRom_[address];
-	return owner_.stationRam_[address];
-}
-
-void Fdd3000::StationOps::poke8(uint16_t address, uint8_t value)
-{
-	owner_.stationTstates_ += 3;
 	// Writes always land in the underlying RAM, even while the boot-ROM
 	// view is paged in for reads -- the ROM is a real, separate chip
 	// shadowing low RAM for reads only (same convention disassembly of
 	// the real interface ROM's own RAM table implies elsewhere in this
 	// codebase's ROMCS devices, e.g. Dandanator's onMemoryWrite()).
-	owner_.stationRam_[address] = value;
+	stationRam_[address] = value;
 }
 
-uint16_t Fdd3000::StationOps::peek16(uint16_t address)
+uint8_t Fdd3000::stationInPort(uint16_t port)
 {
-	uint8_t lsb = peek8(address);
-	uint8_t msb = peek8(address + 1);
-	return (msb << 8) | lsb;
-}
-
-void Fdd3000::StationOps::poke16(uint16_t address, RegisterPair word)
-{
-	poke8(address, word.byte8.lo);
-	poke8(address + 1, word.byte8.hi);
-}
-
-uint8_t Fdd3000::StationOps::inPort(uint16_t port)
-{
-	// Real Z80 IN timing is 4 T-states for the I/O cycle itself (confirmed
-	// via a differential test against Fuse's own Z80free core -- see
-	// project memory). MinZX::inPort had the same off-by-one; fixed there too.
-	owner_.stationTstates_ += 4;
 	int ioport = (port & 0xFF) >> 5;
 	switch (ioport) {
 	case 1: {
 		// Bit 7 mirrors WD1772 DRQ, matching the real boot ROM's own
 		// polling convention (confirmed via disassembly, see Fdd3000.h).
-		uint8_t v = owner_.linkToStation_ | (owner_.wd_.drq() ? 0x80 : 0x00);
-		if (owner_.linkTraceEnabled_) owner_.logLinkTrace("STN ", "IN ", v);
+		uint8_t v = linkToStation_ | (wd_.drq() ? 0x80 : 0x00);
+		if (linkTraceEnabled_) logLinkTrace("STN ", "IN ", v);
 		return v;
 	}
 	case 6: // WD1772 register window: C0=status/cmd, C1=track, C2=sector, C3=data
 		switch (port & 0x03) {
-		case 0: return owner_.wd_.readStatus();
-		case 1: return owner_.wd_.readTrackReg();
-		case 2: return owner_.wd_.readSectorReg();
-		default: return owner_.wd_.readDataReg();
+		case 0: return wd_.readStatus();
+		case 1: return wd_.readTrackReg();
+		case 2: return wd_.readSectorReg();
+		default: return wd_.readDataReg();
 		}
 	// Block 7 (config register) is write-only on real hardware. Idle-bus
 	// default for everything else (serial, block 0), matching the real
@@ -466,44 +464,51 @@ uint8_t Fdd3000::StationOps::inPort(uint16_t port)
 	}
 }
 
-void Fdd3000::StationOps::outPort(uint16_t port, uint8_t value)
+void Fdd3000::stationOutPort(uint16_t port, uint8_t value)
 {
-	owner_.stationTstates_ += 4; // matches MinZX::outPort's own base cost
 	int ioport = (port & 0xFF) >> 5;
 	switch (ioport) {
 	case 1:
-		owner_.linkFromStation_ = value;
-		if (owner_.linkTraceEnabled_) owner_.logLinkTrace("STN ", "OUT", value);
+		linkFromStation_ = value;
+		if (linkTraceEnabled_) logLinkTrace("STN ", "OUT", value);
 		break;
 	case 6:
 		switch (port & 0x03) {
-		case 0: owner_.wd_.writeCommand(value); break;
-		case 1: owner_.wd_.writeTrackReg(value); break;
-		case 2: owner_.wd_.writeSectorReg(value); break;
-		default: owner_.wd_.writeDataReg(value); break;
+		case 0: wd_.writeCommand(value); break;
+		case 1: wd_.writeTrackReg(value); break;
+		case 2: wd_.writeSectorReg(value); break;
+		default: wd_.writeDataReg(value); break;
 		}
 		break;
-	case 7: owner_.writeConfigRegister(value); break;
+	case 7: writeConfigRegister(value); break;
 	// Everything else (serial, block 0) ignored.
 	default: break;
 	}
 }
 
-void Fdd3000::StationOps::addressOnBus(uint16_t address, int32_t wstates)
+// ---- Z80free's required global callbacks (Z80free.h) -- NOT per-instance
+// methods, see Fdd3000.h's class comment on s_activeForZ80free. Just thin
+// dispatchers onto the station access methods above. ----
+extern "C" {
+
+byte Z80free_Rd(word Addr)
 {
-	// The station's own bus has no ULA-style memory contention (that's a
-	// Spectrum-specific artifact) -- just the plain T-state cost, same as
-	// MinZX::addressOnBus()'s own non-contended path.
-	(void)address;
-	owner_.stationTstates_ += (uint32_t)wstates;
+	return s_activeForZ80free ? s_activeForZ80free->stationPeek8(Addr) : 0xFF;
 }
 
-void Fdd3000::StationOps::interruptHandlingTime(int32_t wstates)
+void Z80free_Wr(word Addr, byte Value)
 {
-	owner_.stationTstates_ += (uint32_t)wstates;
+	if (s_activeForZ80free) s_activeForZ80free->stationPoke8(Addr, Value);
 }
 
-bool Fdd3000::StationOps::isActiveINT(void)
+byte Z80free_In(word Port)
 {
-	return owner_.wd_.intrq();
+	return s_activeForZ80free ? s_activeForZ80free->stationInPort(Port) : 0xFF;
 }
+
+void Z80free_Out(word Port, byte Value)
+{
+	if (s_activeForZ80free) s_activeForZ80free->stationOutPort(Port, Value);
+}
+
+} // extern "C"

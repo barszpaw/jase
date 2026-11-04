@@ -2,9 +2,12 @@
 #include "Peripheral.h"
 #include "MemoryMap.h"
 #include "Wd1772.h"
-#include "z80.h"
 #include <cstdint>
 #include <string>
+
+extern "C" {
+#include "Z80free.h"
+}
 
 // Timex FDD 3000 disk station stand-in -- a real, standalone Polish
 // peripheral: a separate little computer (Z80A + 64K RAM + WD1772 FDC)
@@ -75,6 +78,23 @@
 //   sector, data -- see Wd1772.h); block 7 = drive/config register, see
 //   the bit-layout table above).
 //
+//   Station CPU core: Fuse's OWN `Z80free` (src/z80free/, GPL-3, ported
+//   verbatim -- see src/z80free/JASE_PROVENANCE.md and CLAUDE.md's "GPL
+//   firewall LIFTED for FDD3000" note, 2026-11-04). Was JASE's own
+//   z80cpp (still used for the host) until a differential test (z80cpp
+//   vs Z80free, 5M real instructions of the real station program, run
+//   outside this repo before the firewall was lifted) found z80cpp to be
+//   functionally equivalent for everything exercised except one
+//   confirmed, now-fixed 1-T-state IN bug (see minzx.cpp's own
+//   inPort()). Switched to the real Z80free anyway, once permitted, to
+//   remove any remaining doubt about subtle core differences (undocumented
+//   opcodes, interrupt edge cases) rather than keep re-deriving facts
+//   about a core we could just run directly. Z80free's own API is a
+//   single global instance (no per-call context pointer for
+//   Rd/Wr/In/Out) -- `s_activeForZ80free` in the .cpp dispatches those
+//   global callbacks to whichever Fdd3000 instance is current (JASE only
+//   ever has one FDD3000 peripheral active at a time, same as Fuse).
+//
 // Simplifications vs real hardware, documented not hidden (see
 // project memory for the full phased plan):
 //   - The station's internal bootstrap (real hardware: a real,
@@ -99,24 +119,29 @@
 //     necessarily spend the same number of T-states on the same mix of
 //     instructions, so matching instruction counts doesn't actually match
 //     real elapsed time between the two emulators. Switched instead to
-//     tracking each core's own real T-state counter (stationTstates_,
-//     accumulated by StationOps exactly the way MinZX itself accounts
-//     host tstates -- see stepStationForOneHostInstruction()) and owing
-//     the station a T-state budget (kStationToHostClockRatio = 4MHz/3.5MHz,
-//     from the real M397/FDD35 schematics' own crystals, see
+//     tracking real T-state counters on both sides and owing the station
+//     a T-state budget (kStationToHostClockRatio = 4MHz/3.5MHz, from the
+//     real M397/FDD35 schematics' own crystals, see
 //     docs/FDD3000/fuse_emulation_reference.md) of whatever real host
 //     time just elapsed -- but spending AT MOST ONE station instruction
-//     of that budget per call, never a catch-up burst. Both ROMs run the
-//     same narrow, bounded-retry (DJNZ ~256) polling loop waiting for
-//     each other's ACK nibble; a multi-instruction catch-up burst let the
-//     station race ahead and then stall, so the two polling loops drifted
-//     out of step even though the long-run ratio was correct on average
-//     (live evidence: host saw the expected ACK byte only ~6 times in 48M
-//     polls). One-instruction-at-a-time stepping, with leftover budget
-//     carried to the next call, keeps the two CPUs interleaved as finely
-//     as the host's own per-instruction granularity allows. See project
-//     memory for the full tuning history (1x/4x/16x/6:5-by-count/batched
-//     T-state-proportional/single-instruction T-state-proportional).
+//     of that budget per call, never a catch-up burst (see
+//     stepStationForOneHostInstruction()). Since the station now runs the
+//     real Z80free core, its T-state cost per instruction comes directly
+//     from `Z80free_step()`'s own return value (its internal,
+//     table-generated timing, not hand-counted per memory/port access the
+//     way z80cpp's callback-based model needed) -- one less thing to get
+//     wrong by hand. Both ROMs run the same narrow, bounded-retry (DJNZ
+//     ~256) polling loop waiting for each other's ACK nibble; a
+//     multi-instruction catch-up burst let the station race ahead and
+//     then stall, so the two polling loops drifted out of step even
+//     though the long-run ratio was correct on average (live evidence:
+//     host saw the expected ACK byte only ~6 times in 48M polls).
+//     One-instruction-at-a-time stepping, with leftover budget carried to
+//     the next call, keeps the two CPUs interleaved as finely as the
+//     host's own per-instruction granularity allows. See project memory
+//     for the full tuning history (1x/4x/16x/6:5-by-count/batched
+//     T-state-proportional/single-instruction T-state-proportional) and
+//     for whether the Z80free port alone resolved the handshake.
 class Fdd3000 : public Peripheral
 {
 public:
@@ -194,30 +219,30 @@ public:
 	bool isLinkTraceEnabled() const { return linkTraceEnabled_; }
 
 private:
-	// The station's own Z80operations: a private, self-contained 64K
-	// address space + coarse I/O decode, entirely separate from MinZX's
-	// (host) one. See class comment for what's stubbed.
-	class StationOps : public Z80operations
-	{
-	public:
-		explicit StationOps(Fdd3000& owner) : owner_(owner) {}
-		uint8_t fetchOpcode(uint16_t address) override;
-		uint8_t peek8(uint16_t address) override;
-		void poke8(uint16_t address, uint8_t value) override;
-		uint16_t peek16(uint16_t address) override;
-		void poke16(uint16_t address, RegisterPair word) override;
-		uint8_t inPort(uint16_t port) override;
-		void outPort(uint16_t port, uint8_t value) override;
-		void addressOnBus(uint16_t address, int32_t wstates) override;
-		void interruptHandlingTime(int32_t wstates) override;
-		bool isActiveINT(void) override;
-	private:
-		Fdd3000& owner_;
-	};
+	// Z80free's own API (Z80free_Rd/Wr/In/Out, Z80free.h) is global, not a
+	// per-instance method -- these free functions (defined in the .cpp)
+	// are the only external callers of the private station-access methods
+	// below, dispatched through s_activeForZ80free.
+	friend uint8_t ::Z80free_Rd(uint16_t);
+	friend void ::Z80free_Wr(uint16_t, uint8_t);
+	friend uint8_t ::Z80free_In(uint16_t);
+	friend void ::Z80free_Out(uint16_t, uint8_t);
 
 	void applyHostPaging(MemoryMap& memory);
 	void logLinkTrace(const char* side, const char* direction, uint8_t value) const;
 	void stepStationForOneHostInstruction(uint32_t hostTstates);
+	void syncStationInterrupt(); // raises/clears Z80free's INT_P from wd_.intrq(), see .cpp
+
+	// The station's own memory/port access, called from the global
+	// Z80free_Rd/Wr/In/Out callbacks (Z80free.h) via s_activeForZ80free --
+	// same logic that used to live in the StationOps class (removed when
+	// the station switched from z80cpp to the real Z80free core, see
+	// class comment). Also reused directly by debugCommand()'s MEM/POKE
+	// sub-commands, same as before.
+	uint8_t stationPeek8(uint16_t address);
+	void stationPoke8(uint16_t address, uint8_t value);
+	uint8_t stationInPort(uint16_t port);
+	void stationOutPort(uint16_t port, uint8_t value);
 
 	// Real crystal ratio, confirmed from the M397/FDD35 schematics (see
 	// docs/FDD3000/fuse_emulation_reference.md): station Z80A at 4MHz
@@ -227,12 +252,11 @@ private:
 	// and Fuse's Z80 cores don't necessarily spend the same number of
 	// T-states per "instruction", so matching instruction counts doesn't
 	// match real elapsed time. This stepper instead tracks each core's
-	// own real T-state counter (stationTstates_, accumulated by
-	// StationOps exactly the way MinZX itself accounts host tstates) and
-	// steps the station until it has "spent" its proportional share of
-	// whatever real time just elapsed on the host.
+	// own real T-state counter and steps the station until it has "spent"
+	// its proportional share of whatever real time just elapsed on the
+	// host -- the per-step cost now comes straight from Z80free_step()'s
+	// own return value, see class comment.
 	static constexpr double kStationToHostClockRatio = 4.0 / 3.5;
-	uint32_t stationTstates_ = 0;     // station's own running T-state counter, see StationOps
 	uint32_t lastHostTstates_ = 0;    // host tstates observed at the previous step, for computing the delta
 	double stationTstateBudget_ = 0.0; // accumulated (fractional) station T-states owed
 
@@ -263,6 +287,5 @@ private:
 	std::string romPath_;
 	std::string diskPath_[Wd1772::kNumDrives];
 
-	StationOps stationOps_;
-	Z80* stationCpu_ = nullptr;
+	Z80FREE stationCpu_{}; // the real station core, see class comment -- a plain value, not a pointer
 };
