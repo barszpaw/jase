@@ -1278,8 +1278,11 @@ void MinZX::poke16(uint16_t address, RegisterPair word)
 /* In/Out byte from/to IO Bus */
 uint8_t MinZX::inPort(uint16_t port)
 {
-	// 4 clocks for read byte from bus
-	tstates += 3;
+	// 4 clocks for read byte from bus -- the comment was always right, the
+	// code wasn't: confirmed off-by-one against Fuse's own Z80free core via
+	// a differential test (z80cpp vs Z80free, 5M real instructions, only
+	// divergence found was this -1 on every single IN A,(n)/IN r,(C)).
+	tstates += 4;
 
 	uint8_t result = processInputPort(port);
 

@@ -13,6 +13,30 @@
 ## Custom Commands
 - `restore-context`: Execute command to read `MEMORY.md`, read current `git diff`, and print current operational status of the SDI bridge work.
 
+## FDD3000 — GPL firewall LIFTED (scope: FDD3000 only, user decision 2026-11-04)
+- The project-wide "GPL firewall" practice (see auto-memory
+  `project_jase_overview.md`: read GPL reference projects for protocol
+  facts, never copy their code) is explicitly **lifted for FDD3000
+  emulation work only**, by the user's own decision ("na potrzeby emulacji
+  fdd3000 zewalam na zdjęcie 'firewall license'"). It still applies, in
+  full, to every other peripheral (SDI/VC1541, Dandanator, Multiply, ZiFi,
+  Gopher/Tnfs) — do not generalize this exception beyond FDD3000.
+- This means: Fuse's real FDD3000-related GPL-3 sources (`peripherals/disk/ti397.c`,
+  `peripherals/disk/fdd3000.c`, `peripherals/disk/wd_fdc.c`,
+  `peripherals/disk/fdd.c`, `peripherals/disk/z80free/*` in
+  `~/src/Fuse_FDD3000/build/fuse-1.10.1/`) may now be directly ported, adapted,
+  or copied into JASE's own FDD3000 source files (`src/Fdd3000.h/.cpp`,
+  `src/Wd1772.h/.cpp`), not just read for facts.
+- **License consequence** (keep visible, don't silently paper over): any
+  JASE file that incorporates Fuse GPL-3 code stops being part of the
+  project's otherwise-MIT tree for that file -- it needs an accurate GPL-3
+  license header/attribution to Fuse's authors, and the usual GPL copyleft
+  implications for anything statically linked against it apply. This is a
+  deliberate, scoped tradeoff the user made to actually finish FDD3000,
+  not an oversight -- but any future session touching these files should
+  know the license boundary moved, not assume the rest of JASE's MIT
+  posture still holds here.
+
 ## SDI ROM Disassembly Workflow
 - Po dokonaniu ostatecznej identyfikacji adresu procedur, skoków, danych lub
   tablic w ROM-ie SDI (np. przez live BREAK/STEP/REGS/MEM), uzupełnij

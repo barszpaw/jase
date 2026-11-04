@@ -439,7 +439,10 @@ void Fdd3000::StationOps::poke16(uint16_t address, RegisterPair word)
 
 uint8_t Fdd3000::StationOps::inPort(uint16_t port)
 {
-	owner_.stationTstates_ += 3; // matches MinZX::inPort's own base cost
+	// Real Z80 IN timing is 4 T-states for the I/O cycle itself (confirmed
+	// via a differential test against Fuse's own Z80free core -- see
+	// project memory). MinZX::inPort had the same off-by-one; fixed there too.
+	owner_.stationTstates_ += 4;
 	int ioport = (port & 0xFF) >> 5;
 	switch (ioport) {
 	case 1: {
