@@ -128,6 +128,7 @@ void Fdd3000::stationReset()
 	stationPaged_ = true;
 	linkToStation_ = 0;
 	linkFromStation_ = 0;
+	stationTstateBudget_ = 0.0; // don't carry a stale backlog across a reset
 	wd_.reset();
 }
 
@@ -194,7 +195,6 @@ void Fdd3000::applyHostPaging(MemoryMap& memory)
 
 void Fdd3000::onInstructionFetch(uint16_t pc, MemoryMap& memory, uint32_t tstates)
 {
-	(void)tstates;
 	if (!enabled_) return;
 	lastHostPc_ = pc; // stashed for logLinkTrace()'s own hostPC column
 
@@ -214,13 +214,47 @@ void Fdd3000::onInstructionFetch(uint16_t pc, MemoryMap& memory, uint32_t tstate
 	}
 	applyHostPaging(memory);
 
-	// Station CPU: stepped kStationStepsPerHostInstr times per host
-	// instruction. See Fdd3000.h's class comment -- 4x measurably helps
-	// (a real multi-byte command exchange now happens, didn't at 1:1) but
-	// going higher (tried 16x) just reaches the same terminal stuck state
-	// faster, not a full fix -- see project memory, this needs protocol-
-	// sequencing investigation next, not further ratio tuning.
-	for (int i = 0; i < kStationStepsPerHostInstr; i++) stationCpu_->execute();
+	stepStationForOneHostInstruction(tstates);
+}
+
+// T-state-proportional stepping -- see Fdd3000.h's class comment for why
+// this replaced both the earlier flat multipliers and Fuse's own
+// instruction-COUNT ratio (6:5), neither of which actually tracks real
+// elapsed time between JASE's and Fuse's differently-costed Z80 cores.
+void Fdd3000::stepStationForOneHostInstruction(uint32_t hostTstates)
+{
+	// hostTstates is the host's running tstates counter, sampled once per
+	// host instruction (at fetch time) -- the delta since the last call is
+	// exactly how much real host time elapsed while the station was last
+	// left to catch up. MinZX wraps tstates to 0 at every frame boundary
+	// (see minzx.cpp), so a decrease means a wrap just happened; treat the
+	// new (small) value itself as the delta in that case rather than
+	// underflowing.
+	uint32_t hostDelta = (hostTstates >= lastHostTstates_)
+		? (hostTstates - lastHostTstates_)
+		: hostTstates;
+	lastHostTstates_ = hostTstates;
+
+	stationTstateBudget_ += hostDelta * kStationToHostClockRatio;
+
+	// At most ONE station instruction per host instruction -- deliberately
+	// NOT a catch-up loop. Both sides run the same narrow, bounded-retry
+	// (DJNZ ~256) polling loop waiting for each other's ACK nibble; a
+	// batched multi-instruction catch-up here lets the station race ahead
+	// in a single burst and then stall, so the two CPUs' polling loops
+	// drift out of step with each other even though the LONG-RUN ratio is
+	// correct on average -- see project memory / docs/FDD3000 for the live
+	// evidence (host sees the expected ACK byte only ~6 times in 48M
+	// polls). Stepping one instruction at a time, carrying any leftover
+	// budget to the next call, keeps the two CPUs interleaved as finely as
+	// the host's own per-instruction granularity allows.
+	if (stationTstateBudget_ > 0.0) {
+		uint32_t before = stationTstates_;
+		stationCpu_->execute();
+		uint32_t spent = stationTstates_ - before;
+		if (spent == 0) spent = 4; // defensive floor -- a real opcode always costs T-states
+		stationTstateBudget_ -= (double)spent;
+	}
 }
 
 // Sub-commands below give the SAME station-side access the top-level
@@ -356,11 +390,24 @@ std::string Fdd3000::debugCommand(const std::vector<std::string>& toks)
 }
 
 // ---- StationOps: the station's own, entirely private 64K address space ----
+//
+// T-state accounting below mirrors MinZX's own peek8/poke8/inPort/outPort
+// (minzx.cpp) exactly -- same base costs, no contention (the station has
+// none) -- so stationTstates_ is a real, comparable running counter, the
+// same way MinZX's own `tstates` member is. See Fdd3000::
+// stepStationForOneHostInstruction() for how this drives the station's
+// clock-ratio-proportional stepping.
 
-uint8_t Fdd3000::StationOps::fetchOpcode(uint16_t address) { return peek8(address); }
+uint8_t Fdd3000::StationOps::fetchOpcode(uint16_t address)
+{
+	uint8_t v = peek8(address); // peek8 already accounts the shared 3 T-states
+	owner_.stationTstates_ += 1; // M1 cycle's extra T-state over a plain memory read
+	return v;
+}
 
 uint8_t Fdd3000::StationOps::peek8(uint16_t address)
 {
+	owner_.stationTstates_ += 3;
 	if (owner_.stationPaged_ && address < sizeof(owner_.bootRom_))
 		return owner_.bootRom_[address];
 	return owner_.stationRam_[address];
@@ -368,6 +415,7 @@ uint8_t Fdd3000::StationOps::peek8(uint16_t address)
 
 void Fdd3000::StationOps::poke8(uint16_t address, uint8_t value)
 {
+	owner_.stationTstates_ += 3;
 	// Writes always land in the underlying RAM, even while the boot-ROM
 	// view is paged in for reads -- the ROM is a real, separate chip
 	// shadowing low RAM for reads only (same convention disassembly of
@@ -391,6 +439,7 @@ void Fdd3000::StationOps::poke16(uint16_t address, RegisterPair word)
 
 uint8_t Fdd3000::StationOps::inPort(uint16_t port)
 {
+	owner_.stationTstates_ += 3; // matches MinZX::inPort's own base cost
 	int ioport = (port & 0xFF) >> 5;
 	switch (ioport) {
 	case 1: {
@@ -416,6 +465,7 @@ uint8_t Fdd3000::StationOps::inPort(uint16_t port)
 
 void Fdd3000::StationOps::outPort(uint16_t port, uint8_t value)
 {
+	owner_.stationTstates_ += 4; // matches MinZX::outPort's own base cost
 	int ioport = (port & 0xFF) >> 5;
 	switch (ioport) {
 	case 1:
@@ -438,14 +488,16 @@ void Fdd3000::StationOps::outPort(uint16_t port, uint8_t value)
 
 void Fdd3000::StationOps::addressOnBus(uint16_t address, int32_t wstates)
 {
-	// The station's own bus has no ULA-style memory contention (that's
-	// a Spectrum-specific artifact) -- no-op.
-	(void)address; (void)wstates;
+	// The station's own bus has no ULA-style memory contention (that's a
+	// Spectrum-specific artifact) -- just the plain T-state cost, same as
+	// MinZX::addressOnBus()'s own non-contended path.
+	(void)address;
+	owner_.stationTstates_ += (uint32_t)wstates;
 }
 
 void Fdd3000::StationOps::interruptHandlingTime(int32_t wstates)
 {
-	(void)wstates;
+	owner_.stationTstates_ += (uint32_t)wstates;
 }
 
 bool Fdd3000::StationOps::isActiveINT(void)

@@ -90,24 +90,33 @@
 //     (write a loader into station RAM, set station PC) for testing.
 //   - See Wd1772.h for the FDC's own simplification list (no step
 //     timing, no Read/Write Track, no real CRC, writes not persisted).
-//   - Station-CPU-to-host-CPU clock ratio: stepped kStationStepsPerHostInstr
-//     (currently 4) times per host instruction. Real hardware's two Z80s
-//     don't share a clock at all (see project memory) -- this ratio is
-//     still an unverified placeholder, NOT re-derived from real crystal
-//     frequencies. Raised from an original 1:1 after LINKTRACE (see
-//     setLinkTraceEnabled()) measured the real boot handshake's station
-//     response arriving ~2.5 virtual seconds too late at 1:1 -- 4x DOES
-//     measurably help (the host actually completes its low-level poll
-//     and conducts a real multi-byte command exchange with the station,
-//     which never happened at all at 1:1). BUT raising it further (tried
-//     16x) does NOT help more -- it only reaches the SAME terminal stuck
-//     state faster (station settles into an unproductive 3-address loop,
-//     PC cycling 0x1abb/0x1acd/0x1ad2, writing/reading the link byte
-//     without the host ever responding further), proving this is NOT a
-//     pure speed deficit alone -- something in the protocol SEQUENCING
-//     itself (not just timing) makes the station give up mid-exchange.
-//     See project memory's "ratio alone doesn't close it" section before
-//     trying to brute-force this further with an even higher multiplier.
+//   - Station-CPU-to-host-CPU clock ratio: T-STATE-proportional, not an
+//     instruction-count multiplier. Porting Fuse's own `fddCpuStep()`
+//     pattern verbatim (one station instruction per host instruction,
+//     except every 5th call steps twice -- 6:5 by instruction COUNT) was
+//     tried first and measurably made things WORSE than an earlier,
+//     purely-empirical flat 4x: JASE's and Fuse's Z80 cores don't
+//     necessarily spend the same number of T-states on the same mix of
+//     instructions, so matching instruction counts doesn't actually match
+//     real elapsed time between the two emulators. Switched instead to
+//     tracking each core's own real T-state counter (stationTstates_,
+//     accumulated by StationOps exactly the way MinZX itself accounts
+//     host tstates -- see stepStationForOneHostInstruction()) and owing
+//     the station a T-state budget (kStationToHostClockRatio = 4MHz/3.5MHz,
+//     from the real M397/FDD35 schematics' own crystals, see
+//     docs/FDD3000/fuse_emulation_reference.md) of whatever real host
+//     time just elapsed -- but spending AT MOST ONE station instruction
+//     of that budget per call, never a catch-up burst. Both ROMs run the
+//     same narrow, bounded-retry (DJNZ ~256) polling loop waiting for
+//     each other's ACK nibble; a multi-instruction catch-up burst let the
+//     station race ahead and then stall, so the two polling loops drifted
+//     out of step even though the long-run ratio was correct on average
+//     (live evidence: host saw the expected ACK byte only ~6 times in 48M
+//     polls). One-instruction-at-a-time stepping, with leftover budget
+//     carried to the next call, keeps the two CPUs interleaved as finely
+//     as the host's own per-instruction granularity allows. See project
+//     memory for the full tuning history (1x/4x/16x/6:5-by-count/batched
+//     T-state-proportional/single-instruction T-state-proportional).
 class Fdd3000 : public Peripheral
 {
 public:
@@ -208,11 +217,24 @@ private:
 
 	void applyHostPaging(MemoryMap& memory);
 	void logLinkTrace(const char* side, const char* direction, uint8_t value) const;
+	void stepStationForOneHostInstruction(uint32_t hostTstates);
 
-	// See onInstructionFetch()'s own comment -- unverified placeholder,
-	// tuned empirically against the real boot handshake's timing (measured
-	// via LINKTRACE), not derived from real crystal frequencies.
-	static const int kStationStepsPerHostInstr = 4;
+	// Real crystal ratio, confirmed from the M397/FDD35 schematics (see
+	// docs/FDD3000/fuse_emulation_reference.md): station Z80A at 4MHz
+	// (16MHz master oscillator /4) vs the host Spectrum's own 3.5MHz.
+	// Porting Fuse's own instruction-COUNT ratio (6 station steps per 5
+	// host instructions) verbatim measurably made things WORSE -- JASE's
+	// and Fuse's Z80 cores don't necessarily spend the same number of
+	// T-states per "instruction", so matching instruction counts doesn't
+	// match real elapsed time. This stepper instead tracks each core's
+	// own real T-state counter (stationTstates_, accumulated by
+	// StationOps exactly the way MinZX itself accounts host tstates) and
+	// steps the station until it has "spent" its proportional share of
+	// whatever real time just elapsed on the host.
+	static constexpr double kStationToHostClockRatio = 4.0 / 3.5;
+	uint32_t stationTstates_ = 0;     // station's own running T-state counter, see StationOps
+	uint32_t lastHostTstates_ = 0;    // host tstates observed at the previous step, for computing the delta
+	double stationTstateBudget_ = 0.0; // accumulated (fractional) station T-states owed
 
 	bool enabled_ = false;
 	bool linkTraceEnabled_ = false;
