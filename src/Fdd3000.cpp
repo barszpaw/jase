@@ -187,6 +187,18 @@ bool Fdd3000::out(uint16_t port, uint8_t value)
 	return true;
 }
 
+// Tried (2026-11-04) and reverted: a bounded reactive burst of extra
+// station steps right after every host OUT to the link port, on top of
+// the normal proportional ticking in stepStationForOneHostInstruction().
+// Tested live -- byte-for-byte identical outcome to not having it
+// (same link histogram, same final PC). Per project memory: the host's
+// own polling loop only writes the strobe ONCE per phase and then just
+// polls with IN, so the reactive burst's one-shot trigger never lands
+// during the part that actually needs more station time. Removed rather
+// than left as dead, unhelpful complexity -- see project memory
+// (project_jase_fdd3000.md) for the full negative-result writeup before
+// trying a different scheduling idea.
+
 void Fdd3000::applyHostPaging(MemoryMap& memory)
 {
 	if (active_) {
