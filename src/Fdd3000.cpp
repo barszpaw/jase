@@ -129,10 +129,14 @@ bool Fdd3000::insertDisk(int driveIndex, const char* path)
 
 void Fdd3000::stationReset()
 {
+	// Confirmed against the real Fuse source (menu.c's menu_machine_fdd3000reset(),
+	// which calls exactly wd_fdc_master_reset()+fddReset()): the station-reset
+	// action resets the FDC and the station's own CPU/paging/drq state, but
+	// does NOT touch the link latches (ti2fdd/fdd2ti) at all -- user's own
+	// suggestion, 2026-11-04. Clearing them here (as this code used to) is a
+	// confirmed, real discrepancy from real hardware/Fuse behavior.
 	Z80free_reset(&stationCpu_);
 	stationPaged_ = true;
-	linkToStation_ = 0;
-	linkFromStation_ = 0;
 	stationTstateBudget_ = 0.0; // don't carry a stale backlog across a reset
 	wd_.reset();
 }
