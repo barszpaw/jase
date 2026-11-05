@@ -137,7 +137,7 @@ void Fdd3000::stationReset()
 	// confirmed, real discrepancy from real hardware/Fuse behavior.
 	Z80free_reset(&stationCpu_);
 	stationPaged_ = true;
-	stationTstateBudget_ = 0.0; // don't carry a stale backlog across a reset
+	fddStepCounter_ = 0; // don't carry a stale backlog across a reset
 	wd_.reset();
 }
 
@@ -234,46 +234,46 @@ void Fdd3000::onInstructionFetch(uint16_t pc, MemoryMap& memory, uint32_t tstate
 		active_ = false;
 	}
 	applyHostPaging(memory);
+}
 
+// See Peripheral.h's own comment on why this exists: real Fuse steps its
+// station CPU (fddCpuStep()) immediately AFTER the host opcode executes
+// (z80_ops.c, right after `switch(opcode){...}`), not before/at fetch
+// time -- confirmed in its source, 2026-11-05. Moved the step call here
+// (was in onInstructionFetch(), i.e. BEFORE z80->execute() ran) to match
+// that real ordering exactly.
+void Fdd3000::onInstructionExecuted(MemoryMap& memory, uint32_t tstates)
+{
+	(void)memory;
+	if (!enabled_) return;
 	stepStationForOneHostInstruction(tstates);
 }
 
-// T-state-proportional stepping -- see Fdd3000.h's class comment for why
-// this replaced both the earlier flat multipliers and Fuse's own
-// instruction-COUNT ratio (6:5), neither of which actually tracks real
-// elapsed time between JASE's and Fuse's differently-costed Z80 cores.
+// RETRIED (2026-11-05): Fuse's own fddCpuStep() pattern VERBATIM -- one
+// station instruction per host instruction, except every 5th call steps
+// an extra time (6 station instructions per 5 host instructions, by
+// INSTRUCTION COUNT, not T-states). Tried once before this session
+// (first attempt) and found measurably WORSE than a flat 4x -- but that
+// was BEFORE two things that are both now fixed: the 1-T-state inPort
+// undercount (src/minzx.cpp, affects every IN -- and these polling loops
+// are almost entirely IN instructions) and the real Z80free core port
+// (was z80cpp at the time). Worth a clean retry now that both confounds
+// are gone. Content-level proof this is worth retrying: a live
+// differential comparison (2026-11-05, see project memory) fed JASE's
+// host real Fuse-recorded station responses via a replay harness and
+// found JASE's own host OUTPUT content matches Fuse's byte-for-byte --
+// so the remaining gap is entirely about the STATION's fine-grained
+// timing relative to the host, which is exactly what this ratio (Fuse's
+// own, real, working scheduling scheme) is supposed to reproduce.
 void Fdd3000::stepStationForOneHostInstruction(uint32_t hostTstates)
 {
-	// hostTstates is the host's running tstates counter, sampled once per
-	// host instruction (at fetch time) -- the delta since the last call is
-	// exactly how much real host time elapsed while the station was last
-	// left to catch up. MinZX wraps tstates to 0 at every frame boundary
-	// (see minzx.cpp), so a decrease means a wrap just happened; treat the
-	// new (small) value itself as the delta in that case rather than
-	// underflowing.
-	uint32_t hostDelta = (hostTstates >= lastHostTstates_)
-		? (hostTstates - lastHostTstates_)
-		: hostTstates;
-	lastHostTstates_ = hostTstates;
-
-	stationTstateBudget_ += hostDelta * kStationToHostClockRatio;
-
-	// At most ONE station instruction per host instruction -- deliberately
-	// NOT a catch-up loop. Both sides run the same narrow, bounded-retry
-	// (DJNZ ~256) polling loop waiting for each other's ACK nibble; a
-	// batched multi-instruction catch-up here lets the station race ahead
-	// in a single burst and then stall, so the two CPUs' polling loops
-	// drift out of step with each other even though the LONG-RUN ratio is
-	// correct on average -- see project memory / docs/FDD3000 for the live
-	// evidence (host sees the expected ACK byte only ~6 times in 48M
-	// polls). Stepping one instruction at a time, carrying any leftover
-	// budget to the next call, keeps the two CPUs interleaved as finely as
-	// the host's own per-instruction granularity allows.
-	if (stationTstateBudget_ > 0.0) {
+	(void)hostTstates; // pure instruction-count scheme now, see comment above
+	syncStationInterrupt();
+	Z80free_step(&stationCpu_);
+	if (++fddStepCounter_ >= 5) {
 		syncStationInterrupt();
-		int spent = Z80free_step(&stationCpu_); // real Z80free timing tables, see class comment
-		if (spent <= 0) spent = 4; // defensive floor -- a real opcode always costs T-states
-		stationTstateBudget_ -= (double)spent;
+		Z80free_step(&stationCpu_);
+		fddStepCounter_ = 0;
 	}
 }
 

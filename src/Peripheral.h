@@ -64,6 +64,19 @@ public:
 	// started", not as a negative delta).
 	virtual void onInstructionFetch(uint16_t pc, MemoryMap& memory, uint32_t tstates) { (void)pc; (void)memory; (void)tstates; }
 
+	// Called once AFTER every host instruction fully executes (right
+	// after z80->execute() returns), as opposed to onInstructionFetch()
+	// above which runs BEFORE. Added specifically for FDD3000's station
+	// stepping (2026-11-05): confirmed in real Fuse's own source
+	// (z80_ops.c, the fddCpuStep() call site sits immediately after
+	// `switch(opcode){...}`, i.e. after the host opcode has run) that this
+	// is where the real reference implementation steps its second CPU --
+	// JASE had been calling the equivalent step from onInstructionFetch()
+	// (before the host's own instruction), a real, confirmed ordering
+	// difference from the working reference. Default no-op: nothing but
+	// FDD3000 needs this yet.
+	virtual void onInstructionExecuted(MemoryMap& memory, uint32_t tstates) { (void)memory; (void)tstates; }
+
 	// Called when the machine's /NMI line is pulled (see MinZX::
 	// triggerNMI()). The generic Z80 signal always fires on the CPU
 	// regardless of any peripheral; this is just notice to whichever

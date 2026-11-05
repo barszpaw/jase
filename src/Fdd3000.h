@@ -110,38 +110,21 @@ extern "C" {
 //     (write a loader into station RAM, set station PC) for testing.
 //   - See Wd1772.h for the FDC's own simplification list (no step
 //     timing, no Read/Write Track, no real CRC, writes not persisted).
-//   - Station-CPU-to-host-CPU clock ratio: T-STATE-proportional, not an
-//     instruction-count multiplier. Porting Fuse's own `fddCpuStep()`
+//   - Station-CPU-to-host-CPU clock ratio: Fuse's OWN `fddCpuStep()`
 //     pattern verbatim (one station instruction per host instruction,
-//     except every 5th call steps twice -- 6:5 by instruction COUNT) was
-//     tried first and measurably made things WORSE than an earlier,
-//     purely-empirical flat 4x: JASE's and Fuse's Z80 cores don't
-//     necessarily spend the same number of T-states on the same mix of
-//     instructions, so matching instruction counts doesn't actually match
-//     real elapsed time between the two emulators. Switched instead to
-//     tracking real T-state counters on both sides and owing the station
-//     a T-state budget (kStationToHostClockRatio = 4MHz/3.5MHz, from the
-//     real M397/FDD35 schematics' own crystals, see
-//     docs/FDD3000/fuse_emulation_reference.md) of whatever real host
-//     time just elapsed -- but spending AT MOST ONE station instruction
-//     of that budget per call, never a catch-up burst (see
-//     stepStationForOneHostInstruction()). Since the station now runs the
-//     real Z80free core, its T-state cost per instruction comes directly
-//     from `Z80free_step()`'s own return value (its internal,
-//     table-generated timing, not hand-counted per memory/port access the
-//     way z80cpp's callback-based model needed) -- one less thing to get
-//     wrong by hand. Both ROMs run the same narrow, bounded-retry (DJNZ
-//     ~256) polling loop waiting for each other's ACK nibble; a
-//     multi-instruction catch-up burst let the station race ahead and
-//     then stall, so the two polling loops drifted out of step even
-//     though the long-run ratio was correct on average (live evidence:
-//     host saw the expected ACK byte only ~6 times in 48M polls).
-//     One-instruction-at-a-time stepping, with leftover budget carried to
-//     the next call, keeps the two CPUs interleaved as finely as the
-//     host's own per-instruction granularity allows. See project memory
-//     for the full tuning history (1x/4x/16x/6:5-by-count/batched
-//     T-state-proportional/single-instruction T-state-proportional) and
-//     for whether the Z80free port alone resolved the handshake.
+//     except every 5th call steps twice -- 6:5 by instruction COUNT, see
+//     fddStepCounter_/stepStationForOneHostInstruction()). This exact
+//     scheme was tried once before (pre-Z80free-port, pre-inPort-fix) and
+//     measured worse than a flat 4x -- but a differential replay test
+//     (2026-11-05, see project memory) proved JASE's own host-side output
+//     content matches real Fuse's byte-for-byte once fed real station
+//     responses, meaning the whole remaining gap is specifically about
+//     station-timing fidelity, which is exactly what Fuse's own (real,
+//     working) ratio is for -- worth a clean retry now that the T-state
+//     IN-instruction bug and the z80cpp-vs-Z80free question are both
+//     resolved. See project memory for the full tuning history
+//     (1x/4x/16x/6:5-by-count/T-state-proportional/single-instruction/
+//     reactive-burst/bridge-process) and this retry's outcome.
 class Fdd3000 : public Peripheral
 {
 public:
@@ -152,6 +135,7 @@ public:
 	bool in(uint16_t port, uint8_t& value) override;
 	bool out(uint16_t port, uint8_t value) override;
 	void onInstructionFetch(uint16_t pc, MemoryMap& memory, uint32_t tstates) override;
+	void onInstructionExecuted(MemoryMap& memory, uint32_t tstates) override;
 	std::string debugCommand(const std::vector<std::string>& toks) override;
 
 	// --fdd3000 on the command line -- off by default, same convention
@@ -244,21 +228,12 @@ private:
 	uint8_t stationInPort(uint16_t port);
 	void stationOutPort(uint16_t port, uint8_t value);
 
-	// Real crystal ratio, confirmed from the M397/FDD35 schematics (see
-	// docs/FDD3000/fuse_emulation_reference.md): station Z80A at 4MHz
-	// (16MHz master oscillator /4) vs the host Spectrum's own 3.5MHz.
-	// Porting Fuse's own instruction-COUNT ratio (6 station steps per 5
-	// host instructions) verbatim measurably made things WORSE -- JASE's
-	// and Fuse's Z80 cores don't necessarily spend the same number of
-	// T-states per "instruction", so matching instruction counts doesn't
-	// match real elapsed time. This stepper instead tracks each core's
-	// own real T-state counter and steps the station until it has "spent"
-	// its proportional share of whatever real time just elapsed on the
-	// host -- the per-step cost now comes straight from Z80free_step()'s
-	// own return value, see class comment.
-	static constexpr double kStationToHostClockRatio = 4.0 / 3.5;
-	uint32_t lastHostTstates_ = 0;    // host tstates observed at the previous step, for computing the delta
-	double stationTstateBudget_ = 0.0; // accumulated (fractional) station T-states owed
+	// Fuse's own fddCpuStep() counter: steps the station once per host
+	// instruction, except every 5th call steps it an extra time (6:5 by
+	// instruction COUNT). See stepStationForOneHostInstruction()'s own
+	// comment for why this is being retried now after an earlier attempt
+	// (before the inPort fix and the Z80free port) measured worse.
+	int fddStepCounter_ = 0;
 
 	bool enabled_ = false;
 	bool linkTraceEnabled_ = false;

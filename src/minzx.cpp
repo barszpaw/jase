@@ -392,6 +392,7 @@ void MinZX::update(uint8_t* screen)
 		// always stops you at the NEXT instruction, same as a real
 		// debugger's "continue".
 		z80->execute();
+		for (Peripheral* p : peripherals_) p->onInstructionExecuted(memory_, tstates);
 		// Advance the tape by exactly this instruction's T-states, not
 		// once at the end of the whole frame -- confirmed as a real bug
 		// (2026-10-16): batching it once per frame left tapeEarBit_ fixed
@@ -570,6 +571,7 @@ void MinZX::step(int n)
 			if (p->takeNMIRequest()) triggerNMI();
 		}
 		z80->execute();
+		for (Peripheral* p : peripherals_) p->onInstructionExecuted(memory_, tstates);
 		if ((breakpointsEnabled_ && isBreakpoint(z80->getRegPC())) || checkConditionalBreakpoint())
 		{
 			justHitBreakpoint_ = true;
