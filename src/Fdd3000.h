@@ -110,21 +110,22 @@ extern "C" {
 //     (write a loader into station RAM, set station PC) for testing.
 //   - See Wd1772.h for the FDC's own simplification list (no step
 //     timing, no Read/Write Track, no real CRC, writes not persisted).
-//   - Station-CPU-to-host-CPU clock ratio: Fuse's OWN `fddCpuStep()`
-//     pattern verbatim (one station instruction per host instruction,
-//     except every 5th call steps twice -- 6:5 by instruction COUNT, see
-//     fddStepCounter_/stepStationForOneHostInstruction()). This exact
-//     scheme was tried once before (pre-Z80free-port, pre-inPort-fix) and
-//     measured worse than a flat 4x -- but a differential replay test
-//     (2026-11-05, see project memory) proved JASE's own host-side output
-//     content matches real Fuse's byte-for-byte once fed real station
-//     responses, meaning the whole remaining gap is specifically about
-//     station-timing fidelity, which is exactly what Fuse's own (real,
-//     working) ratio is for -- worth a clean retry now that the T-state
-//     IN-instruction bug and the z80cpp-vs-Z80free question are both
-//     resolved. See project memory for the full tuning history
+//   - Station-CPU-to-host-CPU clock ratio: currently 5:2 (2.5x) by
+//     instruction COUNT (see fddStepCounter_/
+//     stepStationForOneHostInstruction()) -- NOT Fuse's own real 6:5,
+//     which was tried, measured precisely, and found to leave the
+//     station arriving at its receive primitive a hair too late every
+//     time (see project memory for the exact measurement: a live
+//     breakpoint at the host dispatcher's success-return address,
+//     0x04c3, combined with instrumented real-Fuse-vs-JASE comparison).
+//     5:2 is the first ratio that's ever let that breakpoint actually
+//     fire -- the FIRST confirmed successful command/response round trip
+//     in this whole investigation -- but only the very first post-reset
+//     attempt succeeds; every later one still fails the old way (1 hit
+//     in 60M steps tested). The race is winnable, not yet reliably won.
+//     See project memory for the full tuning history
 //     (1x/4x/16x/6:5-by-count/T-state-proportional/single-instruction/
-//     reactive-burst/bridge-process) and this retry's outcome.
+//     reactive-burst/bridge-process/5:2) and next-session leads.
 class Fdd3000 : public Peripheral
 {
 public:

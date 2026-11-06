@@ -268,12 +268,26 @@ void Fdd3000::onInstructionExecuted(MemoryMap& memory, uint32_t tstates)
 void Fdd3000::stepStationForOneHostInstruction(uint32_t hostTstates)
 {
 	(void)hostTstates; // pure instruction-count scheme now, see comment above
+	// EXPERIMENTAL: 5:2 (2.5x), evenly spread (Bresenham-style, like
+	// Fuse's own 6:5 spreads its +1 every 5th call rather than bursting).
+	// FIRST CONFIRMED SUCCESS THIS WHOLE INVESTIGATION (2026-11-05): a
+	// precise measurement (see project memory) found the station reaching
+	// its receive primitive missing the host's own permanent give-up
+	// point by a razor-thin real-time margin at every ratio tried
+	// (6:5 -> ~0.11s short, 3:2 -> ~0.06s, 2:1 -> ~0.012s, converging to
+	// zero) -- at 5:2 the margin flips: the host's MASTER-dispatcher
+	// success return (0x04c3) is actually reached, confirmed via a live
+	// breakpoint. NOT yet a full fix though: across 60M steps it was hit
+	// exactly ONCE (the very first post-reset attempt) -- every
+	// subsequent attempt still fails the same way as before. The race is
+	// winnable, not yet reliably won.
 	syncStationInterrupt();
 	Z80free_step(&stationCpu_);
-	if (++fddStepCounter_ >= 5) {
+	fddStepCounter_ += 3; // numerator-minus-denominator (5-2) per call
+	while (fddStepCounter_ >= 2) {
 		syncStationInterrupt();
 		Z80free_step(&stationCpu_);
-		fddStepCounter_ = 0;
+		fddStepCounter_ -= 2;
 	}
 }
 
