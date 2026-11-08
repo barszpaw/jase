@@ -11,6 +11,47 @@ void Wd1772::reset()
 	xferMode_ = Xfer::None;
 	xferPtr_ = nullptr; xferLen_ = xferPos_ = 0;
 	multiple_ = false;
+	pendingOp_ = PendingOp::None;
+	pendingDelaySteps_ = 0;
+	pendingXferPtr_ = nullptr; pendingXferLen_ = 0;
+}
+
+void Wd1772::tick()
+{
+	if (pendingOp_ == PendingOp::None) return;
+	if (pendingDelaySteps_ > 0) { pendingDelaySteps_--; return; }
+
+	PendingOp op = pendingOp_;
+	pendingOp_ = PendingOp::None;
+	switch (op) {
+	case PendingOp::BeginRead:
+		xferPtr_ = pendingXferPtr_; xferLen_ = pendingXferLen_; xferPos_ = 0;
+		xferMode_ = Xfer::Read;
+		drq_ = true;
+		break;
+	case PendingOp::BeginWrite:
+		xferPtr_ = pendingXferPtr_; xferLen_ = pendingXferLen_; xferPos_ = 0;
+		xferMode_ = Xfer::Write;
+		drq_ = true;
+		break;
+	case PendingOp::ReadAddress:
+		xferPtr_ = addrBuf_; xferLen_ = 6; xferPos_ = 0;
+		xferMode_ = Xfer::Read;
+		drq_ = true;
+		break;
+	case PendingOp::RecordNotFound:
+		recordNotFound_ = true;
+		finishCommand(true);
+		break;
+	case PendingOp::None:
+		break;
+	}
+}
+
+void Wd1772::armDelay(int sectorIndex, int sectorCount)
+{
+	(void)sectorCount;
+	pendingDelaySteps_ = sectorIndex * kStepsPerSectorSlot;
 }
 
 bool Wd1772::insertDisk(int driveIndex, const std::string& path)
@@ -148,26 +189,30 @@ void Wd1772::startTypeII(uint8_t cmd)
 
 void Wd1772::beginSectorRead()
 {
+	drq_ = false; // may be re-entered from advanceAfterSector() with drq_ still set from the prior sector
 	Drive* d = currentDrive();
-	int len = 0;
-	uint8_t* p = d && d->hasImage ? d->image.findSector(track_, side_ ? 1 : 0, sector_, len) : nullptr;
-	if (!p) { recordNotFound_ = true; finishCommand(true); return; }
-	xferPtr_ = p; xferLen_ = len; xferPos_ = 0; xferMode_ = Xfer::Read;
-	drq_ = true; // first byte ready immediately -- no ID-search/rotational-latency modeling, see class comment
+	int len = 0, index = 0;
+	uint8_t* p = d && d->hasImage ? d->image.findSector(track_, side_ ? 1 : 0, sector_, len, &index) : nullptr;
+	if (!p) { pendingOp_ = PendingOp::RecordNotFound; pendingDelaySteps_ = kRnfGiveUpSteps; return; }
+	pendingXferPtr_ = p; pendingXferLen_ = len;
+	pendingOp_ = PendingOp::BeginRead;
+	armDelay(index, d->image.sectorCount(track_, side_ ? 1 : 0));
 }
 
 void Wd1772::beginSectorWrite()
 {
+	drq_ = false; // see beginSectorRead()
 	Drive* d = currentDrive();
-	int len = 0;
+	int len = 0, index = 0;
 	// Can only overwrite a sector that already exists in the image's
 	// track layout -- there's no way to grow/reformat a DskImage here
 	// (Write Track, which is how real FORMAT creates new sector
 	// descriptors, isn't implemented -- see class comment).
-	uint8_t* p = d && d->hasImage ? d->image.findSector(track_, side_ ? 1 : 0, sector_, len) : nullptr;
-	if (!p) { recordNotFound_ = true; finishCommand(true); return; }
-	xferPtr_ = p; xferLen_ = len; xferPos_ = 0; xferMode_ = Xfer::Write;
-	drq_ = true;
+	uint8_t* p = d && d->hasImage ? d->image.findSector(track_, side_ ? 1 : 0, sector_, len, &index) : nullptr;
+	if (!p) { pendingOp_ = PendingOp::RecordNotFound; pendingDelaySteps_ = kRnfGiveUpSteps; return; }
+	pendingXferPtr_ = p; pendingXferLen_ = len;
+	pendingOp_ = PendingOp::BeginWrite;
+	armDelay(index, d->image.sectorCount(track_, side_ ? 1 : 0));
 }
 
 void Wd1772::advanceAfterSector()
@@ -176,9 +221,9 @@ void Wd1772::advanceAfterSector()
 		Xfer mode = xferMode_;
 		sector_++;
 		if (mode == Xfer::Read) beginSectorRead(); else beginSectorWrite();
-		// beginSectorRead()/beginSectorWrite() either armed the next
-		// sector's transfer or already called finishCommand() on RNF --
-		// either way nothing more to do here.
+		// beginSectorRead()/beginSectorWrite() always just arm a pending
+		// op now (success or RNF) -- tick() resolves it, nothing more to
+		// do here.
 	} else {
 		finishCommand(true);
 	}
@@ -192,19 +237,7 @@ void Wd1772::startTypeIII(uint8_t cmd)
 
 	uint8_t fam = cmd & 0xF0;
 	if (fam == 0xC0) { // READ ADDRESS
-		Drive* d = currentDrive();
-		uint8_t id = 0; int len = 0;
-		if (!d || !d->hasImage || !d->image.sectorDescriptor(track_, side_ ? 1 : 0, 0, id, len)) {
-			recordNotFound_ = true; finishCommand(true); return;
-		}
-		addrBuf_[0] = track_;
-		addrBuf_[1] = side_ ? 1 : 0;
-		addrBuf_[2] = id;
-		addrBuf_[3] = 1; // N: sector-size code, 1 => 256 bytes (every real image found here uses 256-byte sectors)
-		addrBuf_[4] = 0; addrBuf_[5] = 0; // CRC -- not modeled, always reported valid
-		xferPtr_ = addrBuf_; xferLen_ = 6; xferPos_ = 0; xferMode_ = Xfer::Read;
-		sector_ = id; // real WD17xx side effect: Sector register picks up the id just read
-		drq_ = true;
+		beginReadAddress();
 	} else {
 		// 0xE0 READ TRACK / 0xF0 WRITE TRACK: not implemented, see class
 		// comment -- complete immediately rather than leaving the guest
@@ -213,10 +246,28 @@ void Wd1772::startTypeIII(uint8_t cmd)
 	}
 }
 
+void Wd1772::beginReadAddress()
+{
+	Drive* d = currentDrive();
+	uint8_t id = 0; int len = 0;
+	if (!d || !d->hasImage || !d->image.sectorDescriptor(track_, side_ ? 1 : 0, 0, id, len)) {
+		pendingOp_ = PendingOp::RecordNotFound; pendingDelaySteps_ = kRnfGiveUpSteps; return;
+	}
+	addrBuf_[0] = track_;
+	addrBuf_[1] = side_ ? 1 : 0;
+	addrBuf_[2] = id;
+	addrBuf_[3] = 1; // N: sector-size code, 1 => 256 bytes (every real image found here uses 256-byte sectors)
+	addrBuf_[4] = 0; addrBuf_[5] = 0; // CRC -- not modeled, always reported valid
+	sector_ = id; // real WD17xx side effect: Sector register picks up the id just read
+	pendingOp_ = PendingOp::ReadAddress;
+	armDelay(0, d->image.sectorCount(track_, side_ ? 1 : 0)); // always descriptor index 0, see sectorDescriptor() call above
+}
+
 void Wd1772::forceInterrupt(uint8_t cmd)
 {
 	busy_ = false; drq_ = false;
 	xferMode_ = Xfer::None;
+	pendingOp_ = PendingOp::None; // real hardware: Force Interrupt aborts an in-progress ID search too
 	// I0-I2 (ready-transition/index-pulse conditions) aren't modeled --
 	// see class comment. I3 (bit3, immediate interrupt) is the only
 	// condition that reliably fires in a non-time-simulated model.

@@ -283,10 +283,12 @@ void Fdd3000::stepStationForOneHostInstruction(uint32_t hostTstates)
 	// winnable, not yet reliably won.
 	syncStationInterrupt();
 	Z80free_step(&stationCpu_);
+	wd_.tick(); // WD1772's own clock is the station's, see Wd1772.h class comment
 	fddStepCounter_ += 3; // numerator-minus-denominator (5-2) per call
 	while (fddStepCounter_ >= 2) {
 		syncStationInterrupt();
 		Z80free_step(&stationCpu_);
+		wd_.tick();
 		fddStepCounter_ -= 2;
 	}
 }
@@ -422,7 +424,7 @@ std::string Fdd3000::debugCommand(const std::vector<std::string>& toks)
 		// onInstructionFetch(), which keeps advancing regardless.
 		int n = toks.size() >= 3 ? atoi(toks[2].c_str()) : 1;
 		if (n < 1) n = 1;
-		for (int i = 0; i < n; i++) { syncStationInterrupt(); Z80free_step(&stationCpu_); }
+		for (int i = 0; i < n; i++) { syncStationInterrupt(); Z80free_step(&stationCpu_); wd_.tick(); }
 		return "OK";
 	}
 

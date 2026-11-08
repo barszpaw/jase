@@ -33,6 +33,28 @@
 //     immediately after issuing a Type I command hangs forever if BUSY
 //     is already 0 by the time it checks) is specifically worked around
 //     here too -- see busyOneShot_.
+//   - Type II/III commands DO now get a non-instant BUSY delay (added
+//     2026-11-07, GPL firewall lifted for FDD3000 -- see CLAUDE.md):
+//     real Fuse's shared wd_fdc.c (`wd_fdc_type_ii_seek()`/
+//     `wd_fdc_seek_verify_read_id()`) keeps BUSY set while the emulated
+//     disk "rotates" until the searched-for sector ID passes under the
+//     head, scaled by a FDD3000-specific constant (`WD_FLAG_FDD3000`,
+//     10x-66x faster than a generic +3 drive -- a clock-domain fudge,
+//     not real disk RPM, since Fuse schedules this on the HOST's T-state
+//     queue even though the FDC is physically on the station side).
+//     JASE has no byte-level track/rotational-position model to port
+//     that arithmetic into directly (DskImage exposes a sector list, not
+//     raw track bytes, and the station is stepped by INSTRUCTION COUNT,
+//     not T-states -- see Fdd3000::stepStationForOneHostInstruction()).
+//     So this is a scoped approximation, not a literal port: the delay
+//     is counted in STATION STEPS (the only clock unit the station side
+//     has), proportional to the matched sector's ordinal position within
+//     the track's stored/interleave order (a real proxy for "how far
+//     around the track", per DskImage's own class comment on physical
+//     interleave) for a hit, or a short fixed delay for RNF -- see
+//     tick()/kStepsPerSectorSlot/kRnfGiveUpSteps. Magnitudes are a free,
+//     untuned parameter; the point being tested is whether a non-instant
+//     BUSY at all changes the station's behavior, not exact timing.
 //   - No index-pulse, head-load-timing, or write-protect modeling (those
 //     status bits always read 0).
 //   - No real CRC: a sector is either found (by matching R in its
@@ -51,6 +73,12 @@ class Wd1772
 {
 public:
 	void reset();
+
+	// Call once per STATION step (same cadence as Z80free_step() in
+	// Fdd3000::stepStationForOneHostInstruction() -- station steps are
+	// this chip's only available clock, see class comment). Counts down
+	// a pending Type II/III completion; a no-op once nothing is pending.
+	void tick();
 
 	// Register access -- Fdd3000's station I/O block 6 (see Fdd3000.cpp)
 	// wires these straight to the real WD1772 register window.
@@ -103,8 +131,10 @@ private:
 	void forceInterrupt(uint8_t cmd);
 	void beginSectorRead();
 	void beginSectorWrite();
+	void beginReadAddress();
 	void advanceAfterSector();
 	void finishCommand(bool setIntrq);
+	void armDelay(int sectorIndex, int sectorCount); // sets pendingDelay_, see class comment
 
 	Drive drives_[kNumDrives];
 	int selectedDrive_ = 0;
@@ -129,4 +159,23 @@ private:
 	int xferPos_ = 0;
 	bool multiple_ = false; // Type II "m" bit: auto-advance sector_ and keep going
 	uint8_t addrBuf_[6] = {}; // Read Address's own 6-byte reply (track,side,sector,N,CRC1,CRC2)
+
+	// Non-instant Type II/III completion -- see class comment. A command
+	// start computes its OUTCOME immediately (DskImage's lookup is
+	// instant either way) but defers making that outcome visible
+	// (drq_/recordNotFound_) until pendingDelaySteps_ station steps have
+	// elapsed via tick().
+	enum class PendingOp { None, BeginRead, BeginWrite, ReadAddress, RecordNotFound };
+	PendingOp pendingOp_ = PendingOp::None;
+	int pendingDelaySteps_ = 0;
+	uint8_t* pendingXferPtr_ = nullptr;
+	int pendingXferLen_ = 0;
+
+	// Free, untuned parameters (see class comment) -- a "slot" is one
+	// position in the track's stored/interleave sector order, not a
+	// physical distance. FDD3000-specific per Fuse's own WD_FLAG_FDD3000
+	// (this class is FDD3000-exclusive in JASE, so no non-FDD3000 case
+	// needed).
+	static const int kStepsPerSectorSlot = 4;
+	static const int kRnfGiveUpSteps = 6;
 };

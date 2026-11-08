@@ -39,7 +39,13 @@ public:
 	// the in-memory copy -- see class comment on persistence below) and
 	// fills `len`. nullptr if the track doesn't exist or no sector with
 	// that id is present on it (real hardware's RNF case).
-	uint8_t* findSector(int track, int side, int sectorId, int& len);
+	// `indexOut`, if non-null, gets the matched descriptor's ordinal
+	// position within the track's STORED (physical interleave) order --
+	// Wd1772 uses this as a proxy for "how far around the track" a real
+	// head would have to travel to reach it, to give Type II/III commands
+	// a non-instant, position-dependent BUSY delay instead of completing
+	// on the same instruction they're issued.
+	uint8_t* findSector(int track, int side, int sectorId, int& len, int* indexOut = nullptr);
 
 	// How many sectors are listed on (track, side), and the raw 8-byte
 	// descriptor for the i-th one in STORED (not necessarily ascending
