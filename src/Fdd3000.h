@@ -2,21 +2,9 @@
 #include "Peripheral.h"
 #include "MemoryMap.h"
 #include "mame_wd1772/mame_wd1772_wrapper.h"
-#include "mame_z80/z80mame_wrapper.h"
+#include "z80.h"
 #include <cstdint>
 #include <string>
-
-// Forward-declared here (not pulled in via mame_z80/mame_stub.h, which is
-// internal plumbing for building z80.cpp itself, not a clean public API)
-// purely so the `friend` declarations below can see these as having C
-// linkage -- the actual declarations/definitions these must match live in
-// mame_stub.h/Fdd3000.cpp respectively.
-extern "C" {
-	uint8_t mamez80_mem_read(uint16_t addr);
-	void    mamez80_mem_write(uint16_t addr, uint8_t value);
-	uint8_t mamez80_io_read(uint16_t port);
-	void    mamez80_io_write(uint16_t port, uint8_t value);
-}
 
 // Timex FDD 3000 disk station stand-in -- a real, standalone Polish
 // peripheral: a separate little computer (Z80A + 64K RAM + WD1772 FDC)
@@ -87,25 +75,35 @@ extern "C" {
 //   sector, data -- see Wd1772.h); block 7 = drive/config register, see
 //   the bit-layout table above).
 //
-//   Station CPU core: MAME's real `z80_device` (src/mame_z80/, BSD-3-
-//   Clause, Juergen Buchmueller, via a thin `z80mame_*` C wrapper -- same
-//   shape the earlier `fdd3000-mame` branch already built and verified
-//   standalone: a real behavioral test (DJNZ/HALT timing) plus a direct
-//   replay-comparison against real captured Fuse traffic, byte-for-byte
-//   identical to Fuse's own Z80free core on everything exercised).
-//   Swapped in here (branch fdd3000-inprocess-mame, 2026-11-09) in place
-//   of the Z80free core this file used before (itself a real port of
-//   Fuse's own station CPU, GPL-3 -- see CLAUDE.md's "GPL firewall
-//   LIFTED for FDD3000" note, 2026-11-04) -- NOT because Z80free was
-//   found incorrect (it wasn't, twice confirmed), but to go back to
-//   BSD-3-Clause-only licensing for this file plus reuse the same,
-//   already-verified-correct WD1772 port (see below) behind one
-//   consistent core family. The wrapper's own API is a single global
-//   instance (no per-call context pointer for mem/io read/write) --
-//   `s_activeForMameZ80` in the .cpp dispatches those global callbacks to
-//   whichever Fdd3000 instance is current (JASE only ever has one FDD3000
-//   peripheral active at a time, same constraint Z80free's own API
-//   already had).
+//   Station CPU core, on this branch (`fdd3000-station-z80cpp`,
+//   2026-11-09, user-directed): SWAPS THE STATION CPU BACK to MinZX's own
+//   `z80cpp` core (the ORIGINAL station
+//   core, before the GPL firewall was lifted for this peripheral and
+//   Fuse's real Z80free was ported in -- see CLAUDE.md's "GPL firewall
+//   LIFTED for FDD3000" note, 2026-11-04) while KEEPING MAME's `wd1772_
+//   device` (below) exactly as `fdd3000-inprocess-mame` left it. User's
+//   own framing: "wzieliśmy kod od Fuse ponieważ nie działało nam nic --
+//   ani wd1772 ani kod boot od fdd3000 z z80 od minizx. teraz mamy
+//   doświadczenie i jedynym nie działającym elementem jest emulacja
+//   TI397" -- i.e. z80cpp was tried FIRST and the handshake never worked
+//   with it either, which is part of why Fuse's GPL sources got ported in
+//   at all. Now that the WD1772 side is independently proven correct
+//   (byte-exact sector reads, real replay comparisons) and the
+//   fdd3000-inprocess-mame hang bug turned out to be a pure clock-crossing
+//   wiring bug (see stepStationForOneHostInstruction()'s history, NOT
+//   core-choice-related), this branch re-tests z80cpp specifically to see
+//   whether the handshake still fails identically with it -- if so, that's
+//   real evidence narrowing the remaining gap to the HOST-side TI397
+//   interface emulation (ROMCS paging / link-port timing / interface RAM
+//   behavior) rather than either station core. Station CPU access is via
+//   a resurrected `StationOps : public Z80operations` (this file's own
+//   pre-Z80free implementation, found intact in git history at `be2ab32^`
+//   and ported back in verbatim) dispatching into the SAME `stationPeek8/
+//   stationPoke8/stationInPort/stationOutPort` methods the MAME-core
+//   version already used (those were never core-specific). (The MAME
+//   `z80_device`/`z80mame_*` wrapper this file used on `fdd3000-inprocess-
+//   mame` is not built on THIS branch at all -- see the Makefile and that
+//   branch for the MAME-core version of this class.)
 //
 //   Station FDC core: MAME's real `wd1772_device` (src/mame_wd1772/,
 //   BSD-3-Clause, Olivier Galibert) via `MameWd1772`, wrapped behind the
@@ -253,28 +251,38 @@ public:
 	bool isLinkTraceEnabled() const { return linkTraceEnabled_; }
 
 private:
-	// MAME's z80_device wrapper API (mamez80_mem_read/write/io_read/write,
-	// mame_z80/z80mame_wrapper.h) is global, not a per-instance method --
-	// same shape Z80free's own Z80free_Rd/Wr/In/Out had, see class
-	// comment. These free functions (defined in the .cpp) are the only
-	// external callers of the private station-access methods below,
-	// dispatched through s_activeForMameZ80.
-	friend uint8_t ::mamez80_mem_read(uint16_t);
-	friend void ::mamez80_mem_write(uint16_t, uint8_t);
-	friend uint8_t ::mamez80_io_read(uint16_t);
-	friend void ::mamez80_io_write(uint16_t, uint8_t);
+	// The station's own Z80operations: a private, self-contained 64K
+	// address space + coarse I/O decode, entirely separate from MinZX's
+	// (host) one. Resurrected verbatim from this file's pre-Z80free form
+	// (git history `be2ab32^`) -- see class comment for why. Just thin
+	// T-state-counting wrappers around the SAME stationPeek8/stationPoke8/
+	// stationInPort/stationOutPort the MAME-core version already used.
+	class StationOps : public Z80operations
+	{
+	public:
+		explicit StationOps(Fdd3000& owner) : owner_(owner) {}
+		uint8_t fetchOpcode(uint16_t address) override;
+		uint8_t peek8(uint16_t address) override;
+		void poke8(uint16_t address, uint8_t value) override;
+		uint16_t peek16(uint16_t address) override;
+		void poke16(uint16_t address, RegisterPair word) override;
+		uint8_t inPort(uint16_t port) override;
+		void outPort(uint16_t port, uint8_t value) override;
+		void addressOnBus(uint16_t address, int32_t wstates) override;
+		void interruptHandlingTime(int32_t wstates) override;
+		bool isActiveINT(void) override;
+	private:
+		Fdd3000& owner_;
+	};
 
 	void applyHostPaging(MemoryMap& memory);
 	void logLinkTrace(const char* side, const char* direction, uint8_t value) const;
 	void stepStationForOneHostInstruction(uint32_t hostTstates);
-	void syncStationInterrupt(); // raises/clears the MAME core's level-triggered IRQ line from wd_.intrq(), see .cpp
 
-	// The station's own memory/port access, called from the global
-	// mamez80_mem_read/write/io_read/write callbacks via
-	// s_activeForMameZ80 -- same logic that used to live in the
-	// StationOps class (removed when the station switched from z80cpp to
-	// Z80free, see class comment). Also reused directly by
-	// debugCommand()'s MEM/POKE sub-commands, same as before.
+	// The station's own memory/port access -- called both from StationOps
+	// above (the station CPU's own fetch/peek/poke/in/out) and directly by
+	// debugCommand()'s MEM/POKE sub-commands. Core-agnostic: this is the
+	// same logic the MAME-core version of this file used too.
 	uint8_t stationPeek8(uint16_t address);
 	void stationPoke8(uint16_t address, uint8_t value);
 	uint8_t stationInPort(uint16_t port);
@@ -283,11 +291,20 @@ private:
 	// Real clock-domain-crossing budget, in units of "1/kRatioDen-th of a
 	// station T-state" (kRatioNum/kRatioDen, see
 	// stepStationForOneHostInstruction()'s own comment -- currently an
-	// EXPERIMENTAL 1:1, not the real 8:7). int64_t: at hostTstates up to
-	// ~23 per call times kRatioNum, and potentially many calls between
+	// EXPERIMENTAL 1:1, not the real 8:7, matching whatever
+	// fdd3000-inprocess-mame was last tested with so this branch changes
+	// ONLY the station CPU core, nothing else). int64_t: at hostTstates up
+	// to ~23 per call times kRatioNum, and potentially many calls between
 	// resets, a plain 32-bit counter could in principle overflow over a
 	// very long run; 64 bits has no realistic overflow concern.
 	int64_t stationTstateBudget7_ = 0;
+
+	// z80cpp's own running T-state counter, accumulated by StationOps'
+	// addressOnBus()/interruptHandlingTime() exactly the way MinZX itself
+	// accounts host tstates -- needed because (unlike z80mame_step())
+	// z80cpp's execute() doesn't return how many T-states it just spent;
+	// the caller derives it from the delta of this counter instead.
+	uint32_t stationTstates_ = 0;
 
 	// onInstructionExecuted()'s tstates param is MinZX::update()'s raw
 	// per-FRAME cumulative counter (0..cycleTstates), not a per-instruction
@@ -331,8 +348,9 @@ private:
 	std::string romPath_;
 	std::string diskPath_[MameWd1772::kNumDrives];
 
-	// MAME's z80_device (src/mame_z80/) is driven through a global C API,
-	// same singleton shape Z80free's own Z80free_* calls had -- no
-	// per-instance CPU-state member needed here (see class comment: JASE
-	// only ever has one FDD3000 peripheral active at a time).
+	// z80cpp (unlike MAME's z80_device wrapper) is a real per-instance C++
+	// object -- stationOps_ must outlive/precede stationCpu_ since the
+	// constructor hands Z80 a pointer to it.
+	StationOps stationOps_;
+	Z80* stationCpu_ = nullptr;
 };

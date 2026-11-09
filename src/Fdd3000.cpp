@@ -7,14 +7,8 @@
 #include <vector>
 #include <SDL2/SDL.h>
 
-// MAME's z80mame_* wrapper API (mamez80_mem_read/write/io_read/write) is
-// a single global instance, no per-call context pointer -- see Fdd3000.h's
-// class comment. JASE only ever has one FDD3000 peripheral active at a
-// time, so a single static pointer to "whichever Fdd3000 is current" is
-// enough.
-static Fdd3000* s_activeForMameZ80 = nullptr;
-
 Fdd3000::Fdd3000()
+	: stationOps_(*this)
 {
 	memset(interfaceRom_.data, 0xFF, MemoryMap::PAGE_SIZE);
 	interfaceRom_.isRom = true;
@@ -30,13 +24,13 @@ Fdd3000::Fdd3000()
 	bootRom_[1] = 0x18; // JR
 	bootRom_[2] = 0xFE; // -2 (jump to self)
 
-	s_activeForMameZ80 = this;
-	z80mame_reset();
+	stationCpu_ = new Z80(&stationOps_);
+	stationCpu_->reset();
 }
 
 Fdd3000::~Fdd3000()
 {
-	if (s_activeForMameZ80 == this) s_activeForMameZ80 = nullptr;
+	delete stationCpu_;
 }
 
 // Accepts three real file shapes, all confirmed against docs/FDD3000/M397
@@ -136,7 +130,7 @@ void Fdd3000::stationReset()
 	// does NOT touch the link latches (ti2fdd/fdd2ti) at all -- user's own
 	// suggestion, 2026-11-04. Clearing them here (as this code used to) is a
 	// confirmed, real discrepancy from real hardware/Fuse behavior.
-	z80mame_reset();
+	stationCpu_->reset();
 	stationPaged_ = true;
 	stationTstateBudget7_ = 0; // don't carry a stale backlog across a reset
 	wd_.reset();
@@ -180,7 +174,7 @@ void Fdd3000::logLinkTrace(const char* side, const char* direction, uint8_t valu
 	bin[8] = '\0';
 	fprintf(stderr,
 	        "FDD3000LINK ts=%.6f hostPC=%04x stnPC=%04x side=%s dir=%s val=%02x bin=%s\n",
-	        ts, lastHostPc_, z80mame_get_pc(), side, direction, value, bin);
+	        ts, lastHostPc_, stationCpu_->getRegPC(), side, direction, value, bin);
 }
 
 bool Fdd3000::in(uint16_t port, uint8_t& value)
@@ -310,24 +304,17 @@ void Fdd3000::stepStationForOneHostInstruction(uint32_t hostTstates)
 	static constexpr int64_t kRatioDen = 1; // per host T-state
 	stationTstateBudget7_ += (int64_t)hostTstates * kRatioNum;
 	while (stationTstateBudget7_ > 0) {
-		syncStationInterrupt();
-		int spent = z80mame_step();
-		if (spent <= 0) spent = 4;
-		wd_.tick((uint32_t)spent); // real T-states just consumed -- see mame_wd1772_wrapper.h's tick() comment
+		// z80cpp is pull-based: StationOps::isActiveINT() is queried
+		// internally by execute() itself (reading wd_.intrq() live), so
+		// unlike the MAME wrapper's level-triggered z80mame_set_irq(),
+		// no explicit per-step sync call is needed here.
+		uint32_t before = stationTstates_;
+		stationCpu_->execute();
+		uint32_t spent = stationTstates_ - before;
+		if (spent == 0) spent = 4; // defensive floor -- a real opcode always costs T-states
+		wd_.tick(spent); // real T-states just consumed -- see mame_wd1772_wrapper.h's tick() comment
 		stationTstateBudget7_ -= (int64_t)spent * kRatioDen;
 	}
-}
-
-// MAME's z80_device wants a level-triggered IRQ line (execute_set_input()
-// under the hood, via z80mame_set_irq()) rather than Z80free's own
-// edge/flag-based INT_P set/clear -- call this once per step to mirror
-// the real WD1772 INTRQ line's LEVEL semantics: raise while intrq() is
-// true, explicitly clear the instant it goes low (real hardware: cleared
-// by the station reading its own status register, same as
-// MameWd1772::readStatus() already does).
-void Fdd3000::syncStationInterrupt()
-{
-	z80mame_set_irq(wd_.intrq() ? 1 : 0);
 }
 
 // Sub-commands below give the SAME station-side access the top-level
@@ -350,7 +337,7 @@ std::string Fdd3000::debugCommand(const std::vector<std::string>& toks)
 		         "OK enabled=%d active=%d linkToStation=%02x linkFromStation=%02x stationPaged=%d stationPC=%04x "
 		         "wdStatus=%02x wdTrack=%02x wdSector=%02x wdDrq=%d wdIntrq=%d",
 		         enabled_ ? 1 : 0, active_ ? 1 : 0, linkToStation_, linkFromStation_,
-		         stationPaged_ ? 1 : 0, z80mame_get_pc(),
+		         stationPaged_ ? 1 : 0, stationCpu_->getRegPC(),
 		         wd_.peekStatus(), wd_.readTrackReg(), wd_.readSectorReg(), wd_.drq() ? 1 : 0, wd_.intrq() ? 1 : 0);
 		return out;
 	}
@@ -362,11 +349,11 @@ std::string Fdd3000::debugCommand(const std::vector<std::string>& toks)
 		snprintf(out, sizeof(out),
 		         "OK AF=%04x BC=%04x DE=%04x HL=%04x AFx=%04x BCx=%04x DEx=%04x HLx=%04x "
 		         "IX=%04x IY=%04x SP=%04x PC=%04x I=%02x R=%02x IFF1=%d IFF2=%d IM=%d",
-		         z80mame_get_af(), z80mame_get_bc(), z80mame_get_de(), z80mame_get_hl(),
-		         z80mame_get_af2(), z80mame_get_bc2(), z80mame_get_de2(), z80mame_get_hl2(),
-		         z80mame_get_ix(), z80mame_get_iy(), z80mame_get_sp(), z80mame_get_pc(),
-		         z80mame_get_i(), z80mame_get_r(),
-		         z80mame_get_iff1(), z80mame_get_iff2(), z80mame_get_im());
+		         stationCpu_->getRegAF(), stationCpu_->getRegBC(), stationCpu_->getRegDE(), stationCpu_->getRegHL(),
+		         stationCpu_->getRegAFx(), stationCpu_->getRegBCx(), stationCpu_->getRegDEx(), stationCpu_->getRegHLx(),
+		         stationCpu_->getRegIX(), stationCpu_->getRegIY(), stationCpu_->getRegSP(), stationCpu_->getRegPC(),
+		         stationCpu_->getRegI(), stationCpu_->getRegR(),
+		         stationCpu_->isIFF1() ? 1 : 0, stationCpu_->isIFF2() ? 1 : 0, (int)stationCpu_->getIM());
 		return out;
 	}
 
@@ -379,18 +366,18 @@ std::string Fdd3000::debugCommand(const std::vector<std::string>& toks)
 		std::string reg = toks[2];
 		for (char& c : reg) c = (char)toupper((unsigned char)c);
 		bool ok = true;
-		if (reg == "AF") z80mame_set_af(val);
-		else if (reg == "BC") z80mame_set_bc(val);
-		else if (reg == "DE") z80mame_set_de(val);
-		else if (reg == "HL") z80mame_set_hl(val);
-		else if (reg == "AFX") z80mame_set_af2(val);
-		else if (reg == "BCX") z80mame_set_bc2(val);
-		else if (reg == "DEX") z80mame_set_de2(val);
-		else if (reg == "HLX") z80mame_set_hl2(val);
-		else if (reg == "IX") z80mame_set_ix(val);
-		else if (reg == "IY") z80mame_set_iy(val);
-		else if (reg == "SP") z80mame_set_sp(val);
-		else if (reg == "PC") z80mame_set_pc(val);
+		if (reg == "AF") stationCpu_->setRegAF(val);
+		else if (reg == "BC") stationCpu_->setRegBC(val);
+		else if (reg == "DE") stationCpu_->setRegDE(val);
+		else if (reg == "HL") stationCpu_->setRegHL(val);
+		else if (reg == "AFX") stationCpu_->setRegAFx(val);
+		else if (reg == "BCX") stationCpu_->setRegBCx(val);
+		else if (reg == "DEX") stationCpu_->setRegDEx(val);
+		else if (reg == "HLX") stationCpu_->setRegHLx(val);
+		else if (reg == "IX") stationCpu_->setRegIX(val);
+		else if (reg == "IY") stationCpu_->setRegIY(val);
+		else if (reg == "SP") stationCpu_->setRegSP(val);
+		else if (reg == "PC") stationCpu_->setRegPC(val);
 		else ok = false;
 		return ok ? "OK" : "ERR unknown register";
 	}
@@ -440,10 +427,11 @@ std::string Fdd3000::debugCommand(const std::vector<std::string>& toks)
 		int n = toks.size() >= 3 ? atoi(toks[2].c_str()) : 1;
 		if (n < 1) n = 1;
 		for (int i = 0; i < n; i++) {
-			syncStationInterrupt();
-			int spent = z80mame_step();
-			if (spent <= 0) spent = 4;
-			wd_.tick((uint32_t)spent);
+			uint32_t before = stationTstates_;
+			stationCpu_->execute();
+			uint32_t spent = stationTstates_ - before;
+			if (spent == 0) spent = 4;
+			wd_.tick(spent);
 		}
 		return "OK";
 	}
@@ -468,11 +456,9 @@ std::string Fdd3000::debugCommand(const std::vector<std::string>& toks)
 }
 
 // ---- Station memory/port access -- the station's own, entirely private
-// 64K address space. No T-state accounting needed here any more: MAME's
-// own internal, cycle-accurate timing (see z80mame_step()'s return value
-// in stepStationForOneHostInstruction()) replaces the hand-counted model
-// StationOps used to maintain by hand -- the exact kind of bookkeeping
-// that hid the 1-T-state IN bug fixed in minzx.cpp. ----
+// 64K address space. Core-agnostic (no T-state accounting here -- that's
+// StationOps' job below, mirroring how MinZX itself separates memory
+// access from T-state bookkeeping). ----
 
 uint8_t Fdd3000::stationPeek8(uint16_t address)
 {
@@ -538,30 +524,77 @@ void Fdd3000::stationOutPort(uint16_t port, uint8_t value)
 	}
 }
 
-// ---- MAME z80_device's required global callbacks (mame_z80/
-// z80mame_wrapper.h) -- NOT per-instance methods, see Fdd3000.h's class
-// comment on s_activeForMameZ80. Just thin dispatchers onto the station
-// access methods above, same shape Z80free's own Z80free_Rd/Wr/In/Out had.
-extern "C" {
+// ---- StationOps: the station CPU's own Z80operations, a thin T-state-
+// counting wrapper around the core-agnostic station access methods above.
+// Resurrected verbatim from this file's pre-Z80free form (git history
+// `be2ab32^`) -- see Fdd3000.h's class comment for why. T-state costs
+// match MinZX's own Z80operations implementation (minzx.cpp) exactly --
+// same base costs, no contention (the station has none) -- so
+// stationTstates_ is a real, comparable running counter, the same way
+// MinZX's own `tstates` member is.
 
-uint8_t mamez80_mem_read(uint16_t addr)
+uint8_t Fdd3000::StationOps::fetchOpcode(uint16_t address)
 {
-	return s_activeForMameZ80 ? s_activeForMameZ80->stationPeek8(addr) : 0xFF;
+	uint8_t v = peek8(address); // peek8 already accounts the shared 3 T-states
+	owner_.stationTstates_ += 1; // M1 cycle's extra T-state over a plain memory read
+	return v;
 }
 
-void mamez80_mem_write(uint16_t addr, uint8_t value)
+uint8_t Fdd3000::StationOps::peek8(uint16_t address)
 {
-	if (s_activeForMameZ80) s_activeForMameZ80->stationPoke8(addr, value);
+	owner_.stationTstates_ += 3;
+	return owner_.stationPeek8(address);
 }
 
-uint8_t mamez80_io_read(uint16_t port)
+void Fdd3000::StationOps::poke8(uint16_t address, uint8_t value)
 {
-	return s_activeForMameZ80 ? s_activeForMameZ80->stationInPort(port) : 0xFF;
+	owner_.stationTstates_ += 3;
+	owner_.stationPoke8(address, value);
 }
 
-void mamez80_io_write(uint16_t port, uint8_t value)
+uint16_t Fdd3000::StationOps::peek16(uint16_t address)
 {
-	if (s_activeForMameZ80) s_activeForMameZ80->stationOutPort(port, value);
+	uint8_t lsb = peek8(address);
+	uint8_t msb = peek8(address + 1);
+	return (msb << 8) | lsb;
 }
 
-} // extern "C"
+void Fdd3000::StationOps::poke16(uint16_t address, RegisterPair word)
+{
+	poke8(address, word.byte8.lo);
+	poke8(address + 1, word.byte8.hi);
+}
+
+uint8_t Fdd3000::StationOps::inPort(uint16_t port)
+{
+	// Real Z80 IN timing is 4 T-states for the I/O cycle itself (confirmed
+	// via a differential test against Fuse's own Z80free core -- see
+	// project memory). MinZX::inPort had the same off-by-one; fixed there too.
+	owner_.stationTstates_ += 4;
+	return owner_.stationInPort(port);
+}
+
+void Fdd3000::StationOps::outPort(uint16_t port, uint8_t value)
+{
+	owner_.stationTstates_ += 4; // matches MinZX::outPort's own base cost
+	owner_.stationOutPort(port, value);
+}
+
+void Fdd3000::StationOps::addressOnBus(uint16_t address, int32_t wstates)
+{
+	// The station's own bus has no ULA-style memory contention (that's a
+	// Spectrum-specific artifact) -- just the plain T-state cost, same as
+	// MinZX::addressOnBus()'s own non-contended path.
+	(void)address;
+	owner_.stationTstates_ += (uint32_t)wstates;
+}
+
+void Fdd3000::StationOps::interruptHandlingTime(int32_t wstates)
+{
+	owner_.stationTstates_ += (uint32_t)wstates;
+}
+
+bool Fdd3000::StationOps::isActiveINT(void)
+{
+	return owner_.wd_.intrq();
+}

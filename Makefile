@@ -22,16 +22,24 @@ INCLUDES := -Iinclude -Iinclude/z80cpp -Isrc/z80free $(shell pkg-config --cflags
 LIBS     := $(shell pkg-config --libs sdl2) -ldl
 
 # FDD3000's station core used to be Fuse's own Z80free (GPL-3, plain C) --
-# branch fdd3000-inprocess-mame (2026-11-09) swaps it for MAME's real
-# z80_device + wd1772_device instead (BSD-3-Clause, src/mame_z80/ and
-# src/mame_wd1772/, same ports already proven correct standalone on
-# fdd3000-mame), so Z80free is no longer built at all. CFLAGS/the .c rule
-# below stay in case anything else ever needs a plain-C build again.
+# branch fdd3000-inprocess-mame (2026-11-09) swapped it for MAME's real
+# z80_device instead (BSD-3-Clause, src/mame_z80/), but THIS branch
+# (fdd3000-station-z80cpp) swaps the station CPU again, back to MinZX's
+# own z80cpp (src/z80cpp/z80.cpp, already built below for the HOST CPU --
+# Fdd3000 just instantiates a second, independent Z80 object from the same
+# class) -- see Fdd3000.h's class comment for why. src/mame_z80/ is
+# genuinely unused on this branch, not built. The station's FDC core
+# still is MAME's real wd1772_device (src/mame_wd1772/, BSD-3-Clause,
+# unrelated to the CPU-core question this branch tests). CFLAGS/the .c
+# rule below stay in case anything else ever needs a plain-C build again.
 CFLAGS   ?= -std=c99 -O2 -Wall -MMD -MP
 
-MAME_Z80_SRCS := src/mame_z80/z80.cpp src/mame_z80/z80mame_wrapper.cpp src/mame_z80/mame_attotime.cpp
-MAME_Z80_OBJS := $(MAME_Z80_SRCS:.cpp=.o)
-MAME_WD1772_SRCS := src/mame_wd1772/wd_fdc.cpp src/mame_wd1772/mame_wd1772_wrapper.cpp src/mame_wd1772/mfm_track_encoder.cpp
+# mame_attotime.cpp (attotime::never/zero statics, mame_sched scheduling)
+# lives under src/mame_z80/ but is really shared MAME-port timing
+# infrastructure wd_fdc.cpp itself depends on -- NOT the Z80 CPU core
+# (src/mame_z80/z80.cpp/z80mame_wrapper.cpp, genuinely unused/unbuilt on
+# this branch).
+MAME_WD1772_SRCS := src/mame_wd1772/wd_fdc.cpp src/mame_wd1772/mame_wd1772_wrapper.cpp src/mame_wd1772/mfm_track_encoder.cpp src/mame_z80/mame_attotime.cpp
 MAME_WD1772_OBJS := $(MAME_WD1772_SRCS:.cpp=.o)
 
 # src/Kempston.cpp is excluded here: it ships as plugins/libkempston.so
@@ -39,7 +47,7 @@ MAME_WD1772_OBJS := $(MAME_WD1772_SRCS:.cpp=.o)
 # be released independently of core. It's still compiled, just into the
 # plugin target below instead of into $(TARGET).
 SRCS := $(filter-out src/Kempston.cpp,$(wildcard src/*.cpp)) src/z80cpp/z80.cpp
-OBJS := $(SRCS:.cpp=.o) $(MAME_Z80_OBJS) $(MAME_WD1772_OBJS)
+OBJS := $(SRCS:.cpp=.o) $(MAME_WD1772_OBJS)
 DEPS := $(OBJS:.o=.d)
 
 TARGET := jase
@@ -55,14 +63,18 @@ all: $(TARGET) $(PLUGIN_KEMPSTON)
 $(TARGET): $(OBJS)
 	$(CXX) $(OBJS) -o $@ $(LIBS)
 
-src/mame_z80/%.o: src/mame_z80/%.cpp
-	$(CXX) $(CXXFLAGS) -Isrc/mame_z80 -c $< -o $@
-
+# -Isrc/mame_z80: wd_fdc.cpp only #includes mame_stub.h for its attotime/
+# scheduling stub (header-only use) -- src/mame_z80/z80.cpp/z80mame_
+# wrapper.cpp themselves are NOT compiled/linked on this branch, see the
+# comment above. mame_attotime.cpp (built via the rule below) is.
 src/mame_wd1772/%.o: src/mame_wd1772/%.cpp
 	$(CXX) $(CXXFLAGS) -Isrc/mame_wd1772 -Isrc/mame_z80 -c $< -o $@
 
+src/mame_z80/mame_attotime.o: src/mame_z80/mame_attotime.cpp
+	$(CXX) $(CXXFLAGS) -Isrc/mame_z80 -c $< -o $@
+
 %.o: %.cpp
-	$(CXX) $(CXXFLAGS) $(INCLUDES) -Isrc/mame_z80 -Isrc/mame_wd1772 -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -Isrc/mame_wd1772 -c $< -o $@
 
 %.o: %.c
 	$(CC) $(CFLAGS) -Isrc/z80free -c $< -o $@
