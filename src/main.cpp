@@ -458,7 +458,8 @@ static void printUsage(const char* argv0)
 		"  --debug-port PORT      listen for the line-based debug protocol:\n"
 		"                           REGS, MEM addr len, POKE addr b1,b2,...,\n"
 		"                           PORT addr, OUT addr val, STATE, STEP [n],\n"
-		"                           CONT, STOP, RESET, NMI, BREAK/UNBREAK addr,\n"
+		"                           CONT, STOP, RESET, HARDRESET, NMI,\n"
+		"                           BREAK/UNBREAK addr,\n"
 		"                           BREAKS, PRESSKEYS chord,chord,..., TYPE text,\n"
 		"                           SAVESNA path, LOADZ80 path, SAVEZ80 path,\n"
 		"                           SCREENSHOT path\n"
@@ -509,7 +510,12 @@ static void printUsage(const char* argv0)
 		"                         Network > Remote list when the menu is open)\n"
 		"  F9                     Dandanator button (see --dandanator above;\n"
 		"                         also resets the Z80, like real hardware)\n"
-		"  F11                    RESET (full machine reset)\n"
+		"  F11                    HARD RESET (full power-cycle -- clears\n"
+		"                         floating-bus port state and any\n"
+		"                         peripheral RAM documented to survive a\n"
+		"                         plain Z80 reset, e.g. FDD3000's interface\n"
+		"                         RAM; see RESET in --debug-port above for a\n"
+		"                         plain Z80 reset instead)\n"
 		"  Alt+F10                NMI (see --multiface1 above; matches\n"
 		"                         pico-spec-drewpo's own F10/Alt+F10 split)\n"
 		"  Esc                    quit (or back out of the on-screen menu,\n"
@@ -997,14 +1003,18 @@ int main(int argc, char *argv[])
 				useLocktexture = !useLocktexture;
 				std::cout << "Using " << (useLocktexture ? "SDL_LockTexture() + memcpy()" : "SDL_UpdateTexture()") << std::endl;
 			}
-			// F11 = RESET, Alt+F10 = NMI -- matches pico-spec-drewpo's own
-			// hotkey convention (Config.cpp: HK_HARD_RESET on plain F11,
-			// HK_NMI on Alt+F10; plain F10 there is volume, not reset) so
-			// muscle memory carries over between the two emulators.
+			// F11 = HARD RESET, Alt+F10 = NMI -- matches pico-spec-drewpo's
+			// own hotkey convention (Config.cpp: HK_HARD_RESET on plain
+			// F11, HK_NMI on Alt+F10; plain F10 there is volume, not
+			// reset) so muscle memory carries over between the two
+			// emulators. Genuinely calls hardReset() (not reset()) as of
+			// 2026-11-08 -- see MinZX::hardReset()'s own comment for what
+			// that actually changes (floating-bus ports[] + a peripheral-
+			// level onReset(true) hook, e.g. FDD3000's interface RAM).
 			if (SDL_KEYDOWN == event.type && SDL_SCANCODE_F11 == event.key.keysym.scancode)
 			{
-				minZX.reset();
-				std::cout << "RESET" << std::endl;
+				minZX.hardReset();
+				std::cout << "HARD RESET" << std::endl;
 			}
 			if (SDL_KEYDOWN == event.type && SDL_SCANCODE_F10 == event.key.keysym.scancode
 				&& (event.key.keysym.mod & KMOD_ALT))

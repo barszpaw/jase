@@ -331,8 +331,15 @@ void DebugServer::handleLine(const std::string& line, MinZX& minZX)
         reply("OK");
     }
     else if (cmd == "RESET") {
-        // Same as the window's F11 hotkey -- a full machine reset.
+        // A plain Z80 reset (what F9/Dandanator-button triggers) -- NOT
+        // the same as F11 anymore, see HARDRESET below.
         minZX.reset();
+        reply("OK");
+    }
+    else if (cmd == "HARDRESET") {
+        // Same as the window's F11 hotkey -- see MinZX::hardReset()'s own
+        // comment for what distinguishes this from plain RESET above.
+        minZX.hardReset();
         reply("OK");
     }
     else if (cmd == "NMI") {

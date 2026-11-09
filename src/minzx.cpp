@@ -306,6 +306,21 @@ bool MinZX::saveScreenshotBMP(const char* path) const
 
 void MinZX::reset()
 {
+	doReset(false);
+}
+
+void MinZX::hardReset()
+{
+	// Refill the floating-bus array back to its true power-on state
+	// BEFORE the explicit zero-writes below (ports[0x1F]/[0x11F]) land on
+	// top -- same order the constructor itself uses (memset 0xFF, then
+	// reset()).
+	memset(ports, 0xFF, 0x10000);
+	doReset(true);
+}
+
+void MinZX::doReset(bool hard)
+{
 	border = 7;
 	z80->reset();
 
@@ -339,6 +354,8 @@ void MinZX::reset()
 	// if Multiply was never configured (does nothing) or isn't currently
 	// connected.
 	if (multiply_) multiply_->reconnect();
+
+	for (Peripheral* p : peripherals_) p->onReset(hard);
 }
 
 void MinZX::update(uint8_t* screen)

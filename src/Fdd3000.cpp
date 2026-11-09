@@ -141,6 +141,15 @@ void Fdd3000::stationReset()
 	wd_.reset();
 }
 
+void Fdd3000::onReset(bool hard)
+{
+	// See Fdd3000.h's own comment on this override: a plain Z80 reset
+	// (hard=false) leaves the interface's own 1K RAM alone, matching real
+	// hardware; only a genuine power-cycle (hard=true) clears it back to
+	// its true power-on content.
+	if (hard) memset(interfaceRam_.data, 0x00, MemoryMap::PAGE_SIZE);
+}
+
 // Station block 7 -- see Fdd3000.h's bit-layout table (a hardware fact,
 // not copied logic). All five fields are active-LOW on the wire, so the
 // decode below inverts each bit's sense explicitly rather than reading

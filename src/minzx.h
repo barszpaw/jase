@@ -173,6 +173,18 @@ public:
 
 	void reset();
 
+	// Simulates a genuine power-cycle, NOT just another Z80 RESET pulse --
+	// see Peripheral::onReset()'s own comment for why the two differ on
+	// real hardware. Currently the only user-visible difference from
+	// reset() is: `ports[]` (the floating-bus/last-written-value array,
+	// see the constructor) gets refilled to its true power-on state
+	// before the normal reset() steps run, and every peripheral gets
+	// onReset(true) instead of onReset(false) -- giving a peripheral like
+	// FDD3000 (whose host-side interface RAM is documented/observed to
+	// survive a plain Z80 reset on real hardware) a hook to actually
+	// clear that RAM here instead.
+	void hardReset();
+
 	// /NMI is level-triggered on real hardware (held until serviced); the
 	// z80cpp core models that as a one-shot flag consumed at the start of
 	// the next execute() (see z80cpp/z80.cpp), so a single call here is
@@ -379,6 +391,12 @@ public:
 	size_t getTapeByteIdx() const { return tapeByteIdx_; }
 	uint32_t getTapePilotPulsesLeft() const { return tapePilotPulsesLeft_; }
 private:
+	// Shared by reset() and hardReset() -- see hardReset()'s own comment
+	// for what the `hard` flag changes (currently: whether ports[] was
+	// just refilled to its power-on state before this runs, and whether
+	// peripherals get onReset(true) or onReset(false)).
+	void doReset(bool hard);
+
 
 	uint8_t* lastScreenBuf_ = nullptr;
 	uint32_t tstates;

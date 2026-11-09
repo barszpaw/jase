@@ -139,6 +139,22 @@ public:
 	void onInstructionExecuted(MemoryMap& memory, uint32_t tstates) override;
 	std::string debugCommand(const std::vector<std::string>& toks) override;
 
+	// The host-side interface's own 1K RAM (interfaceRam_ below) is a
+	// real, physically separate RAM chip on the interface card -- a plain
+	// Z80 RESET pulse (onReset(false), F11/Dandanator-button-triggered)
+	// does not touch it on real hardware, same as it doesn't touch the
+	// station's own RAM across the link. Only a genuine power-cycle
+	// (onReset(true), MinZX::hardReset()) clears it back to its true
+	// power-on content -- matches the constructor's own
+	// `memset(interfaceRam_.data, 0x00, ...)`. User-observed, 2026-11-08:
+	// the real STAVI/TI-of-TTL boot banner appears on real hardware only
+	// intermittently after a plain Z80 reset, suspected to be exactly
+	// this kind of leftover-interface-RAM-state nondeterminism (also
+	// mirrors a documented Fuse convention: emulated ports default 0x00
+	// if used, 0xFF if not, which is itself a power-on-state concept
+	// distinct from a mid-session RESET).
+	void onReset(bool hard) override;
+
 	// --fdd3000 on the command line -- off by default, same convention
 	// as --multiface1/--divide.
 	void setEnabled(bool on) { enabled_ = on; }

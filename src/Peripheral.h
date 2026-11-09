@@ -123,4 +123,19 @@ public:
 	// their own.
 	virtual bool takeResetRequest() { return false; }
 	virtual bool takeNMIRequest() { return false; }
+
+	// Called once per peripheral on every MinZX::reset() (hard=false) or
+	// MinZX::hardReset() (hard=true) -- see MinZX::reset()/hardReset()'s
+	// own comments for the distinction real hardware makes: a plain Z80
+	// RESET pulse (soft) leaves everything else on the board electrically
+	// alone (RAM, latches, and any peripheral's own internal state keep
+	// whatever they last held), while a genuine power-cycle (hard) is the
+	// only thing that reliably clears a peripheral's own latches/RAM back
+	// to their true power-on state. Default no-op: the overwhelming
+	// majority of peripherals (Kempston, AY, ZiFi) have no state that
+	// distinguishes the two -- only a device with its OWN RAM that's
+	// documented (or observed) to survive a plain Z80 reset on real
+	// hardware (FDD3000's host-side interface RAM is the first case)
+	// needs to override this.
+	virtual void onReset(bool hard) { (void)hard; }
 };
