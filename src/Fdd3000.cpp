@@ -7,11 +7,12 @@
 #include <vector>
 #include <SDL2/SDL.h>
 
-// Z80free's own API (Z80free_Rd/Wr/In/Out) is a single global instance,
-// no per-call context pointer -- see Fdd3000.h's class comment. JASE only
-// ever has one FDD3000 peripheral active at a time (same as Fuse), so a
-// single static pointer to "whichever Fdd3000 is current" is enough.
-static Fdd3000* s_activeForZ80free = nullptr;
+// MAME's z80mame_* wrapper API (mamez80_mem_read/write/io_read/write) is
+// a single global instance, no per-call context pointer -- see Fdd3000.h's
+// class comment. JASE only ever has one FDD3000 peripheral active at a
+// time, so a single static pointer to "whichever Fdd3000 is current" is
+// enough.
+static Fdd3000* s_activeForMameZ80 = nullptr;
 
 Fdd3000::Fdd3000()
 {
@@ -29,13 +30,13 @@ Fdd3000::Fdd3000()
 	bootRom_[1] = 0x18; // JR
 	bootRom_[2] = 0xFE; // -2 (jump to self)
 
-	s_activeForZ80free = this;
-	Z80free_reset(&stationCpu_);
+	s_activeForMameZ80 = this;
+	z80mame_reset();
 }
 
 Fdd3000::~Fdd3000()
 {
-	if (s_activeForZ80free == this) s_activeForZ80free = nullptr;
+	if (s_activeForMameZ80 == this) s_activeForMameZ80 = nullptr;
 }
 
 // Accepts three real file shapes, all confirmed against docs/FDD3000/M397
@@ -123,7 +124,7 @@ bool Fdd3000::loadStationBootRom(const char* path)
 bool Fdd3000::insertDisk(int driveIndex, const char* path)
 {
 	if (!wd_.insertDisk(driveIndex, path)) return false;
-	if (driveIndex >= 0 && driveIndex < Wd1772::kNumDrives) diskPath_[driveIndex] = path;
+	if (driveIndex >= 0 && driveIndex < MameWd1772::kNumDrives) diskPath_[driveIndex] = path;
 	return true;
 }
 
@@ -135,9 +136,9 @@ void Fdd3000::stationReset()
 	// does NOT touch the link latches (ti2fdd/fdd2ti) at all -- user's own
 	// suggestion, 2026-11-04. Clearing them here (as this code used to) is a
 	// confirmed, real discrepancy from real hardware/Fuse behavior.
-	Z80free_reset(&stationCpu_);
+	z80mame_reset();
 	stationPaged_ = true;
-	fddStepCounter_ = 0; // don't carry a stale backlog across a reset
+	stationTstateBudget7_ = 0; // don't carry a stale backlog across a reset
 	wd_.reset();
 }
 
@@ -179,7 +180,7 @@ void Fdd3000::logLinkTrace(const char* side, const char* direction, uint8_t valu
 	bin[8] = '\0';
 	fprintf(stderr,
 	        "FDD3000LINK ts=%.6f hostPC=%04x stnPC=%04x side=%s dir=%s val=%02x bin=%s\n",
-	        ts, lastHostPc_, stationCpu_.PC, side, direction, value, bin);
+	        ts, lastHostPc_, z80mame_get_pc(), side, direction, value, bin);
 }
 
 bool Fdd3000::in(uint16_t port, uint8_t& value)
@@ -255,7 +256,12 @@ void Fdd3000::onInstructionExecuted(MemoryMap& memory, uint32_t tstates)
 {
 	(void)memory;
 	if (!enabled_) return;
-	stepStationForOneHostInstruction(tstates);
+	// tstates is the frame-cumulative counter, not this instruction's own
+	// cost -- see lastRawTstates_'s comment in Fdd3000.h. Same wrap-safe
+	// delta Dandanator::onInstructionFetch() uses.
+	uint32_t delta = (tstates >= lastRawTstates_) ? (tstates - lastRawTstates_) : tstates;
+	lastRawTstates_ = tstates;
+	stepStationForOneHostInstruction(delta);
 }
 
 // RETRIED (2026-11-05): Fuse's own fddCpuStep() pattern VERBATIM -- one
@@ -276,46 +282,52 @@ void Fdd3000::onInstructionExecuted(MemoryMap& memory, uint32_t tstates)
 // own, real, working scheduling scheme) is supposed to reproduce.
 void Fdd3000::stepStationForOneHostInstruction(uint32_t hostTstates)
 {
-	(void)hostTstates; // pure instruction-count scheme now, see comment above
-	// EXPERIMENTAL: 5:2 (2.5x), evenly spread (Bresenham-style, like
-	// Fuse's own 6:5 spreads its +1 every 5th call rather than bursting).
-	// FIRST CONFIRMED SUCCESS THIS WHOLE INVESTIGATION (2026-11-05): a
-	// precise measurement (see project memory) found the station reaching
-	// its receive primitive missing the host's own permanent give-up
-	// point by a razor-thin real-time margin at every ratio tried
-	// (6:5 -> ~0.11s short, 3:2 -> ~0.06s, 2:1 -> ~0.012s, converging to
-	// zero) -- at 5:2 the margin flips: the host's MASTER-dispatcher
-	// success return (0x04c3) is actually reached, confirmed via a live
-	// breakpoint. NOT yet a full fix though: across 60M steps it was hit
-	// exactly ONCE (the very first post-reset attempt) -- every
-	// subsequent attempt still fails the same way as before. The race is
-	// winnable, not yet reliably won.
-	syncStationInterrupt();
-	Z80free_step(&stationCpu_);
-	wd_.tick(); // WD1772's own clock is the station's, see Wd1772.h class comment
-	fddStepCounter_ += 3; // numerator-minus-denominator (5-2) per call
-	while (fddStepCounter_ >= 2) {
+	// Real clock-domain crossing, user-proposed 2026-11-09 ("czy tick
+	// zegara CPU ZX Spectrum przekazuje tick do zegara FDD3000?" -- it
+	// didn't: hostTstates was received and silently discarded by the
+	// earlier 5:2-by-INSTRUCTION-COUNT scheme below, which this replaces).
+	// Accumulate the host's own real T-states into a station-T-state
+	// budget, then step the station for real instructions (each consuming
+	// whatever T-states it actually takes, via z80mame_step()'s own
+	// return value, NOT a guess) until that budget is spent --
+	// Bresenham-style carry-over of any remainder into the next call,
+	// same technique the old instruction-count ratio used, just now
+	// driven by a real clock ratio instead of a guessed instruction-count
+	// one. kRatioNum/kRatioDen is station-T-states-per-host-T-state; the
+	// budget is scaled *kRatioDen internally (not kRatioNum) so it stays
+	// exact integer arithmetic without floating point.
+	//
+	// EXPERIMENT (2026-11-09, user-directed): 1:1 instead of the real
+	// 8:7 (station 4MHz / host 3.5MHz, M397/FDD35 schematics). User's own
+	// reasoning: an earlier live test (fdd3000-mame branch, separate-
+	// process station) ran the STATION at 12MHz (3x its real clock) and
+	// the handshake still worked -- suggesting the PROTOCOL itself isn't
+	// sensitive to the exact clock ratio, only to whether each side gets
+	// enough relative execution time to see the other's response in time.
+	// If 1:1 works as well as (or better than) 8:7, that's real evidence
+	// for that theory; if it's clearly worse, that argues against it.
+	static constexpr int64_t kRatioNum = 1; // station T-states
+	static constexpr int64_t kRatioDen = 1; // per host T-state
+	stationTstateBudget7_ += (int64_t)hostTstates * kRatioNum;
+	while (stationTstateBudget7_ > 0) {
 		syncStationInterrupt();
-		Z80free_step(&stationCpu_);
-		wd_.tick();
-		fddStepCounter_ -= 2;
+		int spent = z80mame_step();
+		if (spent <= 0) spent = 4;
+		wd_.tick((uint32_t)spent); // real T-states just consumed -- see mame_wd1772_wrapper.h's tick() comment
+		stationTstateBudget7_ -= (int64_t)spent * kRatioDen;
 	}
 }
 
-// Z80free needs an explicit set/clear of INT_P (Z80free.h) rather than a
-// polled "is the line active" callback the way z80cpp's isActiveINT()
-// worked -- and, unlike z80cpp, it does NOT auto-clear INT_P once an
-// interrupt is serviced (see Z80free.c: IFF1 just goes to 0, INT_P stays
-// 1), so a stale INT_P would immediately re-fire the moment the station's
-// program re-enables interrupts. Call this once per step to mirror the
-// real WD1772 INTRQ line's LEVEL semantics: raise while intrq() is true
-// (idempotent -- Z80free_INT just sets a flag), explicitly clear the
-// instant it goes low (real hardware: cleared by the station reading its
-// own status register, same as Wd1772::readStatus() already does).
+// MAME's z80_device wants a level-triggered IRQ line (execute_set_input()
+// under the hood, via z80mame_set_irq()) rather than Z80free's own
+// edge/flag-based INT_P set/clear -- call this once per step to mirror
+// the real WD1772 INTRQ line's LEVEL semantics: raise while intrq() is
+// true, explicitly clear the instant it goes low (real hardware: cleared
+// by the station reading its own status register, same as
+// MameWd1772::readStatus() already does).
 void Fdd3000::syncStationInterrupt()
 {
-	if (wd_.intrq()) Z80free_INT(&stationCpu_, 0xFF);
-	else Z80free_INTserved(&stationCpu_);
+	z80mame_set_irq(wd_.intrq() ? 1 : 0);
 }
 
 // Sub-commands below give the SAME station-side access the top-level
@@ -338,7 +350,7 @@ std::string Fdd3000::debugCommand(const std::vector<std::string>& toks)
 		         "OK enabled=%d active=%d linkToStation=%02x linkFromStation=%02x stationPaged=%d stationPC=%04x "
 		         "wdStatus=%02x wdTrack=%02x wdSector=%02x wdDrq=%d wdIntrq=%d",
 		         enabled_ ? 1 : 0, active_ ? 1 : 0, linkToStation_, linkFromStation_,
-		         stationPaged_ ? 1 : 0, stationCpu_.PC,
+		         stationPaged_ ? 1 : 0, z80mame_get_pc(),
 		         wd_.peekStatus(), wd_.readTrackReg(), wd_.readSectorReg(), wd_.drq() ? 1 : 0, wd_.intrq() ? 1 : 0);
 		return out;
 	}
@@ -347,20 +359,14 @@ std::string Fdd3000::debugCommand(const std::vector<std::string>& toks)
 	for (char& c : sub) c = (char)toupper((unsigned char)c);
 
 	if (sub == "REGS") {
-		// R is split across R (lower 7 bits, incremented per opcode/prefix)
-		// and R2 (bit 7, set only by an explicit LD R,A) -- same real-Z80
-		// quirk z80cpp's own getRegR() reproduces; combined by hand here
-		// since Z80free_readR() has LD-A,R-style flag side effects we don't
-		// want for a passive debug read.
-		uint8_t r = (stationCpu_.R & 0x7F) | (stationCpu_.R2 & 0x80);
 		snprintf(out, sizeof(out),
 		         "OK AF=%04x BC=%04x DE=%04x HL=%04x AFx=%04x BCx=%04x DEx=%04x HLx=%04x "
 		         "IX=%04x IY=%04x SP=%04x PC=%04x I=%02x R=%02x IFF1=%d IFF2=%d IM=%d",
-		         stationCpu_.Rm.wr.AF, stationCpu_.Rm.wr.BC, stationCpu_.Rm.wr.DE, stationCpu_.Rm.wr.HL,
-		         stationCpu_.Ra.wr.AF, stationCpu_.Ra.wr.BC, stationCpu_.Ra.wr.DE, stationCpu_.Ra.wr.HL,
-		         stationCpu_.Rm.wr.IX, stationCpu_.Rm.wr.IY, stationCpu_.Rm.wr.SP, stationCpu_.PC,
-		         stationCpu_.I, r,
-		         stationCpu_.IFF1 ? 1 : 0, stationCpu_.IFF2 ? 1 : 0, (int)stationCpu_.IM);
+		         z80mame_get_af(), z80mame_get_bc(), z80mame_get_de(), z80mame_get_hl(),
+		         z80mame_get_af2(), z80mame_get_bc2(), z80mame_get_de2(), z80mame_get_hl2(),
+		         z80mame_get_ix(), z80mame_get_iy(), z80mame_get_sp(), z80mame_get_pc(),
+		         z80mame_get_i(), z80mame_get_r(),
+		         z80mame_get_iff1(), z80mame_get_iff2(), z80mame_get_im());
 		return out;
 	}
 
@@ -373,18 +379,18 @@ std::string Fdd3000::debugCommand(const std::vector<std::string>& toks)
 		std::string reg = toks[2];
 		for (char& c : reg) c = (char)toupper((unsigned char)c);
 		bool ok = true;
-		if (reg == "AF") stationCpu_.Rm.wr.AF = val;
-		else if (reg == "BC") stationCpu_.Rm.wr.BC = val;
-		else if (reg == "DE") stationCpu_.Rm.wr.DE = val;
-		else if (reg == "HL") stationCpu_.Rm.wr.HL = val;
-		else if (reg == "AFX") stationCpu_.Ra.wr.AF = val;
-		else if (reg == "BCX") stationCpu_.Ra.wr.BC = val;
-		else if (reg == "DEX") stationCpu_.Ra.wr.DE = val;
-		else if (reg == "HLX") stationCpu_.Ra.wr.HL = val;
-		else if (reg == "IX") stationCpu_.Rm.wr.IX = val;
-		else if (reg == "IY") stationCpu_.Rm.wr.IY = val;
-		else if (reg == "SP") stationCpu_.Rm.wr.SP = val;
-		else if (reg == "PC") stationCpu_.PC = val;
+		if (reg == "AF") z80mame_set_af(val);
+		else if (reg == "BC") z80mame_set_bc(val);
+		else if (reg == "DE") z80mame_set_de(val);
+		else if (reg == "HL") z80mame_set_hl(val);
+		else if (reg == "AFX") z80mame_set_af2(val);
+		else if (reg == "BCX") z80mame_set_bc2(val);
+		else if (reg == "DEX") z80mame_set_de2(val);
+		else if (reg == "HLX") z80mame_set_hl2(val);
+		else if (reg == "IX") z80mame_set_ix(val);
+		else if (reg == "IY") z80mame_set_iy(val);
+		else if (reg == "SP") z80mame_set_sp(val);
+		else if (reg == "PC") z80mame_set_pc(val);
 		else ok = false;
 		return ok ? "OK" : "ERR unknown register";
 	}
@@ -433,7 +439,12 @@ std::string Fdd3000::debugCommand(const std::vector<std::string>& toks)
 		// onInstructionFetch(), which keeps advancing regardless.
 		int n = toks.size() >= 3 ? atoi(toks[2].c_str()) : 1;
 		if (n < 1) n = 1;
-		for (int i = 0; i < n; i++) { syncStationInterrupt(); Z80free_step(&stationCpu_); wd_.tick(); }
+		for (int i = 0; i < n; i++) {
+			syncStationInterrupt();
+			int spent = z80mame_step();
+			if (spent <= 0) spent = 4;
+			wd_.tick((uint32_t)spent);
+		}
 		return "OK";
 	}
 
@@ -457,8 +468,8 @@ std::string Fdd3000::debugCommand(const std::vector<std::string>& toks)
 }
 
 // ---- Station memory/port access -- the station's own, entirely private
-// 64K address space. No T-state accounting needed here any more: Z80free's
-// own internal, table-generated timing (see Z80free_step()'s return value
+// 64K address space. No T-state accounting needed here any more: MAME's
+// own internal, cycle-accurate timing (see z80mame_step()'s return value
 // in stepStationForOneHostInstruction()) replaces the hand-counted model
 // StationOps used to maintain by hand -- the exact kind of bookkeeping
 // that hid the 1-T-state IN bug fixed in minzx.cpp. ----
@@ -527,29 +538,30 @@ void Fdd3000::stationOutPort(uint16_t port, uint8_t value)
 	}
 }
 
-// ---- Z80free's required global callbacks (Z80free.h) -- NOT per-instance
-// methods, see Fdd3000.h's class comment on s_activeForZ80free. Just thin
-// dispatchers onto the station access methods above. ----
+// ---- MAME z80_device's required global callbacks (mame_z80/
+// z80mame_wrapper.h) -- NOT per-instance methods, see Fdd3000.h's class
+// comment on s_activeForMameZ80. Just thin dispatchers onto the station
+// access methods above, same shape Z80free's own Z80free_Rd/Wr/In/Out had.
 extern "C" {
 
-byte Z80free_Rd(word Addr)
+uint8_t mamez80_mem_read(uint16_t addr)
 {
-	return s_activeForZ80free ? s_activeForZ80free->stationPeek8(Addr) : 0xFF;
+	return s_activeForMameZ80 ? s_activeForMameZ80->stationPeek8(addr) : 0xFF;
 }
 
-void Z80free_Wr(word Addr, byte Value)
+void mamez80_mem_write(uint16_t addr, uint8_t value)
 {
-	if (s_activeForZ80free) s_activeForZ80free->stationPoke8(Addr, Value);
+	if (s_activeForMameZ80) s_activeForMameZ80->stationPoke8(addr, value);
 }
 
-byte Z80free_In(word Port)
+uint8_t mamez80_io_read(uint16_t port)
 {
-	return s_activeForZ80free ? s_activeForZ80free->stationInPort(Port) : 0xFF;
+	return s_activeForMameZ80 ? s_activeForMameZ80->stationInPort(port) : 0xFF;
 }
 
-void Z80free_Out(word Port, byte Value)
+void mamez80_io_write(uint16_t port, uint8_t value)
 {
-	if (s_activeForZ80free) s_activeForZ80free->stationOutPort(Port, Value);
+	if (s_activeForMameZ80) s_activeForMameZ80->stationOutPort(port, value);
 }
 
 } // extern "C"

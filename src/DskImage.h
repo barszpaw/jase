@@ -4,14 +4,13 @@
 #include <vector>
 
 // A loaded CPCEMU "DSK"/"Extended DSK" disk image -- the real, public,
-// openly-documented container format every real FDD3000/TOS/CP/M disk
-// image found for this project actually uses (confirmed, 2026-11-01:
-// `~/src/Fuse_FDD3000/disks/**/*.dsk`, all either "MV - CPCEMU
-// Disk-File" or "EXTENDED CPC DSK File" signed, produced by the real
-// "CPCDiskXP" tool per that archive's own notes). Clean-room parser
-// written directly from the format's own on-disk layout (confirmed
-// byte-for-byte via `xxd` against a real file, not from any other
-// project's code) -- same policy as everywhere else in this codebase.
+// openly-documented container format used by the FDD3000/TOS/CP/M disk
+// images in this project. The basic container walk was originally written
+// from the on-disk format; sector-size and Extended DSK protection handling
+// now follow MAME's dsk_format::load semantics (attribution/license in
+// DskImage.cpp). Track timing/flux is passed through the station's MFM
+// adapter for MAME's WD1772, rather than using MAME's full floppy-image
+// framework.
 //
 // Format, as verified: a 256-byte disk-info header (track count, side
 // count, and -- for Extended DSK -- a per-track size byte table, each
@@ -28,6 +27,15 @@
 class DskImage
 {
 public:
+	// Sector metadata retained by MAME's dsk_format loader and consumed
+	// later when synthesizing the MFM track for the WD1772.
+	struct SectorInfo {
+		uint8_t c = 0, h = 0, r = 0, n = 0;
+		uint8_t st1 = 0, st2 = 0;
+		int length = 0;
+		bool hasData = true;
+	};
+
 	bool load(const std::string& path);
 
 	bool loaded() const { return !data_.empty(); }
@@ -52,6 +60,9 @@ public:
 	// R) order -- id/len, used by Wd1772's Read Address.
 	int sectorCount(int track, int side) const;
 	bool sectorDescriptor(int track, int side, int index, uint8_t& id, int& len) const;
+	bool sectorInfo(int track, int side, int index, SectorInfo& info) const;
+	uint8_t* sectorData(int track, int side, int index, int& len);
+	int gap3Length(int track, int side) const;
 
 	// Simplification, documented not hidden: writes (Wd1772's Write
 	// Sector) land only in this in-memory copy, never flushed back to
@@ -64,6 +75,8 @@ public:
 private:
 	struct TrackInfo {
 		long dataOffset = -1; // offset of this track's 256-byte header in data_, -1 = not present
+		std::vector<int> sectorLengths;
+		std::vector<long> sectorDataOffsets;
 	};
 
 	std::vector<uint8_t> data_;

@@ -1,3 +1,30 @@
+// DSK sector-length interpretation and Extended DSK protection handling
+// are adapted from MAME's dsk_format::load implementation:
+// https://github.com/mamedev/mame/blob/master/src/lib/formats/dsk_dsk.cpp
+// Copyright (c) Olivier Galibert. All rights reserved.
+// SPDX-License-Identifier: BSD-3-Clause
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are met:
+// 1. Redistributions of source code must retain the above copyright notice,
+//    this list of conditions and the following disclaimer.
+// 2. Redistributions in binary form must reproduce the above copyright notice,
+//    this list of conditions and the following disclaimer in the documentation
+//    and/or other materials provided with the distribution.
+// 3. Neither the name of the copyright holder nor the names of its
+//    contributors may be used to endorse or promote products derived from this
+//    software without specific prior written permission.
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDER AND CONTRIBUTORS "AS IS"
+// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+// INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+// CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+// ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+// POSSIBILITY OF SUCH DAMAGE.
 #include "DskImage.h"
 #include <cstdio>
 #include <cstring>
@@ -31,9 +58,9 @@ bool DskImage::load(const std::string& path)
 	}
 
 	bool extended;
-	if (memcmp(data_.data(), "EXTENDED CPC DSK File", 21) == 0) {
+	if (memcmp(data_.data(), "EXTENDED CPC DSK", 16) == 0) {
 		extended = true;
-	} else if (memcmp(data_.data(), "MV - CPCEMU Disk-File", 21) == 0) {
+	} else if (memcmp(data_.data(), "MV - CPC", 8) == 0) {
 		extended = false;
 	} else {
 		fprintf(stderr, "DskImage::load: %s is not a CPCEMU/Extended DSK image (bad signature)\n", path.c_str());
@@ -74,6 +101,39 @@ bool DskImage::load(const std::string& path)
 			break;
 		}
 		tracks_[i].dataOffset = offset;
+		int sectorCount = data_[offset + 0x15];
+		tracks_[i].sectorLengths.resize(sectorCount);
+		int firstN = -1;
+		bool protection6144 = false;
+		bool protection128 = false;
+		for (int j = 0; j < sectorCount; ++j) {
+			long d = offset + 0x18 + j * 8;
+			if (d + 8 > offset + trackSize || d + 8 > (long)data_.size()) {
+				tracks_[i].sectorLengths.resize(j);
+				break;
+			}
+			int n = data_[d + 3];
+			if (j == 0) firstN = n;
+			else if (n == 2 && firstN == 6) protection6144 = true;
+			else if (n == j && firstN == 0) protection128 = true;
+		}
+		long dataPos = offset + 0x100;
+		tracks_[i].sectorDataOffsets.resize(tracks_[i].sectorLengths.size());
+		for (int j = 0; j < (int)tracks_[i].sectorLengths.size(); ++j) {
+			long d = offset + 0x18 + j * 8;
+			int length = extended ? (data_[d + 6] | (data_[d + 7] << 8)) : (128 << data_[offset + 0x14]);
+			if (extended && protection6144) length = 512;
+			if (extended && protection128) length = 128;
+			int storedLength = extended ? (data_[d + 6] | (data_[d + 7] << 8)) : (128 << data_[offset + 0x14]);
+			if (length < 0 || dataPos + storedLength > offset + trackSize || dataPos + storedLength > (long)data_.size()) {
+				tracks_[i].sectorLengths.resize(j);
+				tracks_[i].sectorDataOffsets.resize(j);
+				break;
+			}
+			tracks_[i].sectorLengths[j] = length;
+			tracks_[i].sectorDataOffsets[j] = dataPos;
+			dataPos += storedLength;
+		}
 		offset += trackSize;
 	}
 
@@ -124,23 +184,46 @@ int DskImage::sectorCount(int track, int side) const
 // zero length, so Wd1772's transfer never actually delivered real data
 // (station read 256 bytes of its own stale, never-advanced data register
 // instead), the root cause of the station boot getting nowhere.
-static int declaredOrDerivedLen(const std::vector<uint8_t>& data, long d)
-{
-	int len = data[d + 6] | (data[d + 7] << 8);
-	if (len == 0) len = 128 << data[d + 3]; // N
-	return len;
-}
-
 bool DskImage::sectorDescriptor(int track, int side, int index, uint8_t& id, int& len) const
 {
 	const TrackInfo* t = trackInfo(track, side);
 	if (!t) return false;
 	int count = data_[t->dataOffset + 0x15];
-	if (index < 0 || index >= count) return false;
+	if (index < 0 || index >= count || index >= (int)t->sectorLengths.size()) return false;
 	long d = t->dataOffset + 0x18 + index * 8;
 	id = data_[d + 2]; // R
-	len = declaredOrDerivedLen(data_, d);
+	len = t->sectorLengths[index];
 	return true;
+}
+
+bool DskImage::sectorInfo(int track, int side, int index, SectorInfo& info) const
+{
+	const TrackInfo* t = trackInfo(track, side);
+	if (!t || index < 0 || index >= (int)t->sectorLengths.size()) return false;
+	long d = t->dataOffset + 0x18 + index * 8;
+	info.c = data_[d]; info.h = data_[d + 1]; info.r = data_[d + 2]; info.n = data_[d + 3];
+	info.st1 = data_[d + 4]; info.st2 = data_[d + 5];
+	info.length = t->sectorLengths[index];
+	info.hasData = (info.st1 & 0x04) == 0;
+	return true;
+}
+
+int DskImage::gap3Length(int track, int side) const
+{
+	const TrackInfo* t = trackInfo(track, side);
+	return t ? data_[t->dataOffset + 0x16] : 0;
+}
+
+uint8_t* DskImage::sectorData(int track, int side, int index, int& len)
+{
+	const TrackInfo* t = trackInfo(track, side);
+	if (!t || index < 0 || index >= (int)t->sectorLengths.size() || index >= (int)t->sectorDataOffsets.size()) return nullptr;
+	long d = t->dataOffset + 0x18 + index * 8;
+	len = t->sectorLengths[index];
+	if (data_[d + 4] & 0x04) return nullptr;
+	long dataPos = t->sectorDataOffsets[index];
+	if (dataPos + len > (long)data_.size()) return nullptr;
+	return &data_[dataPos];
 }
 
 uint8_t* DskImage::findSector(int track, int side, int sectorId, int& len, int* indexOut)
@@ -148,18 +231,16 @@ uint8_t* DskImage::findSector(int track, int side, int sectorId, int& len, int* 
 	const TrackInfo* t = trackInfo(track, side);
 	if (!t) return nullptr;
 	int count = data_[t->dataOffset + 0x15];
-	long dataPos = t->dataOffset + 0x100;
 	for (int i = 0; i < count; i++) {
 		long d = t->dataOffset + 0x18 + i * 8;
 		uint8_t r = data_[d + 2];
-		int thisLen = declaredOrDerivedLen(data_, d);
+		if (i >= (int)t->sectorLengths.size()) return nullptr;
+		int thisLen = t->sectorLengths[i];
 		if (r == (uint8_t)sectorId) {
 			len = thisLen;
-			if (dataPos + thisLen > (long)data_.size()) return nullptr; // truncated file
 			if (indexOut) *indexOut = i;
-			return &data_[dataPos];
+			return sectorData(track, side, i, len);
 		}
-		dataPos += thisLen;
 	}
 	return nullptr;
 }

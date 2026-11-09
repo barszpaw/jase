@@ -21,21 +21,25 @@ CXXFLAGS ?= -std=c++17 -O2 -Wall -MMD -MP
 INCLUDES := -Iinclude -Iinclude/z80cpp -Isrc/z80free $(shell pkg-config --cflags sdl2) $(shell pkg-config --cflags nlohmann_json)
 LIBS     := $(shell pkg-config --libs sdl2) -ldl
 
-# Z80free (src/z80free/): the real station-CPU core from Fuse's FDD3000
-# patch, GPL-3 -- see src/z80free/JASE_PROVENANCE.md and CLAUDE.md's
-# "GPL firewall LIFTED" note. Plain C, compiled separately from the rest
-# (which is C++) and linked in.
+# FDD3000's station core used to be Fuse's own Z80free (GPL-3, plain C) --
+# branch fdd3000-inprocess-mame (2026-11-09) swaps it for MAME's real
+# z80_device + wd1772_device instead (BSD-3-Clause, src/mame_z80/ and
+# src/mame_wd1772/, same ports already proven correct standalone on
+# fdd3000-mame), so Z80free is no longer built at all. CFLAGS/the .c rule
+# below stay in case anything else ever needs a plain-C build again.
 CFLAGS   ?= -std=c99 -O2 -Wall -MMD -MP
-Z80FREE_SRCS := $(wildcard src/z80free/*.c)
-Z80FREE_OBJS := $(Z80FREE_SRCS:.c=.o)
-Z80FREE_DEPS := $(Z80FREE_OBJS:.o=.d)
+
+MAME_Z80_SRCS := src/mame_z80/z80.cpp src/mame_z80/z80mame_wrapper.cpp src/mame_z80/mame_attotime.cpp
+MAME_Z80_OBJS := $(MAME_Z80_SRCS:.cpp=.o)
+MAME_WD1772_SRCS := src/mame_wd1772/wd_fdc.cpp src/mame_wd1772/mame_wd1772_wrapper.cpp src/mame_wd1772/mfm_track_encoder.cpp
+MAME_WD1772_OBJS := $(MAME_WD1772_SRCS:.cpp=.o)
 
 # src/Kempston.cpp is excluded here: it ships as plugins/libkempston.so
 # instead (POC, 2026-10-28, see src/plugin_api.h) -- a peripheral that can
 # be released independently of core. It's still compiled, just into the
 # plugin target below instead of into $(TARGET).
 SRCS := $(filter-out src/Kempston.cpp,$(wildcard src/*.cpp)) src/z80cpp/z80.cpp
-OBJS := $(SRCS:.cpp=.o) $(Z80FREE_OBJS)
+OBJS := $(SRCS:.cpp=.o) $(MAME_Z80_OBJS) $(MAME_WD1772_OBJS)
 DEPS := $(OBJS:.o=.d)
 
 TARGET := jase
@@ -51,8 +55,14 @@ all: $(TARGET) $(PLUGIN_KEMPSTON)
 $(TARGET): $(OBJS)
 	$(CXX) $(OBJS) -o $@ $(LIBS)
 
+src/mame_z80/%.o: src/mame_z80/%.cpp
+	$(CXX) $(CXXFLAGS) -Isrc/mame_z80 -c $< -o $@
+
+src/mame_wd1772/%.o: src/mame_wd1772/%.cpp
+	$(CXX) $(CXXFLAGS) -Isrc/mame_wd1772 -Isrc/mame_z80 -c $< -o $@
+
 %.o: %.cpp
-	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -Isrc/mame_z80 -Isrc/mame_wd1772 -c $< -o $@
 
 %.o: %.c
 	$(CC) $(CFLAGS) -Isrc/z80free -c $< -o $@
@@ -73,4 +83,3 @@ $(PLUGIN_KEMPSTON): $(PLUGIN_KEMPSTON_OBJS)
 clean:
 	rm -f $(OBJS) $(DEPS) $(TARGET)
 	rm -f $(PLUGIN_KEMPSTON_OBJS) $(PLUGIN_KEMPSTON_OBJS:.o=.d) $(PLUGIN_KEMPSTON)
-	rm -f $(Z80FREE_OBJS) $(Z80FREE_DEPS)
