@@ -122,6 +122,7 @@ static std::vector<std::string> settingsToArgs(const json& root)
 	valFlag(fdd3000, "diskB", "--fdd3000-disk-b");
 	valFlag(fdd3000, "diskC", "--fdd3000-disk-c");
 	valFlag(fdd3000, "diskD", "--fdd3000-disk-d");
+	hostPort(fdd3000, "bridgeHost", "bridgePort", "--fdd3000-bridge");
 
 	const json& dbg = jObj(root, "debugging");
 	if (dbg.contains("debugPort") && !dbg["debugPort"].is_null()) {
@@ -193,6 +194,7 @@ static const char* const kKnownFlags[] = {
 	"--sdi8255", "--sdi8255-rom", "--sdi8255-bridge",
 	"--fdd3000", "--fdd3000-rom", "--fdd3000-station-rom",
 	"--fdd3000-disk-a", "--fdd3000-disk-b", "--fdd3000-disk-c", "--fdd3000-disk-d",
+	"--fdd3000-bridge",
 	"--debug-port", "--poke", "--pc", "--out", "--trace-port",
 	"--debug-instrtrace", "--debug-iectrace", "--debug-iotrace", "--debug-fdd3000-linktrace",
 	"--debug-fdd3000-wdtrace",
@@ -455,6 +457,15 @@ static void printUsage(const char* argv0)
 		"  --fdd3000-disk-a/b/c/d PATH  a real .dsk image for that station\n"
 		"                         drive (CPCEMU/Extended DSK); implies\n"
 		"                         --fdd3000.\n"
+		"  --fdd3000-bridge HOST:LINKPORT[:DEBUGPORT]  run the station in a\n"
+		"                         SEPARATE, real-time-paced process\n"
+		"                         (fdd3000_station) instead of in-process --\n"
+		"                         connects to its link-byte stream and command\n"
+		"                         channel (RESET/CHANGEDISK/REGS/.../WDTRACE,\n"
+		"                         DEBUGPORT defaults to LINKPORT+1). Implies\n"
+		"                         --fdd3000; --fdd3000-station-rom is not\n"
+		"                         meaningful here (the station loads its own\n"
+		"                         boot ROM at its own process startup instead).\n"
 		"\n"
 		"Debugging:\n"
 		"  --debug-port PORT      listen for the line-based debug protocol:\n"
@@ -803,6 +814,28 @@ int main(int argc, char *argv[])
 			if (!minZX.getFdd3000()->insertDisk(drive, argv[++i])) {
 				std::cerr << "FATAL: " << argv[i - 1] << ": failed to load " << argv[i] << std::endl;
 				exit(1);
+			}
+		}
+		else if (0 == strcmp(argv[i], "--fdd3000-bridge") && i + 1 < argc) {
+			// HOST:LINKPORT[:DEBUGPORT] -- same shape as --sdi8255-bridge's
+			// own HOST:PORT, with an optional second port since the station
+			// process (fdd3000_station) exposes two separate TCP channels
+			// (the real link-byte stream and the text command channel, see
+			// Fdd3000.h's class comment), not just one.
+			minZX.getFdd3000()->setEnabled(true);
+			char* arg = argv[++i];
+			char* firstColon = strchr(arg, ':');
+			if (!firstColon) { std::cerr << "--fdd3000-bridge expects HOST:LINKPORT[:DEBUGPORT]" << std::endl; continue; }
+			*firstColon = '\0';
+			char* linkPortStr = firstColon + 1;
+			char* secondColon = strchr(linkPortStr, ':');
+			int debugPort = 0;
+			if (secondColon) {
+				*secondColon = '\0';
+				debugPort = atoi(secondColon + 1);
+			}
+			if (!minZX.getFdd3000()->connectBridge(arg, atoi(linkPortStr), debugPort)) {
+				std::cerr << "--fdd3000-bridge: failed to connect to " << arg << std::endl;
 			}
 		}
 		else if (0 == strcmp(argv[i], "--debug-instrtrace")) {

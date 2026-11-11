@@ -21,33 +21,19 @@ CXXFLAGS ?= -std=c++17 -O2 -Wall -MMD -MP
 INCLUDES := -Iinclude -Iinclude/z80cpp -Isrc/z80free $(shell pkg-config --cflags sdl2) $(shell pkg-config --cflags nlohmann_json)
 LIBS     := $(shell pkg-config --libs sdl2) -ldl
 
-# FDD3000's station core used to be Fuse's own Z80free (GPL-3, plain C) --
-# branch fdd3000-inprocess-mame (2026-11-09) swapped it for MAME's real
-# z80_device instead (BSD-3-Clause, src/mame_z80/), but THIS branch
-# (fdd3000-station-z80cpp) swaps the station CPU again, back to MinZX's
-# own z80cpp (src/z80cpp/z80.cpp, already built below for the HOST CPU --
-# Fdd3000 just instantiates a second, independent Z80 object from the same
-# class) -- see Fdd3000.h's class comment for why. src/mame_z80/ is
-# genuinely unused on this branch, not built. The station's FDC core
-# still is MAME's real wd1772_device (src/mame_wd1772/, BSD-3-Clause,
-# unrelated to the CPU-core question this branch tests). CFLAGS/the .c
-# rule below stay in case anything else ever needs a plain-C build again.
+# src/mame_z80/, src/mame_wd1772/ (BSD-3-Clause MAME ports): kept in the
+# tree for reference/future differential testing (see project memory),
+# but NOT built into either target below -- the station's real core
+# pairing (src/z80cpp/, src/Wd1772Fsm.h/.cpp) needs neither. CFLAGS/the .c
+# rule below stay in case anything ever needs a plain-C build again.
 CFLAGS   ?= -std=c99 -O2 -Wall -MMD -MP
-
-# mame_attotime.cpp (attotime::never/zero statics, mame_sched scheduling)
-# lives under src/mame_z80/ but is really shared MAME-port timing
-# infrastructure wd_fdc.cpp itself depends on -- NOT the Z80 CPU core
-# (src/mame_z80/z80.cpp/z80mame_wrapper.cpp, genuinely unused/unbuilt on
-# this branch).
-MAME_WD1772_SRCS := src/mame_wd1772/wd_fdc.cpp src/mame_wd1772/mame_wd1772_wrapper.cpp src/mame_wd1772/mfm_track_encoder.cpp src/mame_z80/mame_attotime.cpp
-MAME_WD1772_OBJS := $(MAME_WD1772_SRCS:.cpp=.o)
 
 # src/Kempston.cpp is excluded here: it ships as plugins/libkempston.so
 # instead (POC, 2026-10-28, see src/plugin_api.h) -- a peripheral that can
 # be released independently of core. It's still compiled, just into the
 # plugin target below instead of into $(TARGET).
 SRCS := $(filter-out src/Kempston.cpp,$(wildcard src/*.cpp)) src/z80cpp/z80.cpp
-OBJS := $(SRCS:.cpp=.o) $(MAME_WD1772_OBJS)
+OBJS := $(SRCS:.cpp=.o)
 DEPS := $(OBJS:.o=.d)
 
 TARGET := jase
@@ -56,25 +42,30 @@ PLUGIN_KEMPSTON := plugins/libkempston.so
 PLUGIN_KEMPSTON_SRCS := src/Kempston.cpp src/plugins/kempston_plugin.cpp
 PLUGIN_KEMPSTON_OBJS := $(PLUGIN_KEMPSTON_SRCS:.cpp=.plugin.o)
 
-.PHONY: all clean
+# fdd3000_station (2026-11-11 unification -- see FddStation.h's own class
+# comment): the standalone-process driver for the SAME FddStation class
+# Fdd3000 itself uses in-process. No SDL/MinZX dependency.
+STATION_TARGET := fdd3000_station/fdd3000_station
+STATION_INCLUDES := -Isrc -Iinclude/z80cpp
+STATION_OBJS := fdd3000_station/main.o src/FddStation.o src/Wd1772Fsm.o src/DskImage.o src/z80cpp/z80.o
+
+.PHONY: all clean station
 
 all: $(TARGET) $(PLUGIN_KEMPSTON)
+
+station: $(STATION_TARGET)
 
 $(TARGET): $(OBJS)
 	$(CXX) $(OBJS) -o $@ $(LIBS)
 
-# -Isrc/mame_z80: wd_fdc.cpp only #includes mame_stub.h for its attotime/
-# scheduling stub (header-only use) -- src/mame_z80/z80.cpp/z80mame_
-# wrapper.cpp themselves are NOT compiled/linked on this branch, see the
-# comment above. mame_attotime.cpp (built via the rule below) is.
-src/mame_wd1772/%.o: src/mame_wd1772/%.cpp
-	$(CXX) $(CXXFLAGS) -Isrc/mame_wd1772 -Isrc/mame_z80 -c $< -o $@
+$(STATION_TARGET): $(STATION_OBJS)
+	$(CXX) $(STATION_OBJS) -o $@ -lpthread
 
-src/mame_z80/mame_attotime.o: src/mame_z80/mame_attotime.cpp
-	$(CXX) $(CXXFLAGS) -Isrc/mame_z80 -c $< -o $@
+fdd3000_station/main.o: fdd3000_station/main.cpp
+	$(CXX) $(CXXFLAGS) $(STATION_INCLUDES) -c $< -o $@
 
 %.o: %.cpp
-	$(CXX) $(CXXFLAGS) $(INCLUDES) -Isrc/mame_wd1772 -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
 
 %.o: %.c
 	$(CC) $(CFLAGS) -Isrc/z80free -c $< -o $@
@@ -91,7 +82,9 @@ $(PLUGIN_KEMPSTON): $(PLUGIN_KEMPSTON_OBJS)
 
 -include $(DEPS)
 -include $(PLUGIN_KEMPSTON_OBJS:.o=.d)
+-include fdd3000_station/main.d
 
 clean:
 	rm -f $(OBJS) $(DEPS) $(TARGET)
 	rm -f $(PLUGIN_KEMPSTON_OBJS) $(PLUGIN_KEMPSTON_OBJS:.o=.d) $(PLUGIN_KEMPSTON)
+	rm -f fdd3000_station/main.o fdd3000_station/main.d $(STATION_TARGET)
