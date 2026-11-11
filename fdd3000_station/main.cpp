@@ -300,6 +300,10 @@ static void printUsage(const char* argv0)
 		"                         shape as \"LINKTRACE ON\" below, and as\n"
 		"                         jase's own --debug-fdd3000-linktrace on\n"
 		"                         the host side).\n"
+		"  --wdtrace              log every WD1772 command/outcome to\n"
+		"                         stderr from startup (same shape as\n"
+		"                         \"WDTRACE ON\" below, and as jase's own\n"
+		"                         --debug-fdd3000-wdtrace).\n"
 		"  --help, -h             this information.\n"
 		"\n"
 		"Command channel (one line in, one line out, same shape as jase's\n"
@@ -340,6 +344,7 @@ int main(int argc, char** argv)
 		else if (a == "--disk-c" && i + 1 < argc) diskPaths[2] = argv[++i];
 		else if (a == "--disk-d" && i + 1 < argc) diskPaths[3] = argv[++i];
 		else if (a == "--linktrace") g_station.setLinkTraceEnabled(true);
+		else if (a == "--wdtrace") g_station.fdc().setTraceEnabled(true);
 		else { fprintf(stderr, "unknown arg: %s (try --help)\n", a.c_str()); return 1; }
 	}
 
