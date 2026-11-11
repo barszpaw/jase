@@ -1,7 +1,7 @@
 #pragma once
 #include "Peripheral.h"
 #include "MemoryMap.h"
-#include "mame_wd1772/mame_wd1772_wrapper.h"
+#include "Wd1772Fsm.h"
 #include "z80.h"
 #include <cstdint>
 #include <string>
@@ -250,6 +250,16 @@ public:
 	void setLinkTraceEnabled(bool on) { linkTraceEnabled_ = on; }
 	bool isLinkTraceEnabled() const { return linkTraceEnabled_; }
 
+	// Same convention, for the WD1772's OWN command-level trace (see
+	// Wd1772.h's setTraceEnabled() comment) -- "FDD3000 WDTRACE ON/OFF" or
+	// --debug-fdd3000-wdtrace. A separate trace from LINKTRACE above:
+	// LINKTRACE watches the host<->station BYTE PROTOCOL, this watches
+	// the station's OWN FDC commands/outcomes (track/sector/side/density,
+	// busy/drq/intrq/crcError/recordNotFound) -- useful on its own when
+	// diagnosing disk-read correctness/timing independent of the link.
+	void setWdTraceEnabled(bool on) { wd_.setTraceEnabled(on); }
+	bool isWdTraceEnabled() const { return wd_.isTraceEnabled(); }
+
 private:
 	// The station's own Z80operations: a private, self-contained 64K
 	// address space + coarse I/O decode, entirely separate from MinZX's
@@ -342,11 +352,11 @@ private:
 	uint8_t linkToStation_ = 0;  // host->station latch (real hardware's "ti2fdd")
 	uint8_t linkFromStation_ = 0; // station->host latch (real hardware's "fdd2ti")
 
-	MameWd1772 wd_;
+	Wd1772Fsm wd_;
 	void writeConfigRegister(uint8_t value); // station block 7 -- see the bit-layout table above
 
 	std::string romPath_;
-	std::string diskPath_[MameWd1772::kNumDrives];
+	std::string diskPath_[Wd1772Fsm::kNumDrives];
 
 	// z80cpp (unlike MAME's z80_device wrapper) is a real per-instance C++
 	// object -- stationOps_ must outlive/precede stationCpu_ since the

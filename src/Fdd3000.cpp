@@ -118,7 +118,7 @@ bool Fdd3000::loadStationBootRom(const char* path)
 bool Fdd3000::insertDisk(int driveIndex, const char* path)
 {
 	if (!wd_.insertDisk(driveIndex, path)) return false;
-	if (driveIndex >= 0 && driveIndex < MameWd1772::kNumDrives) diskPath_[driveIndex] = path;
+	if (driveIndex >= 0 && driveIndex < Wd1772Fsm::kNumDrives) diskPath_[driveIndex] = path;
 	return true;
 }
 
@@ -291,17 +291,15 @@ void Fdd3000::stepStationForOneHostInstruction(uint32_t hostTstates)
 	// budget is scaled *kRatioDen internally (not kRatioNum) so it stays
 	// exact integer arithmetic without floating point.
 	//
-	// EXPERIMENT (2026-11-09, user-directed): 1:1 instead of the real
-	// 8:7 (station 4MHz / host 3.5MHz, M397/FDD35 schematics). User's own
-	// reasoning: an earlier live test (fdd3000-mame branch, separate-
-	// process station) ran the STATION at 12MHz (3x its real clock) and
-	// the handshake still worked -- suggesting the PROTOCOL itself isn't
-	// sensitive to the exact clock ratio, only to whether each side gets
-	// enough relative execution time to see the other's response in time.
-	// If 1:1 works as well as (or better than) 8:7, that's real evidence
-	// for that theory; if it's clearly worse, that argues against it.
-	static constexpr int64_t kRatioNum = 1; // station T-states
-	static constexpr int64_t kRatioDen = 1; // per host T-state
+	// EXPERIMENT (2026-11-10, user-directed): station at 8MHz (2x its
+	// real 4MHz) instead of the real 8:7 (station 4MHz / host 3.5MHz,
+	// M397/FDD35 schematics) or the earlier 1:1 experiment. Same family
+	// of test as the fdd3000-mame branch's earlier 12MHz (3x) experiment,
+	// which also still worked -- continuing to probe whether the
+	// PROTOCOL itself is clock-ratio-insensitive. 8MHz : 3.5MHz host =
+	// 16:7.
+	static constexpr int64_t kRatioNum = 16; // station T-states
+	static constexpr int64_t kRatioDen = 7; // per host T-state
 	stationTstateBudget7_ += (int64_t)hostTstates * kRatioNum;
 	while (stationTstateBudget7_ > 0) {
 		// z80cpp is pull-based: StationOps::isActiveINT() is queried
@@ -312,7 +310,7 @@ void Fdd3000::stepStationForOneHostInstruction(uint32_t hostTstates)
 		stationCpu_->execute();
 		uint32_t spent = stationTstates_ - before;
 		if (spent == 0) spent = 4; // defensive floor -- a real opcode always costs T-states
-		wd_.tick(spent); // real T-states just consumed -- see mame_wd1772_wrapper.h's tick() comment
+		wd_.tick(spent); // Wd1772Fsm::tick() wants real T-states (its delayCycles_ are in real cycle units)
 		stationTstateBudget7_ -= (int64_t)spent * kRatioDen;
 	}
 }
@@ -449,6 +447,18 @@ std::string Fdd3000::debugCommand(const std::vector<std::string>& toks)
 			else if (toks[2] == "OFF") setLinkTraceEnabled(false);
 		}
 		snprintf(out, sizeof(out), "OK linktrace=%d", isLinkTraceEnabled() ? 1 : 0);
+		return out;
+	}
+
+	if (sub == "WDTRACE") {
+		// Same ON/OFF convention as LINKTRACE above -- see Wd1772.h's
+		// setTraceEnabled() comment for what this logs (every command
+		// issued + its eventual outcome, with track/sector/side/density).
+		if (toks.size() >= 3) {
+			if (toks[2] == "ON") wd_.setTraceEnabled(true);
+			else if (toks[2] == "OFF") wd_.setTraceEnabled(false);
+		}
+		snprintf(out, sizeof(out), "OK wdtrace=%d", wd_.isTraceEnabled() ? 1 : 0);
 		return out;
 	}
 

@@ -144,6 +144,7 @@ static std::vector<std::string> settingsToArgs(const json& root)
 	flag(jBool(dbg, "iectrace"), "--debug-iectrace");
 	flag(jBool(dbg, "iotrace"), "--debug-iotrace");
 	flag(jBool(dbg, "fdd3000LinkTrace"), "--debug-fdd3000-linktrace");
+	flag(jBool(dbg, "fdd3000WdTrace"), "--debug-fdd3000-wdtrace");
 
 	return args;
 }
@@ -194,6 +195,7 @@ static const char* const kKnownFlags[] = {
 	"--fdd3000-disk-a", "--fdd3000-disk-b", "--fdd3000-disk-c", "--fdd3000-disk-d",
 	"--debug-port", "--poke", "--pc", "--out", "--trace-port",
 	"--debug-instrtrace", "--debug-iectrace", "--debug-iotrace", "--debug-fdd3000-linktrace",
+	"--debug-fdd3000-wdtrace",
 };
 
 static bool isKnownFlag(const char* s)
@@ -489,6 +491,10 @@ static void printUsage(const char* argv0)
 		"                         raw/binary byte value; toggle live via\n"
 		"                         \"FDD3000 LINKTRACE ON\"/\"OFF\" (see\n"
 		"                         tools/fdd3000_linktrace_decode.py to pretty-print)\n"
+		"  --debug-fdd3000-wdtrace  log every WD1772 command issued (track/\n"
+		"                         sector/side/density) and its eventual outcome\n"
+		"                         (busy/drq/intrq/crcError/recordNotFound); toggle\n"
+		"                         live via \"FDD3000 WDTRACE ON\"/\"OFF\"\n"
 		"\n"
 		"Window hotkeys:\n"
 		"  F1                     toggle the on-screen menu -- Storage (load/\n"
@@ -830,6 +836,9 @@ int main(int argc, char *argv[])
 		}
 		else if (0 == strcmp(argv[i], "--debug-fdd3000-linktrace")) {
 			minZX.getFdd3000()->setLinkTraceEnabled(true);
+		}
+		else if (0 == strcmp(argv[i], "--debug-fdd3000-wdtrace")) {
+			minZX.getFdd3000()->setWdTraceEnabled(true);
 		}
 	}
 
