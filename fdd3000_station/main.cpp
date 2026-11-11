@@ -34,6 +34,16 @@
 
 static FddStation g_station;
 
+// --max-speed: skip the real-time pacing sleep_for() entirely, running the
+// station as fast as the host OS will schedule it. Added to isolate WHICH
+// part of "the link and data transmission" (user's own framing) actually
+// causes bridge-mode's poor handshake reliability: with pacing removed,
+// any remaining failures can't be blamed on the two processes' independent
+// sleep_for() clocks drifting out of step with each other -- only on the
+// socket transport itself (or the station/host protocol logic) would be
+// left as a cause.
+static bool g_maxSpeed = false;
+
 // ---- Minimal TCP listener helper (same shape as DebugServer::init(),
 // src/debugserver.cpp) ----
 struct Listener {
@@ -304,6 +314,14 @@ static void printUsage(const char* argv0)
 		"                         stderr from startup (same shape as\n"
 		"                         \"WDTRACE ON\" below, and as jase's own\n"
 		"                         --debug-fdd3000-wdtrace).\n"
+		"  --max-speed            skip the real-time 8MHz pacing sleep and\n"
+		"                         run the station as fast as the OS\n"
+		"                         scheduler allows -- diagnostic flag, to\n"
+		"                         isolate whether bridge-mode handshake\n"
+		"                         failures come from the two processes'\n"
+		"                         independent real-time clocks drifting,\n"
+		"                         as opposed to the socket transport\n"
+		"                         itself.\n"
 		"  --help, -h             this information.\n"
 		"\n"
 		"Command channel (one line in, one line out, same shape as jase's\n"
@@ -345,6 +363,7 @@ int main(int argc, char** argv)
 		else if (a == "--disk-d" && i + 1 < argc) diskPaths[3] = argv[++i];
 		else if (a == "--linktrace") g_station.setLinkTraceEnabled(true);
 		else if (a == "--wdtrace") g_station.fdc().setTraceEnabled(true);
+		else if (a == "--max-speed") g_maxSpeed = true;
 		else { fprintf(stderr, "unknown arg: %s (try --help)\n", a.c_str()); return 1; }
 	}
 
@@ -384,6 +403,8 @@ int main(int argc, char** argv)
 			pumpLinkSocket();
 		}
 		pumpDebugSocket();
+
+		if (g_maxSpeed) continue; // see --max-speed's own comment
 
 		double targetElapsed = (double)virtualTstatesRun / kStationHz;
 		auto now = std::chrono::steady_clock::now();
