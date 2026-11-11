@@ -103,25 +103,20 @@ static void pumpLinkSocket()
 
 static void flushLinkByteIfDirty()
 {
-	// FddStation doesn't track a "dirty" flag (it's a plain latch, same
-	// as the in-process side just reads it on demand) -- this process
-	// instead pushes the CURRENT latch value on a timer-free, best-effort
-	// basis: every time the station writes to the link port, the new
-	// value becomes visible to stationByte() immediately, so sending it
-	// every batch (see the step loop below) is simply harmless redundant
-	// traffic when it hasn't changed, not a correctness issue -- TCP is
-	// a byte stream, not datagrams, so a human-imperceptible rate of
-	// duplicate bytes would be wrong. Instead: track the last value SENT
-	// here and only send on change.
-	static uint8_t lastSent = 0;
-	static bool first = true;
+	// Send on EVERY station OUT, not just when the value changes --
+	// FOUND LIVE, 2026-11-11: an earlier "only resend on value change"
+	// version of this function silently broke the handshake whenever the
+	// one real transmission of a given value was lost (e.g. a
+	// connection-startup race) -- the station's own firmware legitimately
+	// retries by writing the SAME byte again, which "no change" logic
+	// can't tell apart from "nothing happened" and so never re-sends. See
+	// FddStation::stationByteDirty()'s own comment. Real hardware has no
+	// such optimization either -- every write is a real latch event.
+	if (!g_station.stationByteDirty()) return;
+	g_station.clearStationByteDirty();
 	uint8_t v = g_station.stationByte();
-	if (first || v != lastSent) {
-		first = false;
-		lastSent = v;
-		if (g_linkListener.clientFd >= 0) {
-			if (send(g_linkListener.clientFd, &v, 1, 0) < 0) g_linkListener.dropClient("link");
-		}
+	if (g_linkListener.clientFd >= 0) {
+		if (send(g_linkListener.clientFd, &v, 1, 0) < 0) g_linkListener.dropClient("link");
 	}
 }
 

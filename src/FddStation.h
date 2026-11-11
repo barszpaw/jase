@@ -51,6 +51,23 @@ public:
 	void setHostByte(uint8_t value) { linkToStation_ = value; }
 	uint8_t stationByte() const { return linkFromStation_; }
 
+	// Bridge-mode-only: set true on EVERY station OUT to the link port,
+	// even if the byte written happens to equal the previous one --
+	// found live, 2026-11-11: an earlier version of fdd3000_station's own
+	// forwarding loop only re-sent the link byte over the socket when its
+	// VALUE changed (a bandwidth optimization with no real cost to skip
+	// here), but the station's own firmware legitimately writes the SAME
+	// byte repeatedly as its own retry mechanism -- if the ONE transmission
+	// of a given value is ever lost (e.g. a connection-startup race), the
+	// dedup-by-value logic meant NO retry would ever re-send it, since
+	// "unchanged" look identical to "nothing happened" from the outside.
+	// In-process mode doesn't need this (station_.stationByte() is read
+	// directly, live, every time -- there's no transport to drop a byte
+	// on), so this flag only exists for the standalone process's own
+	// socket-forwarding loop to consume.
+	bool stationByteDirty() const { return linkDirty_; }
+	void clearStationByteDirty() { linkDirty_ = false; }
+
 	bool bootRomVisible() const { return stationPaged_; }
 	Wd1772Fsm& fdc() { return wd_; }
 	const Wd1772Fsm& fdc() const { return wd_; }
@@ -135,6 +152,7 @@ private:
 	std::string stationRomPath_;
 	uint8_t linkToStation_ = 0;
 	uint8_t linkFromStation_ = 0;
+	bool linkDirty_ = false; // see stationByteDirty()'s own comment
 	bool linkTraceEnabled_ = false;
 	std::chrono::steady_clock::time_point traceStart_;
 

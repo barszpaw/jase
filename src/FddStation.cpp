@@ -163,6 +163,7 @@ void FddStation::stationOutPort(uint16_t port, uint8_t value)
 	switch (ioport) {
 	case 1:
 		linkFromStation_ = value;
+		linkDirty_ = true; // unconditional -- see stationByteDirty()'s own comment
 		logLinkTrace("OUT", value);
 		break;
 	case 6:

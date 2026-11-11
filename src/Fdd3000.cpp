@@ -252,7 +252,13 @@ bool Fdd3000::out(uint16_t port, uint8_t value)
 	if (bridgeMode_) {
 		linkToStation_ = value;
 		uint8_t v = value;
-		send(linkFd_, &v, 1, 0); // best-effort, same convention as every other bridge client here
+		// SIGPIPE itself is ignored process-wide now (see main.cpp), so a
+		// dead station just surfaces here as a normal -1/EPIPE return --
+		// drop the fd so later calls don't keep hammering a closed socket.
+		if (linkFd_ >= 0 && send(linkFd_, &v, 1, 0) < 0) {
+			close(linkFd_);
+			linkFd_ = -1;
+		}
 	} else {
 		station_.setHostByte(value);
 	}

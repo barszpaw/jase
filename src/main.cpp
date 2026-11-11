@@ -2,6 +2,7 @@
 #include <iomanip>
 #include <vector>
 #include <fstream>
+#include <csignal>
 
 #pragma comment(lib, "SDL2.lib")
 #pragma comment(lib, "SDL2main.lib")
@@ -546,6 +547,22 @@ static void printUsage(const char* argv0)
 
 int main(int argc, char *argv[])
 {
+	// Every TCP-bridge peripheral in this codebase (ZiFi, Multiply,
+	// SDI_8255, Fdd3000, ...) makes raw send() calls with no per-call
+	// SIGPIPE handling -- found live, 2026-11-11: if the REMOTE side of
+	// any one of those connections closes first, the NEXT send() on that
+	// now-dead socket raises SIGPIPE, whose default disposition kills the
+	// entire process outright (confirmed via gdb backtrace: a routine
+	// Fdd3000::out() -> send() on a station that had already dropped the
+	// link). Ignoring SIGPIPE process-wide is the standard fix for
+	// exactly this (same as e.g. Python's socket module does implicitly,
+	// or most other PTY/socket-heavy daemons) -- send() then just returns
+	// -1/EPIPE like any other socket error instead of raising a signal,
+	// which every one of these bridge clients already needs to tolerate
+	// anyway (the OTHER failure modes -- connection refused, peer never
+	// started -- were already handled by checking return values).
+	signal(SIGPIPE, SIG_IGN);
+
 	for (int i = 1; i < argc; i++)
 		if (0 == strcmp(argv[i], "--help") || 0 == strcmp(argv[i], "-h"))
 		{
