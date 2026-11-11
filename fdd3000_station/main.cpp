@@ -269,6 +269,59 @@ static void pumpDebugSocket()
 	}
 }
 
+static void printUsage(const char* argv0)
+{
+	printf(
+		"fdd3000_station -- standalone FDD3000 station process.\n"
+		"\n"
+		"Runs the station computer (Z80A + 64K RAM + WD1772 FDC, see\n"
+		"src/FddStation.h) as its own, real-time-paced OS process, reached\n"
+		"from JASE over two separate TCP channels -- connect to it with\n"
+		"jase's own --fdd3000-bridge HOST:LINKPORT[:DEBUGPORT].\n"
+		"\n"
+		"Usage: %s [options]\n"
+		"\n"
+		"Options:\n"
+		"  --link-port PORT       TCP port for the real link-byte stream --\n"
+		"                         one latched byte each direction, no\n"
+		"                         framing (default 9600).\n"
+		"  --debug-port PORT      TCP port for the line-based command\n"
+		"                         channel, see \"Command channel\" below\n"
+		"                         (default 9601).\n"
+		"  --boot-rom PATH        the station's own real internal boot ROM\n"
+		"                         (exactly 2048 bytes) -- without it the\n"
+		"                         station CPU just idles on a placeholder.\n"
+		"  --disk-a/b/c/d PATH    a real .dsk image for that station drive\n"
+		"                         (CPCEMU/Extended DSK) at startup -- can\n"
+		"                         also be changed later at runtime, see\n"
+		"                         CHANGEDISK below.\n"
+		"  --linktrace            log every station-side IN/OUT on the\n"
+		"                         link byte to stderr from startup (same\n"
+		"                         shape as \"LINKTRACE ON\" below, and as\n"
+		"                         jase's own --debug-fdd3000-linktrace on\n"
+		"                         the host side).\n"
+		"  --help, -h             this information.\n"
+		"\n"
+		"Command channel (one line in, one line out, same shape as jase's\n"
+		"own --debug-port protocol):\n"
+		"  STATUS                 bootRomVisible/stationPC/WD1772 summary.\n"
+		"  REGS                   station Z80 registers.\n"
+		"  SETREG <reg> <hex>     set one station register (AF/BC/.../PC).\n"
+		"  MEM <hexaddr> <len>    read station memory as hex.\n"
+		"  POKE <hexaddr> <b1,b2,...>  write station memory (hex bytes).\n"
+		"  STEP [n]               single-step the station CPU (default 1).\n"
+		"  RESET                  the station's own physical reset button --\n"
+		"                         resets CPU/paging/FDC, NOT the link latches.\n"
+		"  CHANGEDISK <drive> <path>  swap which disk image is in a drive\n"
+		"                         (0=A..3=D) at runtime -- the real\n"
+		"                         workflow is to do this THEN RESET, since\n"
+		"                         the boot ROM only reads drive A at\n"
+		"                         reset time.\n"
+		"  LINKTRACE ON|OFF       toggle the link-byte trace live.\n"
+		"  WDTRACE ON|OFF         toggle the WD1772 command/status trace.\n",
+		argv0);
+}
+
 int main(int argc, char** argv)
 {
 	int linkPort = 9600;
@@ -278,7 +331,8 @@ int main(int argc, char** argv)
 
 	for (int i = 1; i < argc; i++) {
 		std::string a = argv[i];
-		if (a == "--link-port" && i + 1 < argc) linkPort = atoi(argv[++i]);
+		if (a == "--help" || a == "-h") { printUsage(argv[0]); return 0; }
+		else if (a == "--link-port" && i + 1 < argc) linkPort = atoi(argv[++i]);
 		else if (a == "--debug-port" && i + 1 < argc) debugPort = atoi(argv[++i]);
 		else if (a == "--boot-rom" && i + 1 < argc) bootRomPath = argv[++i];
 		else if (a == "--disk-a" && i + 1 < argc) diskPaths[0] = argv[++i];
@@ -286,7 +340,7 @@ int main(int argc, char** argv)
 		else if (a == "--disk-c" && i + 1 < argc) diskPaths[2] = argv[++i];
 		else if (a == "--disk-d" && i + 1 < argc) diskPaths[3] = argv[++i];
 		else if (a == "--linktrace") g_station.setLinkTraceEnabled(true);
-		else { fprintf(stderr, "unknown arg: %s\n", a.c_str()); return 1; }
+		else { fprintf(stderr, "unknown arg: %s (try --help)\n", a.c_str()); return 1; }
 	}
 
 	if (!bootRomPath.empty() && !g_station.loadBootRom(bootRomPath)) return 1;
