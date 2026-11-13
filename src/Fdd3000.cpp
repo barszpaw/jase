@@ -297,6 +297,12 @@ void Fdd3000::onInstructionFetch(uint16_t pc, MemoryMap& memory, uint32_t tstate
 	}
 	applyHostPaging(memory);
 
+	// Host-side live/JIT disassembler POC -- only while the interface ROM
+	// is actually the thing executing (active_/ROMCS), not plain Spectrum
+	// ROM/BASIC. memory.peek8() is side-effect-free, already reflects the
+	// paging applyHostPaging() just set, same contract LiveDisasm expects.
+	if (active_) hostLiveDisasm_.recordExecution(pc, [&memory](uint16_t a) { return memory.peek8(a); });
+
 	// Host-side bridge link read/write is non-blocking already, but
 	// pulling incoming bytes off the TCP socket into linkFromStation_
 	// needs to happen SOMEWHERE every instruction even when the host
@@ -360,6 +366,28 @@ std::string Fdd3000::debugCommand(const std::vector<std::string>& toks)
 {
 	if (toks.empty() || toks[0] != "FDD3000")
 		return std::string();
+
+	// HOSTDISASM is handled here, BEFORE the bridgeMode_ forwarding below,
+	// because the host interface ROM always executes in-process (this
+	// process's own Z80) regardless of whether the STATION is bridged out
+	// to a separate process -- unlike LIVEDISASM (station-side, forwarded
+	// verbatim to the external process in bridge mode), this must never be
+	// forwarded.
+	if (toks.size() >= 2 && toks[1] == "HOSTDISASM") {
+		if (toks.size() >= 3 && toks[2] == "CLEAR") {
+			hostLiveDisasmClear();
+			return "OK cleared";
+		}
+		if (toks.size() < 3) return "ERR usage: FDD3000 HOSTDISASM <path> | FDD3000 HOSTDISASM CLEAR";
+		FILE* pf = fopen(toks[2].c_str(), "w");
+		if (!pf) return "ERR cannot open output path";
+		std::string dump = hostLiveDisasmDump();
+		fwrite(dump.data(), 1, dump.size(), pf);
+		fclose(pf);
+		char out[128];
+		snprintf(out, sizeof(out), "OK wrote %zu addresses to %s", hostLiveDisasmSize(), toks[2].c_str());
+		return out;
+	}
 
 	if (bridgeMode_) {
 		if (toks.size() == 1) {
