@@ -466,6 +466,24 @@ std::string Fdd3000::debugCommand(const std::vector<std::string>& toks)
 		return resp;
 	}
 
+	if (sub == "DUMPBIN" && toks.size() >= 5) {
+		// In-process mirror of fdd3000_station's own DUMPBIN -- see its
+		// comment. toks: FDD3000 DUMPBIN <path> <hexaddr> <len>.
+		uint16_t addr = (uint16_t)strtoul(toks[3].c_str(), nullptr, 16);
+		long len = strtol(toks[4].c_str(), nullptr, 10);
+		if (len < 0) len = 0;
+		if (len > 65536) len = 65536;
+		FILE* pf = fopen(toks[2].c_str(), "wb");
+		if (!pf) return "ERR cannot open output path";
+		for (long i = 0; i < len; i++) {
+			uint8_t b = station_.peek((uint16_t)(addr + i));
+			fwrite(&b, 1, 1, pf);
+		}
+		fclose(pf);
+		snprintf(out, sizeof(out), "OK wrote %ld bytes to %s", len, toks[2].c_str());
+		return out;
+	}
+
 	if (sub == "POKE" && toks.size() >= 4) {
 		uint16_t addr = (uint16_t)strtoul(toks[2].c_str(), nullptr, 16);
 		std::istringstream bs(toks[3]);

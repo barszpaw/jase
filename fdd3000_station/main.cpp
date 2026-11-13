@@ -199,6 +199,30 @@ static std::string handleDebugCommand(const std::string& line)
 		return resp;
 	}
 
+	if (cmd == "DUMPBIN" && toks.size() >= 4) {
+		// Raw-bytes binary dump, as opposed to MEM's hex-text one -- the
+		// real motivation (2026-11-13, user-directed): the program loaded
+		// into station RAM from disk has no static file anywhere (unlike
+		// the boot ROM), so this is the only way to extract a lossless,
+		// re-disassemblable binary of it. Pairs with LIVEDISASM's own text
+		// report, same two-artifact pattern as
+		// docs/FDD3000/FDD35_station_clone/fdd3boot_disasm.md already has
+		// for the boot ROM (there: a real file; here: extracted live).
+		uint16_t addr = (uint16_t)strtoul(toks[2].c_str(), nullptr, 16);
+		long len = strtol(toks[3].c_str(), nullptr, 10);
+		if (len < 0) len = 0;
+		if (len > 65536) len = 65536;
+		FILE* pf = fopen(toks[1].c_str(), "wb");
+		if (!pf) return "ERR cannot open output path";
+		for (long i = 0; i < len; i++) {
+			uint8_t b = g_station.peek((uint16_t)(addr + i));
+			fwrite(&b, 1, 1, pf);
+		}
+		fclose(pf);
+		snprintf(out, sizeof(out), "OK wrote %ld bytes to %s", len, toks[1].c_str());
+		return out;
+	}
+
 	if (cmd == "POKE" && toks.size() >= 3) {
 		uint16_t addr = (uint16_t)strtoul(toks[1].c_str(), nullptr, 16);
 		std::istringstream bs(toks[2]);
@@ -363,7 +387,14 @@ static void printUsage(const char* argv0)
 		"  WDTRACE ON|OFF         toggle the WD1772 command/status trace.\n"
 		"  LIVEDISASM <path>      POC: dump the live/JIT disassembler's\n"
 		"                         current PC-keyed map (see src/LiveDisasm.h)\n"
-		"                         to a file. LIVEDISASM CLEAR resets it.\n",
+		"                         to a file. LIVEDISASM CLEAR resets it.\n"
+		"  DUMPBIN <path> <hexaddr> <len>  POC: raw-bytes binary dump of\n"
+		"                         station RAM/ROM (as actually seen through\n"
+		"                         the current paging view) -- the only way\n"
+		"                         to extract the program loaded from disk\n"
+		"                         into station RAM as a real file, since\n"
+		"                         (unlike the boot ROM) it never exists as\n"
+		"                         one anywhere else.\n",
 		argv0);
 }
 
