@@ -18,10 +18,10 @@
 // and flagging a byte-mismatch conflict, is a possible future refinement, not
 // needed for this POC).
 //
-// Opcode coverage is DELIBERATELY incomplete for this POC -- common
-// unprefixed instructions only (enough to read real Z80 firmware code at a
-// glance), with CB/DD/ED/FD-prefixed opcodes shown as a labeled placeholder
-// rather than decoded. See decodeOne()'s own comment for the exact set.
+// Opcode coverage is DELIBERATELY incomplete for this POC, but now spans all
+// four prefix families (CB/ED/DD/FD) in addition to the unprefixed table --
+// see decodeOne()/decodeCB()/decodeED()/decodeIndexed()'s own comments for
+// exactly what's covered vs. falls back to a labeled placeholder.
 class LiveDisasm
 {
 public:
@@ -76,27 +76,202 @@ public:
 	void clear() { entries_.clear(); }
 
 private:
+	// Shared register/condition/ALU-op/rotate-op name tables -- "inline" so
+	// a single definition in this header works across every translation
+	// unit that includes it (C++17 inline variables), no separate .cpp
+	// needed.
+	static inline const char* kReg8[8]    = {"B", "C", "D", "E", "H", "L", "(HL)", "A"};
+	static inline const char* kReg16[4]   = {"BC", "DE", "HL", "SP"};
+	static inline const char* kReg16Af[4] = {"BC", "DE", "HL", "AF"};
+	static inline const char* kCond[8]    = {"NZ", "Z", "NC", "C", "PO", "PE", "P", "M"};
+	static inline const char* kAlu[8]     = {"ADD A,", "ADC A,", "SUB ", "SBC A,", "AND ", "XOR ", "OR ", "CP "};
+	static inline const char* kRot[8]     = {"RLC", "RRC", "RL", "RR", "SLA", "SRA", "SLL", "SRL"};
+
+	// CB-prefixed: rotate/shift/BIT/RES/SET on an 8-bit register (or (HL)).
+	// raw points at the CB byte itself; len is relative to raw[0] (always 2
+	// here). Full coverage of the documented CB space, including the
+	// undocumented SLL ("SL1") slot at the rotate group's bit pattern 6.
+	static std::string decodeCB(const uint8_t* raw, int& len)
+	{
+		char buf[32];
+		uint8_t op2 = raw[1];
+		uint8_t reg = op2 & 7;
+		uint8_t group = (op2 >> 6) & 3;
+		uint8_t sub = (op2 >> 3) & 7;
+		len = 2;
+		if (group == 0) { snprintf(buf, sizeof(buf), "%s %s", kRot[sub], kReg8[reg]); return buf; }
+		if (group == 1) { snprintf(buf, sizeof(buf), "BIT %d,%s", sub, kReg8[reg]); return buf; }
+		if (group == 2) { snprintf(buf, sizeof(buf), "RES %d,%s", sub, kReg8[reg]); return buf; }
+		snprintf(buf, sizeof(buf), "SET %d,%s", sub, kReg8[reg]);
+		return buf;
+	}
+
+	// ED-prefixed: the commonly-seen documented subset -- IN r,(C)/OUT (C),r,
+	// SBC/ADC HL,rr, LD (nn),rr/LD rr,(nn), NEG, RETN/RETI, IM 0/1/2,
+	// LD I,A/LD R,A/LD A,I/LD A,R, RRD/RLD, and the full LDI/LDD/CPI/CPD/
+	// INI/IND/OUTI/OUTD block (plain and *R repeating forms). Anything else
+	// ED-prefixed (the less common bit-twiddly undocumented duplicates)
+	// falls back to a placeholder -- not a POC goal to cover every byte.
+	static std::string decodeED(const uint8_t* raw, int& len)
+	{
+		char buf[32];
+		uint8_t op2 = raw[1];
+		len = 2;
+
+		switch (op2) {
+		case 0x47: return "LD I,A";
+		case 0x4F: return "LD R,A";
+		case 0x57: return "LD A,I";
+		case 0x5F: return "LD A,R";
+		case 0x44: case 0x4C: case 0x54: case 0x5C:
+		case 0x64: case 0x6C: case 0x74: case 0x7C: return "NEG";
+		case 0x45: case 0x4D: case 0x55: case 0x5D:
+		case 0x65: case 0x6D: case 0x75: case 0x7D: return (op2 == 0x4D) ? "RETI" : "RETN";
+		case 0x46: case 0x4E: case 0x66: case 0x6E: return "IM 0";
+		case 0x56: case 0x76: return "IM 1";
+		case 0x5E: case 0x7E: return "IM 2";
+		case 0x6F: return "RLD";
+		case 0x67: return "RRD";
+		case 0xA0: return "LDI";
+		case 0xA1: return "CPI";
+		case 0xA2: return "INI";
+		case 0xA3: return "OUTI";
+		case 0xA8: return "LDD";
+		case 0xA9: return "CPD";
+		case 0xAA: return "IND";
+		case 0xAB: return "OUTD";
+		case 0xB0: return "LDIR";
+		case 0xB1: return "CPIR";
+		case 0xB2: return "INIR";
+		case 0xB3: return "OTIR";
+		case 0xB8: return "LDDR";
+		case 0xB9: return "CPDR";
+		case 0xBA: return "INDR";
+		case 0xBB: return "OTDR";
+		default: break;
+		}
+
+		// IN r,(C) / OUT (C),r -- r==6 is the undocumented flags-only form.
+		if ((op2 & 0xC7) == 0x40) {
+			uint8_t r = (op2 >> 3) & 7;
+			snprintf(buf, sizeof(buf), r == 6 ? "IN (C)" : "IN %s,(C)", kReg8[r]);
+			return buf;
+		}
+		if ((op2 & 0xC7) == 0x41) {
+			uint8_t r = (op2 >> 3) & 7;
+			snprintf(buf, sizeof(buf), r == 6 ? "OUT (C),0" : "OUT (C),%s", kReg8[r]);
+			return buf;
+		}
+		// SBC HL,rr / ADC HL,rr
+		if ((op2 & 0xCF) == 0x42) { snprintf(buf, sizeof(buf), "SBC HL,%s", kReg16[(op2 >> 4) & 3]); return buf; }
+		if ((op2 & 0xCF) == 0x4A) { snprintf(buf, sizeof(buf), "ADC HL,%s", kReg16[(op2 >> 4) & 3]); return buf; }
+		// LD (nn),rr / LD rr,(nn)
+		if ((op2 & 0xCF) == 0x43) {
+			len = 4;
+			snprintf(buf, sizeof(buf), "LD (0x%04X),%s", (uint16_t)(raw[2] | (raw[3] << 8)), kReg16[(op2 >> 4) & 3]);
+			return buf;
+		}
+		if ((op2 & 0xCF) == 0x4B) {
+			len = 4;
+			snprintf(buf, sizeof(buf), "LD %s,(0x%04X)", kReg16[(op2 >> 4) & 3], (uint16_t)(raw[2] | (raw[3] << 8)));
+			return buf;
+		}
+
+		snprintf(buf, sizeof(buf), "??? (ED 0x%02X)", op2);
+		return buf;
+	}
+
+	// DD/FD-prefixed (IX/IY): the common documented forms -- 16-bit direct
+	// load/store/arith (LD IX,nn / LD (nn),IX / LD IX,(nn) / INC IX / DEC IX
+	// / ADD IX,rr), PUSH/POP/EX (SP),IX/JP (IX)/LD SP,IX, and the
+	// displacement-addressed memory forms (INC/DEC (IX+d), LD (IX+d),n,
+	// LD r,(IX+d)/LD (IX+d),r, ALU A,(IX+d)), plus DD CB d op bit-ops on
+	// (IX+d) via decodeCB()'s own group/bit logic (ignoring the
+	// undocumented copy-to-register variant). Undocumented IXH/IXL
+	// half-register forms are NOT covered -- fall back to a placeholder.
+	// raw points at the DD/FD prefix byte itself; len is relative to raw[0].
+	static std::string decodeIndexed(const char* idx, const uint8_t* raw, int& len)
+	{
+		char buf[48];
+		uint8_t op = raw[1];
+
+		if (op == 0xCB) {
+			// DD CB d op -- bit op on (IX+d). Reuse decodeCB()'s group/bit
+			// logic against raw[3] (the real op byte), but the operand is
+			// always the displaced memory location here, never a register.
+			len = 4;
+			int8_t d = (int8_t)raw[2];
+			uint8_t op2 = raw[3];
+			uint8_t group = (op2 >> 6) & 3;
+			uint8_t sub = (op2 >> 3) & 7;
+			if (group == 0) snprintf(buf, sizeof(buf), "%s (%s%+d)", kRot[sub], idx, d);
+			else if (group == 1) snprintf(buf, sizeof(buf), "BIT %d,(%s%+d)", sub, idx, d);
+			else if (group == 2) snprintf(buf, sizeof(buf), "RES %d,(%s%+d)", sub, idx, d);
+			else snprintf(buf, sizeof(buf), "SET %d,(%s%+d)", sub, idx, d);
+			return buf;
+		}
+
+		if (op == 0x21) { len = 4; snprintf(buf, sizeof(buf), "LD %s,0x%04X", idx, (uint16_t)(raw[2] | (raw[3] << 8))); return buf; }
+		if (op == 0x22) { len = 4; snprintf(buf, sizeof(buf), "LD (0x%04X),%s", (uint16_t)(raw[2] | (raw[3] << 8)), idx); return buf; }
+		if (op == 0x2A) { len = 4; snprintf(buf, sizeof(buf), "LD %s,(0x%04X)", idx, (uint16_t)(raw[2] | (raw[3] << 8))); return buf; }
+		if (op == 0x23) { len = 2; snprintf(buf, sizeof(buf), "INC %s", idx); return buf; }
+		if (op == 0x2B) { len = 2; snprintf(buf, sizeof(buf), "DEC %s", idx); return buf; }
+		if (op == 0x09 || op == 0x19 || op == 0x29 || op == 0x39) {
+			len = 2;
+			const char* rr = (op == 0x09) ? "BC" : (op == 0x19) ? "DE" : (op == 0x29) ? idx : "SP";
+			snprintf(buf, sizeof(buf), "ADD %s,%s", idx, rr);
+			return buf;
+		}
+		if (op == 0xE5) { len = 2; snprintf(buf, sizeof(buf), "PUSH %s", idx); return buf; }
+		if (op == 0xE1) { len = 2; snprintf(buf, sizeof(buf), "POP %s", idx); return buf; }
+		if (op == 0xE3) { len = 2; snprintf(buf, sizeof(buf), "EX (SP),%s", idx); return buf; }
+		if (op == 0xE9) { len = 2; snprintf(buf, sizeof(buf), "JP (%s)", idx); return buf; }
+		if (op == 0xF9) { len = 2; snprintf(buf, sizeof(buf), "LD SP,%s", idx); return buf; }
+		if (op == 0x34) { len = 3; snprintf(buf, sizeof(buf), "INC (%s%+d)", idx, (int8_t)raw[2]); return buf; }
+		if (op == 0x35) { len = 3; snprintf(buf, sizeof(buf), "DEC (%s%+d)", idx, (int8_t)raw[2]); return buf; }
+		if (op == 0x36) { len = 4; snprintf(buf, sizeof(buf), "LD (%s%+d),0x%02X", idx, (int8_t)raw[2], raw[3]); return buf; }
+		// LD r,(IX+d) -- dest field (op>>3)&7, low 3 bits fixed at 6
+		if ((op & 0xC7) == 0x46 && op != 0x76) {
+			len = 3;
+			snprintf(buf, sizeof(buf), "LD %s,(%s%+d)", kReg8[(op >> 3) & 7], idx, (int8_t)raw[2]);
+			return buf;
+		}
+		// LD (IX+d),r -- low 3 bits is the source register, must not be 6 itself
+		if ((op & 0xF8) == 0x70 && (op & 7) != 6) {
+			len = 3;
+			snprintf(buf, sizeof(buf), "LD (%s%+d),%s", idx, (int8_t)raw[2], kReg8[op & 7]);
+			return buf;
+		}
+		// ALU A,(IX+d)
+		if (op >= 0x80 && op <= 0xBF && (op & 7) == 6) {
+			len = 3;
+			snprintf(buf, sizeof(buf), "%s(%s%+d)", kAlu[(op >> 3) & 7], idx, (int8_t)raw[2]);
+			return buf;
+		}
+
+		len = 2;
+		snprintf(buf, sizeof(buf), "??? (%s 0x%02X)", (idx[1] == 'X') ? "DD" : "FD", op);
+		return buf;
+	}
+
 	// Decodes exactly ONE instruction starting at raw[0]. Sets len to the
 	// number of bytes consumed (1-4) and returns its mnemonic text.
 	// Unprefixed opcodes covering: NOP, LD r,r'/r,n/rr,nn/(nn),A-and-back/
-	// (nn),HL-and-back/SP,HL, INC/DEC r and rr, arithmetic/logic r and n
-	// (ADD/ADC/SUB/SBC/AND/XOR/OR/CP), JP/JP cc/JR/JR cc/DJNZ, CALL/CALL cc/
-	// RET/RET cc, PUSH/POP, IN A,(n)/OUT (n),A, EX DE,HL/EX AF,AF'/EXX,
-	// DI/EI, HALT, RLCA/RRCA/RLA/RRA, RST n. Everything else (CB/ED/DD/FD
-	// prefixes, and any unrecognized unprefixed byte) falls back to a
-	// labeled placeholder -- not a POC goal to cover every opcode.
+	// (nn),HL-and-back/SP,HL/(BC),A/(DE),A/A,(BC)/A,(DE), INC/DEC r and rr,
+	// ADD HL,rr, arithmetic/logic r and n (ADD/ADC/SUB/SBC/AND/XOR/OR/CP),
+	// JP/JP cc/JR/JR cc/DJNZ, CALL/CALL cc/RET/RET cc, PUSH/POP,
+	// IN A,(n)/OUT (n),A, EX DE,HL/EX (SP),HL/EX AF,AF'/EXX, DI/EI, HALT,
+	// RLCA/RRCA/RLA/RRA, CPL/SCF/CCF, RST n. CB/ED/DD/FD prefixes delegate
+	// to their own decode* helpers above.
 	static std::string decodeOne(const uint8_t* raw, int& len)
 	{
-		static const char* kReg8[8] = {"B", "C", "D", "E", "H", "L", "(HL)", "A"};
-		static const char* kReg16[4] = {"BC", "DE", "HL", "SP"};
-		static const char* kCond[8]  = {"NZ", "Z", "NC", "C", "PO", "PE", "P", "M"};
 		char buf[48];
 		uint8_t op = raw[0];
 
-		if (op == 0xCB) { len = 2; return "(CB-prefixed, not decoded)"; }
-		if (op == 0xED) { len = 2; return "(ED-prefixed, not decoded)"; }
-		if (op == 0xDD) { len = 2; return "(DD-prefixed/IX, not decoded)"; }
-		if (op == 0xFD) { len = 2; return "(FD-prefixed/IY, not decoded)"; }
+		if (op == 0xCB) return decodeCB(raw, len);
+		if (op == 0xED) return decodeED(raw, len);
+		if (op == 0xDD) return decodeIndexed("IX", raw, len);
+		if (op == 0xFD) return decodeIndexed("IY", raw, len);
 
 		if (op == 0x00) { len = 1; return "NOP"; }
 		if (op == 0x76) { len = 1; return "HALT"; }
@@ -104,6 +279,7 @@ private:
 		if (op == 0xFB) { len = 1; return "EI"; }
 		if (op == 0xC9) { len = 1; return "RET"; }
 		if (op == 0xEB) { len = 1; return "EX DE,HL"; }
+		if (op == 0xE3) { len = 1; return "EX (SP),HL"; }
 		if (op == 0x08) { len = 1; return "EX AF,AF'"; }
 		if (op == 0xD9) { len = 1; return "EXX"; }
 		if (op == 0xF9) { len = 1; return "LD SP,HL"; }
@@ -111,6 +287,14 @@ private:
 		if (op == 0x0F) { len = 1; return "RRCA"; }
 		if (op == 0x17) { len = 1; return "RLA"; }
 		if (op == 0x1F) { len = 1; return "RRA"; }
+		if (op == 0x2F) { len = 1; return "CPL"; }
+		if (op == 0x37) { len = 1; return "SCF"; }
+		if (op == 0x3F) { len = 1; return "CCF"; }
+		// LD (BC),A / LD A,(BC) / LD (DE),A / LD A,(DE)
+		if (op == 0x02) { len = 1; return "LD (BC),A"; }
+		if (op == 0x0A) { len = 1; return "LD A,(BC)"; }
+		if (op == 0x12) { len = 1; return "LD (DE),A"; }
+		if (op == 0x1A) { len = 1; return "LD A,(DE)"; }
 
 		// LD r,r' (0x40-0x7F, excluding 0x76=HALT already handled above)
 		if (op >= 0x40 && op <= 0x7F) {
@@ -134,32 +318,22 @@ private:
 		// INC/DEC rr
 		if ((op & 0xCF) == 0x03) { len = 1; snprintf(buf, sizeof(buf), "INC %s", kReg16[(op >> 4) & 3]); return buf; }
 		if ((op & 0xCF) == 0x0B) { len = 1; snprintf(buf, sizeof(buf), "DEC %s", kReg16[(op >> 4) & 3]); return buf; }
+		// ADD HL,rr
+		if ((op & 0xCF) == 0x09) { len = 1; snprintf(buf, sizeof(buf), "ADD HL,%s", kReg16[(op >> 4) & 3]); return buf; }
 		// INC/DEC r
 		if ((op & 0xC7) == 0x04) { len = 1; snprintf(buf, sizeof(buf), "INC %s", kReg8[(op >> 3) & 7]); return buf; }
 		if ((op & 0xC7) == 0x05) { len = 1; snprintf(buf, sizeof(buf), "DEC %s", kReg8[(op >> 3) & 7]); return buf; }
 		// PUSH/POP rr (AF instead of SP for bit pattern 3)
-		if ((op & 0xCF) == 0xC5) {
-			len = 1;
-			static const char* kReg16Af[4] = {"BC", "DE", "HL", "AF"};
-			snprintf(buf, sizeof(buf), "PUSH %s", kReg16Af[(op >> 4) & 3]);
-			return buf;
-		}
-		if ((op & 0xCF) == 0xC1) {
-			len = 1;
-			static const char* kReg16Af[4] = {"BC", "DE", "HL", "AF"};
-			snprintf(buf, sizeof(buf), "POP %s", kReg16Af[(op >> 4) & 3]);
-			return buf;
-		}
+		if ((op & 0xCF) == 0xC5) { len = 1; snprintf(buf, sizeof(buf), "PUSH %s", kReg16Af[(op >> 4) & 3]); return buf; }
+		if ((op & 0xCF) == 0xC1) { len = 1; snprintf(buf, sizeof(buf), "POP %s", kReg16Af[(op >> 4) & 3]); return buf; }
 		// ALU A,r (0x80-0xBF)
 		if (op >= 0x80 && op <= 0xBF) {
-			static const char* kAlu[8] = {"ADD A,", "ADC A,", "SUB ", "SBC A,", "AND ", "XOR ", "OR ", "CP "};
 			len = 1;
 			snprintf(buf, sizeof(buf), "%s%s", kAlu[(op >> 3) & 7], kReg8[op & 7]);
 			return buf;
 		}
 		// ALU A,n
 		if ((op & 0xC7) == 0xC6) {
-			static const char* kAlu[8] = {"ADD A,", "ADC A,", "SUB ", "SBC A,", "AND ", "XOR ", "OR ", "CP "};
 			len = 2;
 			snprintf(buf, sizeof(buf), "%s0x%02X", kAlu[(op >> 3) & 7], raw[1]);
 			return buf;
