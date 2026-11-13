@@ -1,4 +1,5 @@
 #pragma once
+#include "LiveDisasm.h"
 #include "Wd1772Fsm.h"
 #include "z80.h"
 #include <cstdint>
@@ -120,6 +121,14 @@ public:
 	void setLinkTraceEnabled(bool on) { linkTraceEnabled_ = on; }
 	bool isLinkTraceEnabled() const { return linkTraceEnabled_; }
 
+	// POC (2026-11-11, user's own design): live/JIT disassembler -- see
+	// LiveDisasm.h's own class comment. Always-on (recording is cheap,
+	// no CLI gate for this POC); grows for as long as the process runs.
+	// LIVEDISASM debug command (fdd3000_station's own protocol) dumps it.
+	std::string liveDisasmDump() const { return liveDisasm_.dump(); }
+	size_t liveDisasmSize() const { return liveDisasm_.size(); }
+	void liveDisasmClear() { liveDisasm_.clear(); }
+
 private:
 	class StationOps : public Z80operations
 	{
@@ -158,6 +167,7 @@ private:
 
 	Wd1772Fsm wd_;
 	std::string diskPaths_[kNumDrives];
+	LiveDisasm liveDisasm_;
 
 	uint32_t stationTstates_ = 0;
 	StationOps stationOps_;

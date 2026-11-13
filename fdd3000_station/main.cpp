@@ -250,6 +250,26 @@ static std::string handleDebugCommand(const std::string& line)
 		return out;
 	}
 
+	if (cmd == "LIVEDISASM") {
+		// POC (2026-11-11) -- dumps the live/JIT disassembler's current map
+		// (see src/LiveDisasm.h) to a file, since the dump can be much
+		// bigger than one debug-protocol reply. "LIVEDISASM CLEAR" resets
+		// it (useful to isolate just the NEXT run's worth of code, e.g.
+		// right after a HARDRESET).
+		if (toks.size() >= 2 && toks[1] == "CLEAR") {
+			g_station.liveDisasmClear();
+			return "OK cleared";
+		}
+		if (toks.size() < 2) return "ERR usage: LIVEDISASM <path> | LIVEDISASM CLEAR";
+		FILE* pf = fopen(toks[1].c_str(), "w");
+		if (!pf) return "ERR cannot open output path";
+		std::string dump = g_station.liveDisasmDump();
+		fwrite(dump.data(), 1, dump.size(), pf);
+		fclose(pf);
+		snprintf(out, sizeof(out), "OK wrote %zu addresses to %s", g_station.liveDisasmSize(), toks[1].c_str());
+		return out;
+	}
+
 	if (cmd == "WDTRACE" && toks.size() >= 2) {
 		g_station.fdc().setTraceEnabled(toks[1] == "ON");
 		snprintf(out, sizeof(out), "OK wdtrace=%d", g_station.fdc().isTraceEnabled() ? 1 : 0);
@@ -340,7 +360,10 @@ static void printUsage(const char* argv0)
 		"                         the boot ROM only reads drive A at\n"
 		"                         reset time.\n"
 		"  LINKTRACE ON|OFF       toggle the link-byte trace live.\n"
-		"  WDTRACE ON|OFF         toggle the WD1772 command/status trace.\n",
+		"  WDTRACE ON|OFF         toggle the WD1772 command/status trace.\n"
+		"  LIVEDISASM <path>      POC: dump the live/JIT disassembler's\n"
+		"                         current PC-keyed map (see src/LiveDisasm.h)\n"
+		"                         to a file. LIVEDISASM CLEAR resets it.\n",
 		argv0);
 }
 
