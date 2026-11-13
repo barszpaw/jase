@@ -1262,6 +1262,14 @@ uint8_t MinZX::peek8(uint16_t address)
 	return memory_.peek8(address);
 }
 
+// Z80operations::debugPeek8() -- see its own comment. memory_.peek8() is
+// already the genuinely side-effect-free path (no tstates, no contention),
+// same one debugserver.cpp's own MEM command and Fdd3000's host paging use.
+uint8_t MinZX::debugPeek8(uint16_t address)
+{
+	return memory_.peek8(address);
+}
+
 void MinZX::poke8(uint16_t address, uint8_t value)
 {
 	// 3 clocks for write byte to RAM

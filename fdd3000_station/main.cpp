@@ -275,16 +275,29 @@ static std::string handleDebugCommand(const std::string& line)
 	}
 
 	if (cmd == "LIVEDISASM") {
-		// POC (2026-11-11) -- dumps the live/JIT disassembler's current map
-		// (see src/LiveDisasm.h) to a file, since the dump can be much
-		// bigger than one debug-protocol reply. "LIVEDISASM CLEAR" resets
-		// it (useful to isolate just the NEXT run's worth of code, e.g.
-		// right after a HARDRESET).
+		// POC (2026-11-11; moved to the station's own Z80 core 2026-11-13
+		// -- see include/z80cpp/z80.h's own comment on why). OFF by
+		// default now -- "LIVEDISASM ON"/"OFF" toggles it; "LIVEDISASM
+		// CLEAR" resets the map; "LIVEDISASM <path>" dumps it to a file
+		// (bigger than one debug-protocol reply would comfortably carry);
+		// bare "LIVEDISASM" reports current state.
+		if (toks.size() >= 2 && toks[1] == "ON") {
+			g_station.setLiveDisasmEnabled(true);
+			return "OK";
+		}
+		if (toks.size() >= 2 && toks[1] == "OFF") {
+			g_station.setLiveDisasmEnabled(false);
+			return "OK";
+		}
 		if (toks.size() >= 2 && toks[1] == "CLEAR") {
 			g_station.liveDisasmClear();
 			return "OK cleared";
 		}
-		if (toks.size() < 2) return "ERR usage: LIVEDISASM <path> | LIVEDISASM CLEAR";
+		if (toks.size() < 2) {
+			snprintf(out, sizeof(out), "OK livedisasm=%d size=%zu",
+			         g_station.isLiveDisasmEnabled() ? 1 : 0, g_station.liveDisasmSize());
+			return out;
+		}
 		FILE* pf = fopen(toks[1].c_str(), "w");
 		if (!pf) return "ERR cannot open output path";
 		std::string dump = g_station.liveDisasmDump();
@@ -385,9 +398,12 @@ static void printUsage(const char* argv0)
 		"                         reset time.\n"
 		"  LINKTRACE ON|OFF       toggle the link-byte trace live.\n"
 		"  WDTRACE ON|OFF         toggle the WD1772 command/status trace.\n"
-		"  LIVEDISASM <path>      POC: dump the live/JIT disassembler's\n"
-		"                         current PC-keyed map (see src/LiveDisasm.h)\n"
-		"                         to a file. LIVEDISASM CLEAR resets it.\n"
+		"  LIVEDISASM ON|OFF      POC: toggle the station's own live/JIT\n"
+		"                         disassembler (include/z80cpp/LiveDisasm.h/\n"
+		"                         z80.h -- a Z80-core-level feature). OFF by\n"
+		"                         default. LIVEDISASM <path> dumps the\n"
+		"                         current PC-keyed map to a file; LIVEDISASM\n"
+		"                         CLEAR resets it.\n"
 		"  DUMPBIN <path> <hexaddr> <len>  POC: raw-bytes binary dump of\n"
 		"                         station RAM/ROM (as actually seen through\n"
 		"                         the current paging view) -- the only way\n"

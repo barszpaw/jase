@@ -895,6 +895,16 @@ void Z80::execute(void) {
         opCode = Z80opsImpl->breakpoint(REG_PC, opCode);
     }
 #endif
+
+    // Live/JIT disassembler -- see liveDisasm_'s own comment (above,
+    // class body). prefixOpcode == 0 here means THIS fetch is a genuine
+    // new-instruction start, not the continuation call execute() makes
+    // for the byte following a CB/DD/ED/FD prefix (that continuation's
+    // own REG_PC no longer points at the instruction's true start byte).
+    if (liveDisasmEnabled_ && prefixOpcode == 0) {
+        liveDisasm_.recordExecution(REG_PC, [this](uint16_t a) { return Z80opsImpl->debugPeek8(a); });
+    }
+
     REG_PC++;
 
     // El prefijo 0xCB no cuenta para esta guerra.

@@ -30,6 +30,7 @@ typedef union {
 } RegisterPair;
 
 #include "z80operations.h"
+#include "LiveDisasm.h"
 
 #define REG_B   regBC.byte8.hi
 #define REG_C   regBC.byte8.lo
@@ -210,6 +211,15 @@ private:
 #ifdef WITH_BREAKPOINT_SUPPORT
     bool breakpointEnabled {false};
 #endif
+
+    // Live/JIT disassembler (2026-11-11, user's own design; moved here
+    // 2026-11-13 so it's a property of ANY Z80 instance -- host or
+    // station -- instead of each peripheral wiring its own copy. Off by
+    // default; see setLiveDisasmEnabled() below. See LiveDisasm.h's own
+    // class comment for what it does and why.
+    LiveDisasm liveDisasm_;
+    bool liveDisasmEnabled_ = false;
+
     void copyToRegister(uint8_t opCode, uint8_t value);
 
 public:
@@ -388,6 +398,15 @@ public:
     bool isBreakpoint(void) { return breakpointEnabled; }
     void setBreakpoint(bool state) { breakpointEnabled = state; }
 #endif
+
+    // Live/JIT disassembler -- see liveDisasm_'s own comment above. Off
+    // by default; every Z80 instance (host, station, any future one) gets
+    // this for free, no per-peripheral wiring needed.
+    void setLiveDisasmEnabled(bool on) { liveDisasmEnabled_ = on; }
+    bool isLiveDisasmEnabled(void) const { return liveDisasmEnabled_; }
+    std::string liveDisasmDump(void) const { return liveDisasm_.dump(); }
+    size_t liveDisasmSize(void) const { return liveDisasm_.size(); }
+    void liveDisasmClear(void) { liveDisasm_.clear(); }
 
 #ifdef WITH_EXEC_DONE
     void setExecDone(bool status) { execDone = status; }

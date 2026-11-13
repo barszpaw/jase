@@ -297,6 +297,37 @@ void DebugServer::handleLine(const std::string& line, MinZX& minZX)
         snprintf(out, sizeof(out), "OK instrtrace=%d", minZX.isInstrTraceEnabled() ? 1 : 0);
         reply(out);
     }
+    else if (cmd == "LIVEDISASM") {
+        // Live/JIT disassembler (see include/z80cpp/LiveDisasm.h/z80.h) --
+        // a Z80-CORE-level feature, not peripheral-specific: operates on
+        // THIS process's own host CPU (minZX.getCPU()) directly, so any
+        // peripheral's ROM window gets covered automatically whenever
+        // it's actually paged in and executing, with no per-peripheral
+        // wiring needed. Off by default -- must be turned ON explicitly.
+        // "LIVEDISASM DUMP <path>" writes the current map to a file;
+        // "LIVEDISASM CLEAR" resets it; bare "LIVEDISASM" reports state.
+        if (toks.size() >= 2 && toks[1] == "ON") {
+            z80->setLiveDisasmEnabled(true);
+        } else if (toks.size() >= 2 && toks[1] == "OFF") {
+            z80->setLiveDisasmEnabled(false);
+        } else if (toks.size() >= 2 && toks[1] == "CLEAR") {
+            z80->liveDisasmClear();
+            reply("OK cleared");
+            return;
+        } else if (toks.size() >= 3 && toks[1] == "DUMP") {
+            FILE* pf = fopen(toks[2].c_str(), "w");
+            if (!pf) { reply("ERR cannot open output path"); return; }
+            std::string dump = z80->liveDisasmDump();
+            fwrite(dump.data(), 1, dump.size(), pf);
+            fclose(pf);
+            snprintf(out, sizeof(out), "OK wrote %zu addresses to %s", z80->liveDisasmSize(), toks[2].c_str());
+            reply(out);
+            return;
+        }
+        snprintf(out, sizeof(out), "OK livedisasm=%d size=%zu",
+                 z80->isLiveDisasmEnabled() ? 1 : 0, z80->liveDisasmSize());
+        reply(out);
+    }
     else if (cmd == "STATE") {
         char tapeInfo[160];
         snprintf(tapeInfo, sizeof(tapeInfo), " tapepos=%zu/%zu tapephase=%d tapebyte=%zu tapepilot=%u",

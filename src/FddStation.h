@@ -1,5 +1,4 @@
 #pragma once
-#include "LiveDisasm.h"
 #include "Wd1772Fsm.h"
 #include "z80.h"
 #include <cstdint>
@@ -121,13 +120,17 @@ public:
 	void setLinkTraceEnabled(bool on) { linkTraceEnabled_ = on; }
 	bool isLinkTraceEnabled() const { return linkTraceEnabled_; }
 
-	// POC (2026-11-11, user's own design): live/JIT disassembler -- see
-	// LiveDisasm.h's own class comment. Always-on (recording is cheap,
-	// no CLI gate for this POC); grows for as long as the process runs.
-	// LIVEDISASM debug command (fdd3000_station's own protocol) dumps it.
-	std::string liveDisasmDump() const { return liveDisasm_.dump(); }
-	size_t liveDisasmSize() const { return liveDisasm_.size(); }
-	void liveDisasmClear() { liveDisasm_.clear(); }
+	// POC (2026-11-11, user's own design; moved into the Z80 core itself
+	// 2026-11-13 -- see z80.h's own comment on why): live/JIT disassembler
+	// for the station's own CPU. Off by default -- must be explicitly
+	// turned on. These are thin pass-throughs to stationCpu_'s own
+	// Z80-level feature, not a station-owned instance. LIVEDISASM debug
+	// command (fdd3000_station's own protocol) controls it.
+	void setLiveDisasmEnabled(bool on) { stationCpu_->setLiveDisasmEnabled(on); }
+	bool isLiveDisasmEnabled() const { return stationCpu_->isLiveDisasmEnabled(); }
+	std::string liveDisasmDump() const { return stationCpu_->liveDisasmDump(); }
+	size_t liveDisasmSize() const { return stationCpu_->liveDisasmSize(); }
+	void liveDisasmClear() { stationCpu_->liveDisasmClear(); }
 
 private:
 	class StationOps : public Z80operations
@@ -136,6 +139,7 @@ private:
 		explicit StationOps(FddStation& owner) : owner_(owner) {}
 		uint8_t fetchOpcode(uint16_t address) override;
 		uint8_t peek8(uint16_t address) override;
+		uint8_t debugPeek8(uint16_t address) override;
 		void poke8(uint16_t address, uint8_t value) override;
 		uint16_t peek16(uint16_t address) override;
 		void poke16(uint16_t address, RegisterPair word) override;
@@ -167,7 +171,6 @@ private:
 
 	Wd1772Fsm wd_;
 	std::string diskPaths_[kNumDrives];
-	LiveDisasm liveDisasm_;
 
 	uint32_t stationTstates_ = 0;
 	StationOps stationOps_;

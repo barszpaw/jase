@@ -190,16 +190,20 @@ uint8_t FddStation::StationOps::fetchOpcode(uint16_t address)
 {
 	uint8_t v = peek8(address); // peek8 already accounts the shared 3 T-states
 	owner_.stationTstates_ += 1; // M1 cycle's extra T-state over a plain memory read
-	// Live/JIT disassembler POC -- see LiveDisasm.h's own class comment.
-	// The lambda is a side-effect-free peek (stationPeek8, not peek8 --
-	// must NOT double-charge T-states for the lookahead bytes).
-	owner_.liveDisasm_.recordExecution(address, [this](uint16_t a) { return owner_.stationPeek8(a); });
 	return v;
 }
 
 uint8_t FddStation::StationOps::peek8(uint16_t address)
 {
 	owner_.stationTstates_ += 3;
+	return owner_.stationPeek8(address);
+}
+
+// Z80operations::debugPeek8() -- see its own comment (z80operations.h).
+// Genuinely side-effect-free, unlike peek8() above (which charges
+// stationTstates_). Used by Z80::execute()'s own live/JIT disassembler.
+uint8_t FddStation::StationOps::debugPeek8(uint16_t address)
+{
 	return owner_.stationPeek8(address);
 }
 

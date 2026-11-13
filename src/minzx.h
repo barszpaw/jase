@@ -294,6 +294,7 @@ public:
 public:
 	virtual uint8_t  fetchOpcode (uint16_t address);
 	virtual uint8_t  peek8       (uint16_t address);
+	virtual uint8_t  debugPeek8  (uint16_t address);
 	virtual void     poke8       (uint16_t address, uint8_t value);
 	virtual uint16_t peek16      (uint16_t address);
 	virtual void     poke16      (uint16_t address, RegisterPair word);

@@ -2,7 +2,6 @@
 #include "Peripheral.h"
 #include "MemoryMap.h"
 #include "FddStation.h"
-#include "LiveDisasm.h"
 #include <cstdint>
 #include <string>
 
@@ -146,21 +145,6 @@ public:
 	void setLinkTraceEnabled(bool on) { linkTraceEnabled_ = on; station_.setLinkTraceEnabled(on); }
 	bool isLinkTraceEnabled() const { return linkTraceEnabled_; }
 
-	// POC (2026-11-13, user-directed extension): live/JIT disassembler for
-	// the HOST side -- the interface ROM (fdd3stavi.rom) itself, not the
-	// station. Always runs in-process regardless of bridge mode (the host
-	// Z80 is never stepped externally), so this is independent of
-	// bridgeMode_/station_ entirely -- recorded in onInstructionFetch()
-	// only while active_ (ROMCS asserted, i.e. the interface ROM is
-	// actually the thing executing, not plain Spectrum ROM/BASIC).
-	// "FDD3000 HOSTDISASM <path>"/"FDD3000 HOSTDISASM CLEAR" over the debug
-	// port -- deliberately a DIFFERENT command name than "LIVEDISASM" (see
-	// fdd3000_station/main.cpp), which is reserved for the STATION's own
-	// map and gets forwarded there verbatim in bridge mode.
-	std::string hostLiveDisasmDump() const { return hostLiveDisasm_.dump(); }
-	size_t hostLiveDisasmSize() const { return hostLiveDisasm_.size(); }
-	void hostLiveDisasmClear() { hostLiveDisasm_.clear(); }
-
 	// Same convention, for the WD1772's OWN command-level trace -- in
 	// bridge mode this toggles it on the EXTERNAL station via the command
 	// channel instead of a local FddStation.
@@ -221,8 +205,4 @@ private:
 	// In-process mode's actual station computer (see class comment) --
 	// unused, but still constructed, in bridge mode.
 	FddStation station_;
-
-	// Host-side live/JIT disassembler -- see hostLiveDisasmDump()'s own
-	// comment above.
-	LiveDisasm hostLiveDisasm_;
 };

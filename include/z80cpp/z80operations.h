@@ -16,6 +16,18 @@ public:
     virtual uint8_t peek8(uint16_t address) = 0;
     virtual void poke8(uint16_t address, uint8_t value) = 0;
 
+    /* Read a byte with ZERO side effects -- no T-state accounting, no
+     * contention delay, no port latching. Needed because Z80::execute()'s
+     * own live/JIT disassembler (see LiveDisasm.h, setLiveDisasmEnabled())
+     * reads a few bytes AHEAD of the instruction it's currently decoding
+     * for display purposes only; those lookahead reads must never be
+     * mistaken for real memory accesses the emulated CPU is actually
+     * making. peek8() above is NOT safe for this on every implementation
+     * (some charge T-states/contention in it) -- implementations should
+     * route this to whatever already-existing side-effect-free debug-peek
+     * path they use for MEM-style inspection commands. */
+    virtual uint8_t debugPeek8(uint16_t address) = 0;
+
     /* Read/Write word from/to RAM */
    virtual uint16_t peek16(uint16_t adddress) = 0;
    virtual void poke16(uint16_t address, RegisterPair word) = 0;
