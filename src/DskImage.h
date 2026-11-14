@@ -38,6 +38,16 @@ public:
 
 	bool load(const std::string& path);
 
+	// Creates a new, already-formatted, blank FDD3000 disk image at
+	// `path` and writes it to disk -- see DskImage.cpp's own comment for
+	// the exact byte layout, reverse-engineered from real, working FDD3000
+	// disk images (2026-11-14). Does NOT load the result into this
+	// instance -- call load(path) afterward to use it. numSides must be
+	// 1 or 2; the real reference geometries are (numTracks=40,
+	// numSides=1) for a 170KB disk and (numTracks=80, numSides=2) for a
+	// 620KB one, but any plausible geometry is accepted.
+	static bool createBlank(const std::string& path, int numTracks, int numSides);
+
 	bool loaded() const { return !data_.empty(); }
 	int numTracks() const { return numTracks_; }
 	int numSides() const { return numSides_; }

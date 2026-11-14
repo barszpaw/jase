@@ -268,6 +268,22 @@ static std::string handleDebugCommand(const std::string& line)
 		return ok ? "OK" : "ERR failed to load disk";
 	}
 
+	if (cmd == "CREATEDISK" && toks.size() >= 5) {
+		// "Insert New" (2026-11-14) -- toks: CREATEDISK <drive> <tracks>
+		// <sides> <path>. Path may contain spaces, same rejoin-the-rest
+		// convention as CHANGEDISK above.
+		int drive = atoi(toks[1].c_str());
+		int tracks = atoi(toks[2].c_str());
+		int sides = atoi(toks[3].c_str());
+		std::string path;
+		for (size_t i = 4; i < toks.size(); i++) {
+			if (i > 4) path += " ";
+			path += toks[i];
+		}
+		bool ok = g_station.insertNewDisk(drive, path, tracks, sides);
+		return ok ? "OK" : "ERR failed to create disk";
+	}
+
 	if (cmd == "LINKTRACE" && toks.size() >= 2) {
 		g_station.setLinkTraceEnabled(toks[1] == "ON");
 		snprintf(out, sizeof(out), "OK linktrace=%d", g_station.isLinkTraceEnabled() ? 1 : 0);
@@ -399,6 +415,13 @@ static void printUsage(const char* argv0)
 		"                         workflow is to do this THEN RESET, since\n"
 		"                         the boot ROM only reads drive A at\n"
 		"                         reset time.\n"
+		"  CREATEDISK <drive> <tracks> <sides> <path>  \"Insert New\" --\n"
+		"                         creates a blank, already-formatted disk\n"
+		"                         at <path> (tracks=40/sides=1 for 170KB,\n"
+		"                         tracks=80/sides=2 for 620KB -- see\n"
+		"                         DskImage::createBlank()'s own comment)\n"
+		"                         and inserts it, same workflow as\n"
+		"                         CHANGEDISK otherwise.\n"
 		"  LINKTRACE ON|OFF       toggle the link-byte trace live.\n"
 		"  WDTRACE ON|OFF         toggle the WD1772 command/status trace.\n"
 		"  LIVEDISASM ON|OFF      POC: toggle the station's own live/JIT\n"

@@ -191,6 +191,21 @@ bool Fdd3000::insertDisk(int driveIndex, const char* path)
 	return ok;
 }
 
+bool Fdd3000::insertNewDisk(int driveIndex, const char* path, int numTracks, int numSides)
+{
+	if (driveIndex < 0 || driveIndex >= FddStation::kNumDrives) return false;
+	bool ok;
+	if (bridgeMode_) {
+		std::ostringstream cmd;
+		cmd << "CREATEDISK " << driveIndex << " " << numTracks << " " << numSides << " " << path;
+		ok = debugRequest(cmd.str()).rfind("OK", 0) == 0;
+	} else {
+		ok = station_.insertNewDisk(driveIndex, path, numTracks, numSides);
+	}
+	if (ok) diskPath_[driveIndex] = path;
+	return ok;
+}
+
 void Fdd3000::stationReset()
 {
 	if (bridgeMode_) debugRequest("RESET");

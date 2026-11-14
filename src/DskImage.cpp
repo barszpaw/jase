@@ -168,6 +168,95 @@ bool DskImage::flush()
 	return true;
 }
 
+// Blank-disk geometry facts (2026-11-14), confirmed by directly inspecting
+// three real, working FDD3000 disk images byte-for-byte (GRYIV620.DSK,
+// "CPM 525.dsk", "CPM tos a2 start cpm 525.dsk", plus TDU-01.dsk for the
+// 170KB case) -- NOT guessed, and NOT following real Fuse's own generic
+// disk_new()/disk_preformat() (peripherals/disk/disk.c), which creates a
+// DIFFERENT, non-FDD3000 placeholder (128-byte sectors, 1 sector/track,
+// IDs 0xFF/0xFE) that the user confirmed even real Fuse itself can't
+// subsequently save:
+//   - 170KB disk: 40 tracks x 1 side.
+//   - 620KB disk: 80 tracks x 2 sides.
+//   - BOTH: 16 sectors/track, 256 bytes/sector (N=1), sectors stored in
+//     PLAIN ASCENDING R order (0..15) on every track checked (including
+//     well past track 0) -- NOT the interleaved order this file's own
+//     class comment describes from the "TOS bez tajemnic" article; that
+//     pattern is simply not what these specific real images use.
+//   - Unused sector data is filled with 0xE5 (the standard CP/M
+//     erased-byte convention), confirmed on a genuinely untouched track
+//     of a real disk (track 70 of "CPM 525.dsk").
+//   - Track-Info header's own GAP#3 field (offset 0x16) = 0x2A and filler
+//     byte field (0x17) = 0xE5 in the real files -- DskImage::load()
+//     doesn't read either, matched here only for authenticity.
+bool DskImage::createBlank(const std::string& path, int numTracks, int numSides)
+{
+	if (numTracks < 1 || numTracks > 254 || (numSides != 1 && numSides != 2)) {
+		fprintf(stderr, "DskImage::createBlank: implausible geometry (%d tracks, %d sides)\n",
+		        numTracks, numSides);
+		return false;
+	}
+
+	const int kSectorsPerTrack = 16;
+	const int kSectorSizeCode = 1; // N=1 -> 256 bytes
+	const int kSectorSize = 128 << kSectorSizeCode;
+	const int kTrackSize = 256 + kSectorsPerTrack * kSectorSize; // 256-byte header + sector data
+	const int kTrackSizeUnits = kTrackSize / 256; // per-track size byte (Extended DSK: actual size / 256)
+
+	if ((size_t)(0x34 + numTracks * numSides) > 256) {
+		fprintf(stderr, "DskImage::createBlank: too many tracks for the fixed 256-byte header\n");
+		return false;
+	}
+
+	std::vector<uint8_t> out(256, 0);
+	const char* sig = "EXTENDED CPC DSK File\r\nDisk-Info\r\nJASE Insert New\r\n";
+	memcpy(out.data(), sig, strlen(sig) < 0x30 ? strlen(sig) : 0x30);
+	out[0x30] = (uint8_t)numTracks;
+	out[0x31] = (uint8_t)numSides;
+	out[0x32] = 0;
+	out[0x33] = 0;
+	for (int i = 0; i < numTracks * numSides; i++) out[0x34 + i] = (uint8_t)kTrackSizeUnits;
+
+	out.reserve(out.size() + (size_t)numTracks * numSides * kTrackSize);
+	for (int t = 0; t < numTracks; t++) {
+		for (int s = 0; s < numSides; s++) {
+			std::vector<uint8_t> track(kTrackSize, 0);
+			memcpy(track.data(), "Track-Info\r\n", 12);
+			track[0x14] = (uint8_t)kSectorSizeCode;
+			track[0x15] = (uint8_t)kSectorsPerTrack;
+			track[0x16] = 0x2A; // GAP#3, cosmetic -- see class comment
+			track[0x17] = 0xE5; // filler byte, cosmetic
+			for (int j = 0; j < kSectorsPerTrack; j++) {
+				uint8_t* d = &track[0x18 + j * 8];
+				d[0] = (uint8_t)t;                // C
+				d[1] = (uint8_t)s;                // H
+				d[2] = (uint8_t)j;                // R -- plain ascending, matches real images
+				d[3] = (uint8_t)kSectorSizeCode;  // N
+				d[4] = 0; d[5] = 0;                // ST1, ST2 -- no errors
+				d[6] = (uint8_t)(kSectorSize & 0xFF);
+				d[7] = (uint8_t)(kSectorSize >> 8);
+			}
+			memset(track.data() + 0x100, 0xE5, (size_t)(kTrackSize - 0x100));
+			out.insert(out.end(), track.begin(), track.end());
+		}
+	}
+
+	FILE* pf = fopen(path.c_str(), "wb");
+	if (!pf) {
+		fprintf(stderr, "DskImage::createBlank: cannot open %s for writing\n", path.c_str());
+		return false;
+	}
+	size_t n = fwrite(out.data(), 1, out.size(), pf);
+	fclose(pf);
+	if (n != out.size()) {
+		fprintf(stderr, "DskImage::createBlank: short write on %s\n", path.c_str());
+		return false;
+	}
+	printf("DskImage::createBlank: created %s (%d tracks x %d side%s, blank/0xE5-filled)\n",
+	       path.c_str(), numTracks, numSides, numSides == 1 ? "" : "s");
+	return true;
+}
+
 const DskImage::TrackInfo* DskImage::trackInfo(int track, int side) const
 {
 	// A real single-sided drive has only one physical head -- its /SIDE

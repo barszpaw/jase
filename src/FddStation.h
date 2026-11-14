@@ -35,6 +35,14 @@ public:
 	bool insertDisk(int driveIndex, const std::string& path);
 	const std::string& diskPath(int driveIndex) const;
 
+	// Creates a new, already-formatted, blank disk at `path` (see
+	// DskImage::createBlank()'s own comment for the real-geometry facts
+	// this is based on) and inserts it into `driveIndex` -- the "Insert
+	// New" workflow. numSides must be 1 (170KB-shaped) or 2
+	// (620KB-shaped); numTracks is normally 40 or 80 to match, but any
+	// plausible value is accepted.
+	bool insertNewDisk(int driveIndex, const std::string& path, int numTracks, int numSides);
+
 	// Station-reset contract (see Fdd3000.h's stationReset() comment):
 	// resets the CPU/paging/FDC but NOT the link latches.
 	void reset();

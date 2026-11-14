@@ -58,6 +58,12 @@ const std::string& FddStation::diskPath(int driveIndex) const
 	return (driveIndex >= 0 && driveIndex < kNumDrives) ? diskPaths_[driveIndex] : empty;
 }
 
+bool FddStation::insertNewDisk(int driveIndex, const std::string& path, int numTracks, int numSides)
+{
+	if (!DskImage::createBlank(path, numTracks, numSides)) return false;
+	return insertDisk(driveIndex, path);
+}
+
 void FddStation::reset()
 {
 	// Confirmed against the real Fuse source (menu.c's menu_machine_fdd3000reset(),

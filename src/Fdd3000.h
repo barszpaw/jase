@@ -129,6 +129,14 @@ public:
 	bool insertDisk(int driveIndex, const char* path);
 	const std::string& getDiskPath(int driveIndex) const { return diskPath_[driveIndex]; }
 
+	// "Insert New" -- creates a blank, already-formatted disk at `path`
+	// (see DskImage::createBlank()'s own comment) and inserts it. In
+	// bridge mode this sends a real CREATEDISK command over the command
+	// channel instead of touching a local FddStation. numSides: 1 for a
+	// 170KB-shaped disk (pair with numTracks=40), 2 for 620KB-shaped
+	// (numTracks=80).
+	bool insertNewDisk(int driveIndex, const char* path, int numTracks, int numSides);
+
 	// FDD3000's own physical reset button -- separate from MinZX::
 	// reset()/F11. Real workflow: swap which disk image is in "drive A",
 	// THEN press this -- the station's tiny boot ROM just loads whatever
