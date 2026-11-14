@@ -34,6 +34,7 @@ bool DskImage::load(const std::string& path)
 	data_.clear();
 	tracks_.clear();
 	numTracks_ = numSides_ = 0;
+	path_.clear();
 
 	FILE* pf = fopen(path.c_str(), "rb");
 	if (!pf) {
@@ -137,8 +138,33 @@ bool DskImage::load(const std::string& path)
 		offset += trackSize;
 	}
 
+	path_ = path;
+
 	printf("DskImage::load: loaded %s (%d tracks x %d side%s)\n",
 	       path.c_str(), numTracks_, numSides_, numSides_ == 1 ? "" : "s");
+	return true;
+}
+
+bool DskImage::flush()
+{
+	// Writes the WHOLE in-memory image back to its original file, not
+	// just the bytes WD1772Fsm's Write Sector most recently touched --
+	// simplicity over micro-optimizing a write path that's inherently
+	// rare (disk images are a few hundred KB, this is not a hot loop).
+	// Called once a full Write Sector command actually completes (see
+	// Wd1772Fsm's own comment at its call site), not per byte.
+	if (path_.empty() || data_.empty()) return false;
+	FILE* pf = fopen(path_.c_str(), "wb");
+	if (!pf) {
+		fprintf(stderr, "DskImage::flush: cannot open %s for writing\n", path_.c_str());
+		return false;
+	}
+	size_t n = fwrite(data_.data(), 1, data_.size(), pf);
+	fclose(pf);
+	if (n != data_.size()) {
+		fprintf(stderr, "DskImage::flush: short write on %s\n", path_.c_str());
+		return false;
+	}
 	return true;
 }
 

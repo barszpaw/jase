@@ -64,13 +64,13 @@ public:
 	uint8_t* sectorData(int track, int side, int index, int& len);
 	int gap3Length(int track, int side) const;
 
-	// Simplification, documented not hidden: writes (Wd1772's Write
-	// Sector) land only in this in-memory copy, never flushed back to
-	// the file on disk -- same "no persistence yet" gap DivIde's own
-	// insertDisk() comment doesn't have (DivIde writes through) but
-	// Fdd3000 does for now, since CP/M's own SAVE/PIP paths weren't
-	// tested yet at the time this was written. Revisit once that's
-	// verified against the real Fuse+FDD3000 reference.
+	// Persists the WHOLE in-memory image back to the file it was load()ed
+	// from (2026-11-14 -- see MEMORY.md/CLAUDE.md: writes via sectorData()/
+	// findSector() land in data_ immediately, same as before, but data_
+	// was never written back to disk until this existed). Wd1772Fsm calls
+	// this once a full Write Sector command completes, not per byte.
+	bool flush();
+	const std::string& path() const { return path_; }
 
 private:
 	struct TrackInfo {
@@ -80,6 +80,7 @@ private:
 	};
 
 	std::vector<uint8_t> data_;
+	std::string path_; // set by load(), used by flush()
 	int numTracks_ = 0;
 	int numSides_ = 0;
 	std::vector<TrackInfo> tracks_; // index = track*numSides_ + side

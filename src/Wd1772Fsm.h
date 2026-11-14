@@ -430,6 +430,15 @@ private:
 	{
 		drqFlag_ = false;
 		statusRegister &= ~STATUS_DRQ;
+		// Persist Write Sector to the real .dsk file (2026-11-14 -- see
+		// MEMORY.md/CLAUDE.md: writes used to land only in DskImage's
+		// in-memory copy, never flushed back to disk). Once per completed
+		// sector, not per byte -- xferIsWrite_ gates this out for Read
+		// Sector, which shares this same completion path.
+		if (xferIsWrite_) {
+			Drive* d = currentDrive();
+			if (d && d->hasImage) d->image.flush();
+		}
 		if (currentState == State::ExecutingTypeII && multiple_) {
 			sectorRegister++;
 			subState = SubState::TypeII_WaitData;
