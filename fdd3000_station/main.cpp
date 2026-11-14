@@ -276,34 +276,37 @@ static std::string handleDebugCommand(const std::string& line)
 
 	if (cmd == "LIVEDISASM") {
 		// POC (2026-11-11; moved to the station's own Z80 core 2026-11-13
-		// -- see include/z80cpp/z80.h's own comment on why). OFF by
-		// default now -- "LIVEDISASM ON"/"OFF" toggles it; "LIVEDISASM
+		// -- see include/z80cpp/z80.h's own comment on why). Talks straight
+		// to g_station.getCPU() (a plain Z80*) -- no station-specific
+		// wrapper for any of this, just routing to the right Z80 instance.
+		// OFF by default -- "LIVEDISASM ON"/"OFF" toggles it; "LIVEDISASM
 		// CLEAR" resets the map; "LIVEDISASM <path>" dumps it to a file
 		// (bigger than one debug-protocol reply would comfortably carry);
 		// bare "LIVEDISASM" reports current state.
+		Z80* z80 = g_station.getCPU();
 		if (toks.size() >= 2 && toks[1] == "ON") {
-			g_station.setLiveDisasmEnabled(true);
+			z80->setLiveDisasmEnabled(true);
 			return "OK";
 		}
 		if (toks.size() >= 2 && toks[1] == "OFF") {
-			g_station.setLiveDisasmEnabled(false);
+			z80->setLiveDisasmEnabled(false);
 			return "OK";
 		}
 		if (toks.size() >= 2 && toks[1] == "CLEAR") {
-			g_station.liveDisasmClear();
+			z80->liveDisasmClear();
 			return "OK cleared";
 		}
 		if (toks.size() < 2) {
 			snprintf(out, sizeof(out), "OK livedisasm=%d size=%zu",
-			         g_station.isLiveDisasmEnabled() ? 1 : 0, g_station.liveDisasmSize());
+			         z80->isLiveDisasmEnabled() ? 1 : 0, z80->liveDisasmSize());
 			return out;
 		}
 		FILE* pf = fopen(toks[1].c_str(), "w");
 		if (!pf) return "ERR cannot open output path";
-		std::string dump = g_station.liveDisasmDump();
+		std::string dump = z80->liveDisasmDump();
 		fwrite(dump.data(), 1, dump.size(), pf);
 		fclose(pf);
-		snprintf(out, sizeof(out), "OK wrote %zu addresses to %s", g_station.liveDisasmSize(), toks[1].c_str());
+		snprintf(out, sizeof(out), "OK wrote %zu addresses to %s", z80->liveDisasmSize(), toks[1].c_str());
 		return out;
 	}
 

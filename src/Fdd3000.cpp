@@ -504,33 +504,35 @@ std::string Fdd3000::debugCommand(const std::vector<std::string>& toks)
 
 	if (sub == "LIVEDISASM") {
 		// In-process mirror of fdd3000_station's own LIVEDISASM -- see its
-		// comment. The station's live/JIT disassembler now lives on its
-		// own Z80 instance (station_'s stationCpu_, see FddStation's own
-		// pass-throughs) rather than a station-owned LiveDisasm -- off by
-		// default, must be turned ON explicitly.
+		// comment. Talks straight to station_.getCPU() (a plain Z80*), the
+		// same way debugserver.cpp's own top-level LIVEDISASM talks to
+		// minZX.getCPU() -- no FDD3000-specific wrapper for any of this,
+		// just routing to the right Z80 instance. Off by default, must be
+		// turned ON explicitly.
+		Z80* z80 = station_.getCPU();
 		if (toks.size() >= 3 && toks[2] == "ON") {
-			station_.setLiveDisasmEnabled(true);
+			z80->setLiveDisasmEnabled(true);
 			return "OK";
 		}
 		if (toks.size() >= 3 && toks[2] == "OFF") {
-			station_.setLiveDisasmEnabled(false);
+			z80->setLiveDisasmEnabled(false);
 			return "OK";
 		}
 		if (toks.size() >= 3 && toks[2] == "CLEAR") {
-			station_.liveDisasmClear();
+			z80->liveDisasmClear();
 			return "OK cleared";
 		}
 		if (toks.size() < 3) {
 			snprintf(out, sizeof(out), "OK livedisasm=%d size=%zu",
-			         station_.isLiveDisasmEnabled() ? 1 : 0, station_.liveDisasmSize());
+			         z80->isLiveDisasmEnabled() ? 1 : 0, z80->liveDisasmSize());
 			return out;
 		}
 		FILE* pf = fopen(toks[2].c_str(), "w");
 		if (!pf) return "ERR cannot open output path";
-		std::string dump = station_.liveDisasmDump();
+		std::string dump = z80->liveDisasmDump();
 		fwrite(dump.data(), 1, dump.size(), pf);
 		fclose(pf);
-		snprintf(out, sizeof(out), "OK wrote %zu addresses to %s", station_.liveDisasmSize(), toks[2].c_str());
+		snprintf(out, sizeof(out), "OK wrote %zu addresses to %s", z80->liveDisasmSize(), toks[2].c_str());
 		return out;
 	}
 

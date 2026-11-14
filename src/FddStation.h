@@ -120,17 +120,15 @@ public:
 	void setLinkTraceEnabled(bool on) { linkTraceEnabled_ = on; }
 	bool isLinkTraceEnabled() const { return linkTraceEnabled_; }
 
-	// POC (2026-11-11, user's own design; moved into the Z80 core itself
-	// 2026-11-13 -- see z80.h's own comment on why): live/JIT disassembler
-	// for the station's own CPU. Off by default -- must be explicitly
-	// turned on. These are thin pass-throughs to stationCpu_'s own
-	// Z80-level feature, not a station-owned instance. LIVEDISASM debug
-	// command (fdd3000_station's own protocol) controls it.
-	void setLiveDisasmEnabled(bool on) { stationCpu_->setLiveDisasmEnabled(on); }
-	bool isLiveDisasmEnabled() const { return stationCpu_->isLiveDisasmEnabled(); }
-	std::string liveDisasmDump() const { return stationCpu_->liveDisasmDump(); }
-	size_t liveDisasmSize() const { return stationCpu_->liveDisasmSize(); }
-	void liveDisasmClear() { stationCpu_->liveDisasmClear(); }
+	// Direct access to the station's own Z80 instance -- same shape as
+	// MinZX::getCPU() for the host. Callers that need Z80-core-level
+	// features (live/JIT disassembler: setLiveDisasmEnabled(),
+	// liveDisasmDump(), etc. -- see include/z80cpp/z80.h) use this
+	// directly instead of FddStation growing its own pass-through wrapper
+	// for every such feature (that was tried 2026-11-13 and reverted --
+	// it just re-creates the same per-peripheral coupling the whole
+	// Z80-core move was meant to eliminate).
+	Z80* getCPU() { return stationCpu_; }
 
 private:
 	class StationOps : public Z80operations
