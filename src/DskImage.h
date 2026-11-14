@@ -82,6 +82,20 @@ public:
 	bool flush();
 	const std::string& path() const { return path_; }
 
+	// "Save As" (2026-11-14): re-points this image at a NEW file and
+	// writes the current in-memory content there -- the real workflow is
+	// "Insert New" creates a disk at a throwaway temp path first (same
+	// createBlank()+load() path as any other disk, nothing special about
+	// it -- the user's own call: "może być w pamięci lub plik
+	// tymczasowy... pomaga w unifikowaniu operacji"), then the user's
+	// explicit Save As picks the REAL destination. Future flush() calls
+	// (every completed Write Sector) go to the new path from here on.
+	bool saveAs(const std::string& newPath)
+	{
+		path_ = newPath;
+		return flush();
+	}
+
 private:
 	struct TrackInfo {
 		long dataOffset = -1; // offset of this track's 256-byte header in data_, -1 = not present

@@ -28,6 +28,12 @@ public:
 
 	bool isOpen() const { return mode_ != Mode::Closed; }
 
+	// Public entry point for an EXTERNALLY-triggered status message --
+	// e.g. main.cpp's unsaved-FDD3000-disk exit guard -- as opposed to
+	// setStatus() (private), which is this class's own internal
+	// bookkeeping for actions IT just performed (Save/Load/etc).
+	void showWarning(const std::string& msg) { setStatus(msg, false); }
+
 	// The settings.json path peripheral/machine config screens read from
 	// and "RESET > SAVE CONFIG" writes to -- whatever --settings named,
 	// or "settings.json" (the repo-root template/reference file) if the

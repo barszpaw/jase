@@ -1,6 +1,7 @@
 #include "FddStation.h"
 #include <cstdio>
 #include <cstring>
+#include <unistd.h>
 
 FddStation::FddStation()
 	: traceStart_(std::chrono::steady_clock::now())
@@ -48,7 +49,10 @@ bool FddStation::loadBootRom(const std::string& path)
 bool FddStation::insertDisk(int driveIndex, const std::string& path)
 {
 	if (!wd_.insertDisk(driveIndex, path)) return false;
-	if (driveIndex >= 0 && driveIndex < kNumDrives) diskPaths_[driveIndex] = path;
+	if (driveIndex >= 0 && driveIndex < kNumDrives) {
+		diskPaths_[driveIndex] = path;
+		diskIsTemporary_[driveIndex] = false; // an explicitly-chosen file is never "unsaved"
+	}
 	return true;
 }
 
@@ -58,10 +62,30 @@ const std::string& FddStation::diskPath(int driveIndex) const
 	return (driveIndex >= 0 && driveIndex < kNumDrives) ? diskPaths_[driveIndex] : empty;
 }
 
-bool FddStation::insertNewDisk(int driveIndex, const std::string& path, int numTracks, int numSides)
+bool FddStation::insertNewDisk(int driveIndex, int numTracks, int numSides)
 {
-	if (!DskImage::createBlank(path, numTracks, numSides)) return false;
-	return insertDisk(driveIndex, path);
+	if (driveIndex < 0 || driveIndex >= kNumDrives) return false;
+	char tmpPath[256];
+	snprintf(tmpPath, sizeof(tmpPath), "/tmp/jase_fdd3000_newdisk_%d_drive%d.dsk", (int)getpid(), driveIndex);
+	if (!DskImage::createBlank(tmpPath, numTracks, numSides)) return false;
+	if (!insertDisk(driveIndex, tmpPath)) return false;
+	diskIsTemporary_[driveIndex] = true; // insertDisk() above just cleared it -- set it back
+	return true;
+}
+
+bool FddStation::saveDiskAs(int driveIndex, const std::string& newPath)
+{
+	if (!wd_.saveDiskAs(driveIndex, newPath)) return false;
+	if (driveIndex >= 0 && driveIndex < kNumDrives) {
+		diskPaths_[driveIndex] = newPath;
+		diskIsTemporary_[driveIndex] = false;
+	}
+	return true;
+}
+
+bool FddStation::isDiskTemporary(int driveIndex) const
+{
+	return (driveIndex >= 0 && driveIndex < kNumDrives) && diskIsTemporary_[driveIndex];
 }
 
 void FddStation::reset()

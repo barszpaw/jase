@@ -191,19 +191,57 @@ bool Fdd3000::insertDisk(int driveIndex, const char* path)
 	return ok;
 }
 
-bool Fdd3000::insertNewDisk(int driveIndex, const char* path, int numTracks, int numSides)
+bool Fdd3000::insertNewDisk(int driveIndex, int numTracks, int numSides)
+{
+	if (driveIndex < 0 || driveIndex >= FddStation::kNumDrives) return false;
+	bool ok;
+	std::string resultPath;
+	if (bridgeMode_) {
+		std::ostringstream cmd;
+		cmd << "NEWDISK " << driveIndex << " " << numTracks << " " << numSides;
+		std::string reply = debugRequest(cmd.str());
+		ok = reply.rfind("OK ", 0) == 0; // station replies "OK <temp-path>" so the host can show it
+		if (ok) resultPath = reply.substr(3);
+	} else {
+		ok = station_.insertNewDisk(driveIndex, numTracks, numSides);
+		if (ok) resultPath = station_.diskPath(driveIndex);
+	}
+	if (ok) diskPath_[driveIndex] = resultPath;
+	return ok;
+}
+
+bool Fdd3000::saveDiskAs(int driveIndex, const char* newPath)
 {
 	if (driveIndex < 0 || driveIndex >= FddStation::kNumDrives) return false;
 	bool ok;
 	if (bridgeMode_) {
 		std::ostringstream cmd;
-		cmd << "CREATEDISK " << driveIndex << " " << numTracks << " " << numSides << " " << path;
+		cmd << "SAVEDISK " << driveIndex << " " << newPath;
 		ok = debugRequest(cmd.str()).rfind("OK", 0) == 0;
 	} else {
-		ok = station_.insertNewDisk(driveIndex, path, numTracks, numSides);
+		ok = station_.saveDiskAs(driveIndex, newPath);
 	}
-	if (ok) diskPath_[driveIndex] = path;
+	if (ok) diskPath_[driveIndex] = newPath;
 	return ok;
+}
+
+bool Fdd3000::isDiskTemporary(int driveIndex)
+{
+	if (driveIndex < 0 || driveIndex >= FddStation::kNumDrives) return false;
+	if (bridgeMode_) {
+		std::ostringstream cmd;
+		cmd << "DISKTEMP " << driveIndex;
+		std::string reply = debugRequest(cmd.str());
+		return reply.find("temporary=1") != std::string::npos;
+	}
+	return station_.isDiskTemporary(driveIndex);
+}
+
+bool Fdd3000::hasAnyUnsavedDisk()
+{
+	for (int i = 0; i < FddStation::kNumDrives; i++)
+		if (isDiskTemporary(i)) return true;
+	return false;
 }
 
 void Fdd3000::stationReset()

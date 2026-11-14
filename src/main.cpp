@@ -1015,10 +1015,19 @@ int main(int argc, char *argv[])
 	SDL_Event event;
 	bool running = true;
 	bool useLocktexture = false;
+	// Unsaved-FDD3000-disk exit guard (2026-11-14, user-directed: "trzeba
+	// pilnować przy wychodzeniu z JASE czy zapisać stworzony dysk") --
+	// "Insert New" disks start life at a throwaway temp path (see
+	// Fdd3000::isDiskTemporary()'s own comment); closing the window
+	// while one is still there would silently lose it. First close
+	// attempt with an unsaved disk blocks the quit, opens the OSD menu,
+	// and shows a warning instead -- a second close attempt (the user
+	// explicitly insisting) goes through.
+	bool quitConfirmPending = false;
 
 	unsigned int frames = 0;
 	Uint64 start = SDL_GetPerformanceCounter();
-	
+
 	while (running)
 	{
 		const Uint64 frameStart = SDL_GetPerformanceCounter();
@@ -1030,6 +1039,13 @@ int main(int argc, char *argv[])
 		{
 			if (SDL_QUIT == event.type)
 			{
+				if (!quitConfirmPending && minZX.getFdd3000()->isEnabled() &&
+				    minZX.getFdd3000()->hasAnyUnsavedDisk()) {
+					quitConfirmPending = true;
+					if (!osdMenu.isOpen()) osdMenu.toggle();
+					osdMenu.showWarning("Unsaved FDD3000 disk! Close again to quit anyway.");
+					break;
+				}
 				running = false;
 				break;
 			}

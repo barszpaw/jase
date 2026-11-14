@@ -35,13 +35,22 @@ public:
 	bool insertDisk(int driveIndex, const std::string& path);
 	const std::string& diskPath(int driveIndex) const;
 
-	// Creates a new, already-formatted, blank disk at `path` (see
-	// DskImage::createBlank()'s own comment for the real-geometry facts
-	// this is based on) and inserts it into `driveIndex` -- the "Insert
-	// New" workflow. numSides must be 1 (170KB-shaped) or 2
-	// (620KB-shaped); numTracks is normally 40 or 80 to match, but any
-	// plausible value is accepted.
-	bool insertNewDisk(int driveIndex, const std::string& path, int numTracks, int numSides);
+	// "Insert New" (2026-11-14, user-directed workflow): creates a blank,
+	// already-formatted disk (see DskImage::createBlank()'s own comment
+	// for the real-geometry facts) at a throwaway TEMP path and inserts
+	// it -- same createBlank()+insertDisk() path any other disk uses,
+	// nothing special ("może być w pamięci lub plik tymczasowy... pomaga
+	// w unifikowaniu operacji" -- the user's own call). numSides: 1
+	// (170KB) or 2 (340KB/620KB); numTracks: 40 (170KB/340KB) or 80
+	// (620KB), but any plausible value is accepted.
+	bool insertNewDisk(int driveIndex, int numTracks, int numSides);
+
+	// "Save As" -- re-points the drive's disk at a REAL, user-chosen
+	// path and writes it there; clears the "still at its throwaway temp
+	// path" flag isDiskTemporary() reports (used for the exit-time
+	// unsaved-disk guard).
+	bool saveDiskAs(int driveIndex, const std::string& newPath);
+	bool isDiskTemporary(int driveIndex) const;
 
 	// Station-reset contract (see Fdd3000.h's stationReset() comment):
 	// resets the CPU/paging/FDC but NOT the link latches.
@@ -177,6 +186,7 @@ private:
 
 	Wd1772Fsm wd_;
 	std::string diskPaths_[kNumDrives];
+	bool diskIsTemporary_[kNumDrives] = {}; // see isDiskTemporary()'s own comment
 
 	uint32_t stationTstates_ = 0;
 	StationOps stationOps_;

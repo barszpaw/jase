@@ -129,13 +129,21 @@ public:
 	bool insertDisk(int driveIndex, const char* path);
 	const std::string& getDiskPath(int driveIndex) const { return diskPath_[driveIndex]; }
 
-	// "Insert New" -- creates a blank, already-formatted disk at `path`
-	// (see DskImage::createBlank()'s own comment) and inserts it. In
-	// bridge mode this sends a real CREATEDISK command over the command
-	// channel instead of touching a local FddStation. numSides: 1 for a
-	// 170KB-shaped disk (pair with numTracks=40), 2 for 620KB-shaped
+	// "Insert New" (2026-11-14) -- creates a blank, already-formatted
+	// disk at a throwaway temp path and inserts it (see FddStation::
+	// insertNewDisk()'s own comment for why no real path is needed up
+	// front). In bridge mode this sends a real NEWDISK command over the
+	// command channel instead of touching a local FddStation. numSides:
+	// 1 for 170KB (numTracks=40), 2 for 340KB (numTracks=40) or 620KB
 	// (numTracks=80).
-	bool insertNewDisk(int driveIndex, const char* path, int numTracks, int numSides);
+	bool insertNewDisk(int driveIndex, int numTracks, int numSides);
+
+	// "Save As" -- re-points the drive's disk at a REAL, user-chosen
+	// path. isDiskTemporary()/hasAnyUnsavedDisk() back the exit-time
+	// unsaved-disk guard (see main.cpp's SDL_QUIT handling).
+	bool saveDiskAs(int driveIndex, const char* newPath);
+	bool isDiskTemporary(int driveIndex); // not const -- bridge mode needs a live debugRequest() round-trip
+	bool hasAnyUnsavedDisk();
 
 	// FDD3000's own physical reset button -- separate from MinZX::
 	// reset()/F11. Real workflow: swap which disk image is in "drive A",

@@ -11,9 +11,10 @@
 //   - link port: the real single wire, one latched byte each direction,
 //     raw bytes, no framing.
 //   - debug port: a text command channel -- RESET, CHANGEDISK <drive>
-//     <path>, REGS, SETREG <reg> <hex>, MEM <addr> <len>, POKE <addr>
-//     <b1,b2,...>, STEP [n], LINKTRACE ON/OFF, WDTRACE ON/OFF, STATUS.
-//     Same line-based shape as JASE's own --debug-port protocol.
+//     <path>, NEWDISK <drive> <tracks> <sides>, SAVEDISK <drive> <path>,
+//     DISKTEMP <drive>, REGS, SETREG <reg> <hex>, MEM <addr> <len>, POKE
+//     <addr> <b1,b2,...>, STEP [n], LINKTRACE ON/OFF, WDTRACE ON/OFF,
+//     STATUS. Same line-based shape as JASE's own --debug-port protocol.
 
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -268,20 +269,36 @@ static std::string handleDebugCommand(const std::string& line)
 		return ok ? "OK" : "ERR failed to load disk";
 	}
 
-	if (cmd == "CREATEDISK" && toks.size() >= 5) {
-		// "Insert New" (2026-11-14) -- toks: CREATEDISK <drive> <tracks>
-		// <sides> <path>. Path may contain spaces, same rejoin-the-rest
-		// convention as CHANGEDISK above.
+	if (cmd == "NEWDISK" && toks.size() >= 4) {
+		// "Insert New" (2026-11-14) -- toks: NEWDISK <drive> <tracks>
+		// <sides>. No path -- the station generates its own throwaway
+		// temp path (see FddStation::insertNewDisk()'s own comment) and
+		// reports it back in the reply so the host can show/remember it.
 		int drive = atoi(toks[1].c_str());
 		int tracks = atoi(toks[2].c_str());
 		int sides = atoi(toks[3].c_str());
+		bool ok = g_station.insertNewDisk(drive, tracks, sides);
+		if (!ok) return "ERR failed to create disk";
+		return "OK " + g_station.diskPath(drive);
+	}
+
+	if (cmd == "SAVEDISK" && toks.size() >= 3) {
+		// "Save As" -- toks: SAVEDISK <drive> <path>. Path may contain
+		// spaces, same rejoin convention as CHANGEDISK.
+		int drive = atoi(toks[1].c_str());
 		std::string path;
-		for (size_t i = 4; i < toks.size(); i++) {
-			if (i > 4) path += " ";
+		for (size_t i = 2; i < toks.size(); i++) {
+			if (i > 2) path += " ";
 			path += toks[i];
 		}
-		bool ok = g_station.insertNewDisk(drive, path, tracks, sides);
-		return ok ? "OK" : "ERR failed to create disk";
+		bool ok = g_station.saveDiskAs(drive, path);
+		return ok ? "OK" : "ERR failed to save disk";
+	}
+
+	if (cmd == "DISKTEMP" && toks.size() >= 2) {
+		int drive = atoi(toks[1].c_str());
+		snprintf(out, sizeof(out), "OK temporary=%d", g_station.isDiskTemporary(drive) ? 1 : 0);
+		return out;
 	}
 
 	if (cmd == "LINKTRACE" && toks.size() >= 2) {
@@ -415,13 +432,18 @@ static void printUsage(const char* argv0)
 		"                         workflow is to do this THEN RESET, since\n"
 		"                         the boot ROM only reads drive A at\n"
 		"                         reset time.\n"
-		"  CREATEDISK <drive> <tracks> <sides> <path>  \"Insert New\" --\n"
-		"                         creates a blank, already-formatted disk\n"
-		"                         at <path> (tracks=40/sides=1 for 170KB,\n"
+		"  NEWDISK <drive> <tracks> <sides>  \"Insert New\" -- creates a\n"
+		"                         blank, already-formatted disk at a\n"
+		"                         throwaway temp path (tracks=40/sides=1\n"
+		"                         for 170KB, tracks=40/sides=2 for 340KB,\n"
 		"                         tracks=80/sides=2 for 620KB -- see\n"
 		"                         DskImage::createBlank()'s own comment)\n"
-		"                         and inserts it, same workflow as\n"
-		"                         CHANGEDISK otherwise.\n"
+		"                         and inserts it; replies \"OK <temp-path>\".\n"
+		"  SAVEDISK <drive> <path>  \"Save As\" -- re-points the drive's\n"
+		"                         disk at a real path and writes it there.\n"
+		"  DISKTEMP <drive>       reports whether the drive's disk is\n"
+		"                         still at its throwaway NEWDISK temp path\n"
+		"                         (never explicitly SAVEDISK'd).\n"
 		"  LINKTRACE ON|OFF       toggle the link-byte trace live.\n"
 		"  WDTRACE ON|OFF         toggle the WD1772 command/status trace.\n"
 		"  LIVEDISASM ON|OFF      POC: toggle the station's own live/JIT\n"

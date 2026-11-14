@@ -200,6 +200,13 @@ public:
 		return drives_[driveIndex].hasImage;
 	}
 
+	// "Save As" -- see DskImage::saveAs()'s own comment.
+	bool saveDiskAs(int driveIndex, const std::string& newPath)
+	{
+		if (driveIndex < 0 || driveIndex >= kNumDrives || !drives_[driveIndex].hasImage) return false;
+		return drives_[driveIndex].image.saveAs(newPath);
+	}
+
 	// Same ON/OFF runtime-toggle convention as the clean-room Wd1772's
 	// own setTraceEnabled() (see its own comment) -- added here too for
 	// direct, apples-to-apples comparison via "FDD3000 WDTRACE ON/OFF".
