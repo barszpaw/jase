@@ -49,11 +49,19 @@ STATION_TARGET := fdd3000_station/fdd3000_station
 STATION_INCLUDES := -Isrc -Iinclude/z80cpp
 STATION_OBJS := fdd3000_station/main.o src/FddStation.o src/Wd1772Fsm.o src/DskImage.o src/z80cpp/z80.o
 
-.PHONY: all clean station
+# wd1772_write_test (2026-11-14 -- see tools/wd1772_write_test.cpp's own
+# comment): standalone Write-Sector-persists-to-disk round-trip test, no
+# SDL/MinZX dependency, same two core objects the station target uses.
+WRITE_TEST_TARGET := tools/wd1772_write_test
+WRITE_TEST_OBJS := tools/wd1772_write_test.o src/Wd1772Fsm.o src/DskImage.o
+
+.PHONY: all clean station write-test
 
 all: $(TARGET) $(PLUGIN_KEMPSTON)
 
 station: $(STATION_TARGET)
+
+write-test: $(WRITE_TEST_TARGET)
 
 $(TARGET): $(OBJS)
 	$(CXX) $(OBJS) -o $@ $(LIBS)
@@ -61,8 +69,14 @@ $(TARGET): $(OBJS)
 $(STATION_TARGET): $(STATION_OBJS)
 	$(CXX) $(STATION_OBJS) -o $@ -lpthread
 
+$(WRITE_TEST_TARGET): $(WRITE_TEST_OBJS)
+	$(CXX) $(WRITE_TEST_OBJS) -o $@
+
 fdd3000_station/main.o: fdd3000_station/main.cpp
 	$(CXX) $(CXXFLAGS) $(STATION_INCLUDES) -c $< -o $@
+
+tools/wd1772_write_test.o: tools/wd1772_write_test.cpp
+	$(CXX) $(CXXFLAGS) -Isrc -c $< -o $@
 
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
@@ -88,3 +102,4 @@ clean:
 	rm -f $(OBJS) $(DEPS) $(TARGET)
 	rm -f $(PLUGIN_KEMPSTON_OBJS) $(PLUGIN_KEMPSTON_OBJS:.o=.d) $(PLUGIN_KEMPSTON)
 	rm -f fdd3000_station/main.o fdd3000_station/main.d $(STATION_TARGET)
+	rm -f tools/wd1772_write_test.o tools/wd1772_write_test.d $(WRITE_TEST_TARGET)

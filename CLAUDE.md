@@ -13,29 +13,52 @@
 ## Custom Commands
 - `restore-context`: Execute command to read `MEMORY.md`, read current `git diff`, and print current operational status of the SDI bridge work.
 
-## FDD3000 — GPL firewall LIFTED (scope: FDD3000 only, user decision 2026-11-04)
-- The project-wide "GPL firewall" practice (see auto-memory
-  `project_jase_overview.md`: read GPL reference projects for protocol
-  facts, never copy their code) is explicitly **lifted for FDD3000
-  emulation work only**, by the user's own decision ("na potrzeby emulacji
-  fdd3000 zewalam na zdjęcie 'firewall license'"). It still applies, in
-  full, to every other peripheral (SDI/VC1541, Dandanator, Multiply, ZiFi,
-  Gopher/Tnfs) — do not generalize this exception beyond FDD3000.
-- This means: Fuse's real FDD3000-related GPL-3 sources (`peripherals/disk/ti397.c`,
-  `peripherals/disk/fdd3000.c`, `peripherals/disk/wd_fdc.c`,
-  `peripherals/disk/fdd.c`, `peripherals/disk/z80free/*` in
-  `~/src/Fuse_FDD3000/build/fuse-1.10.1/`) may now be directly ported, adapted,
-  or copied into JASE's own FDD3000 source files (`src/Fdd3000.h/.cpp`,
-  `src/Wd1772.h/.cpp`), not just read for facts.
-- **License consequence** (keep visible, don't silently paper over): any
-  JASE file that incorporates Fuse GPL-3 code stops being part of the
-  project's otherwise-MIT tree for that file -- it needs an accurate GPL-3
-  license header/attribution to Fuse's authors, and the usual GPL copyleft
-  implications for anything statically linked against it apply. This is a
-  deliberate, scoped tradeoff the user made to actually finish FDD3000,
-  not an oversight -- but any future session touching these files should
-  know the license boundary moved, not assume the rest of JASE's MIT
-  posture still holds here.
+## FDD3000 — GPL firewall RE-CLOSED (scope: FDD3000 only, user decision 2026-11-13)
+- Was explicitly **lifted for FDD3000 emulation work only**, 2026-11-04
+  ("na potrzeby emulacji fdd3000 zewalam na zdjęcie 'firewall license'"),
+  permitting Fuse's real FDD3000-related GPL-3 sources
+  (`peripherals/disk/ti397.c`, `peripherals/disk/fdd3000.c`,
+  `peripherals/disk/wd_fdc.c`, `peripherals/disk/fdd.c`,
+  `peripherals/disk/z80free/*` in
+  `~/src/Fuse_FDD3000/build/fuse-1.10.1/`) to be directly ported, adapted,
+  or copied into `src/Fdd3000.h/.cpp`/`src/Wd1772.h/.cpp`, not just read
+  for facts. The ONE place that actually used this (beyond the
+  project-wide default clean-room "facts not code" policy) was
+  `src/Wd1772.cpp`'s Type II/III BUSY-delay timing, ported from Fuse's
+  `wd_fdc.c`.
+- **Re-closed 2026-11-13, user decision**, after the user's own
+  `Wd1772Fsm` (a from-scratch State/SubState FSM model, two real status-
+  bit bugs fixed via differential testing, boots real CP/M 2.2) replaced
+  `Wd1772` as the FDC both `FddStation` (in-process `Fdd3000` AND the
+  standalone `fdd3000_station` process) actually uses. Confirmed via grep
+  that nothing in the tree still `#include`s `Wd1772.h` or references
+  `Wd1772` (not `Wd1772Fsm`) — the GPL-ported BUSY-delay logic was
+  genuinely dead code, STILL being compiled and statically linked into
+  the distributed `jase` binary via the Makefile's `src/*.cpp` wildcard
+  despite being unreachable at runtime (GPL copyleft concerns attach to
+  what's linked/distributed, not just what executes). **`src/Wd1772.cpp`
+  and `src/Wd1772.h` were deleted** (not just unwired) to actually remove
+  the GPL-3-derived code from the tree and the binary, verified live
+  afterward: in-process boot to the real "1 - system TOS / 2 - system
+  CP/M" station menu is byte-identical (8/8 dispatcher successes, same
+  screenshot) with `Wd1772Fsm` alone.
+- **Practical effect of this closure**: the default project-wide clean-room
+  policy (read GPL reference projects for protocol FACTS, never copy
+  their code — see auto-memory `project_jase_overview.md`) now applies to
+  FDD3000 again, same as every other peripheral (SDI/VC1541, Dandanator,
+  Multiply, ZiFi, Gopher/Tnfs). Any future FDD3000 work should NOT port
+  Fuse source directly without the user explicitly re-opening this
+  exception first.
+- **Separate, NOT affected by this closure, pre-existing, project-wide**:
+  `include/z80cpp/` (the Z80 CPU core itself, used by BOTH the host CPU
+  and `FddStation`'s own station CPU) is independently GPL-3 licensed
+  (`jsanchezv/Z80Core` port, see its own header comment) — this predates
+  and is unrelated to the FDD3000-specific firewall exception above, and
+  closing that exception does not change z80cpp's license status at all.
+  `src/z80free/` (an older, now-unreferenced third-party Z80 core import
+  with its own bundled `COPYING`/`JASE_PROVENANCE.md`) is a separate,
+  untouched, pre-existing situation too — not evaluated as part of this
+  closure.
 
 ## SDI ROM Disassembly Workflow
 - Po dokonaniu ostatecznej identyfikacji adresu procedur, skoków, danych lub
