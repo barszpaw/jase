@@ -129,6 +129,17 @@ public:
 	bool insertDisk(int driveIndex, const char* path);
 	const std::string& getDiskPath(int driveIndex) const { return diskPath_[driveIndex]; }
 
+	// Disk-activity LED signal (2026-11-14, user-directed): true for a
+	// short, human-visible window after the HOST's own last IN/OUT on
+	// port 0xEF (in()/out() below) -- works identically in-process or
+	// bridge mode (both always run host-side, zero round-trip cost,
+	// unlike querying the remote station's own WD1772 BUSY status
+	// would be). Reflects BUS activity (the interface being talked to
+	// at all, including retry/poll traffic), same as a real floppy
+	// drive's own activity LED -- not "a sector is successfully
+	// transferring" specifically.
+	bool isRecentlyActive() const;
+
 	// "Insert New" (2026-11-14) -- creates a blank, already-formatted
 	// disk at a throwaway temp path and inserts it (see FddStation::
 	// insertNewDisk()'s own comment for why no real path is needed up
@@ -204,6 +215,7 @@ private:
 	bool enabled_ = false;
 	bool linkTraceEnabled_ = false;
 	uint16_t lastHostPc_ = 0; // stashed in onInstructionFetch(), for logLinkTrace()'s own hostPC column
+	uint32_t lastActivityMs_ = 0; // see isRecentlyActive()'s own comment
 
 	// Host-side ROMCS paging state -- IMMEDIATE/same-cycle PC trap, see
 	// class comment for why this differs from DivIDE's deferred pattern.

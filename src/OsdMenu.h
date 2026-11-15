@@ -73,6 +73,20 @@ public:
 	// Non-const: ticks the transient status-message countdown.
 	void render(uint8_t* pixels, int texW, int texH);
 
+	// Persistent on-screen indicators (2026-11-14, user-directed) -- a
+	// disk-activity LED (bottom-right, lit while Fdd3000::
+	// isRecentlyActive()) and/or a short FPS readout, each independently
+	// toggleable (OPTIONS screen rows below, or --show-indicators/
+	// --show-fps on the command line). Unlike render(), this draws EVERY
+	// frame regardless of isOpen() -- real disk activity lights/FPS
+	// counters are meant to be visible with the menu closed, same as
+	// real Fuse's own always-on indicators. `fps` is the caller's own
+	// current estimate (main.cpp already computes one for its console
+	// print every ~2s; this just redraws the last value every frame).
+	void renderHud(uint8_t* pixels, int texW, int texH, double fps);
+	void setShowIndicators(bool on) { showIndicators_ = on; }
+	void setShowFps(bool on) { showFps_ = on; }
+
 private:
 	enum class Mode { Closed, TopMenu, StorageMenu, FileBrowser, NetworkMenu, RemoteList, ProtoPicker, TextInput, RemoteBrowser, ZxKeyboard,
 	                   OptionsMenu, MachinePicker, ResetMenu, PeriphDetail };
@@ -146,10 +160,14 @@ private:
 	// Options screen toggles them immediately AND reads them back
 	// straight from MinZX for both display and saveConfig().
 	int optionsSel_ = 0;
-	static const int kOptionsItemCount = 5; // Preferred Machine, Turbosound, Timex Hires, PC Keys, Tape Fastload
+	static const int kOptionsItemCount = 7; // Preferred Machine, Turbosound, Timex Hires, PC Keys, Tape Fastload, Show Indicators, Show FPS
 	int prefMachineIdx_ = 0; // 0=48k, 1=tc2048, 2=128k
 	bool prefTurboSound_ = false;
 	int machinePickerSel_ = 0;
+
+	// ---- persistent HUD (2026-11-14) -- see renderHud()'s own comment ----
+	bool showIndicators_ = true;  // disk-activity LED, on by default (non-intrusive, matches real hardware)
+	bool showFps_ = false;        // short FPS readout, off by default (debug/performance info, not everyone wants it)
 
 	int resetSel_ = 0;
 	static const int kResetItemCount = 2; // Reset, Save Config

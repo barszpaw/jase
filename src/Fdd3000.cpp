@@ -289,12 +289,18 @@ void Fdd3000::logLinkTrace(const char* direction, uint8_t value) const
 	        ts, lastHostPc_, direction, value, bin);
 }
 
+bool Fdd3000::isRecentlyActive() const
+{
+	return enabled_ && (SDL_GetTicks() - lastActivityMs_) < 150;
+}
+
 bool Fdd3000::in(uint16_t port, uint8_t& value)
 {
 	if (!enabled_) return false;
 	if ((port & 0xFF) != 0xEF) return false;
 	value = bridgeMode_ ? linkFromStation_ : station_.stationByte();
 	if (linkTraceEnabled_) logLinkTrace("IN ", value);
+	lastActivityMs_ = SDL_GetTicks(); // see isRecentlyActive()'s own comment
 	return true;
 }
 
@@ -316,6 +322,7 @@ bool Fdd3000::out(uint16_t port, uint8_t value)
 		station_.setHostByte(value);
 	}
 	if (linkTraceEnabled_) logLinkTrace("OUT", value);
+	lastActivityMs_ = SDL_GetTicks();
 	return true;
 }
 

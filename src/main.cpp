@@ -82,6 +82,10 @@ static std::vector<std::string> settingsToArgs(const json& root)
 	flag(jBool(machine, "timexHires"), "--timex-hires");
 	flag(jBool(machine, "pcKeys"), "--pc-keys");
 
+	const json& ui = jObj(root, "ui");
+	flag(jBool(ui, "showIndicators"), "--show-indicators");
+	flag(jBool(ui, "showFps"), "--show-fps");
+
 	const json& media = jObj(root, "media");
 	valFlag(media, "tape", "--tape");
 	valFlag(media, "loadTape", "--load-tape");
@@ -186,6 +190,7 @@ static const char* const kKnownFlags[] = {
 	"--help", "-h",
 	"--settings",
 	"--machine", "--rom", "--turbosound", "--timex-hires", "--pc-keys",
+	"--show-indicators", "--show-fps",
 	"--tape", "--load-tape", "--load-sna", "--load-z80", "--tape-fastload", "--dock-cartridge",
 	"--zifi",
 	"--multiface1", "--multiface1-rom",
@@ -354,6 +359,17 @@ static void printUsage(const char* argv0)
 		"                         { | } ~ and $ (-> £). LEFT shift keeps\n"
 		"                         its normal job (off by default --\n"
 		"                         unmodified matrix matches real hardware).\n"
+		"  --show-indicators      persistent disk-activity LED, bottom-right\n"
+		"                         corner (small square, lit while FDD3000's\n"
+		"                         own Fdd3000::isRecentlyActive() is true) --\n"
+		"                         drawn every frame regardless of the OSD\n"
+		"                         menu's own open/closed state. ON by\n"
+		"                         default already; same toggle lives in\n"
+		"                         OPTIONS > SHOW INDICATORS.\n"
+		"  --show-fps             short \"NN FPS\" readout, top-right corner,\n"
+		"                         same always-on-screen convention as\n"
+		"                         --show-indicators. Off by default; same\n"
+		"                         toggle lives in OPTIONS > SHOW FPS.\n"
 		"\n"
 		"Media:\n"
 		"  --tape PATH            stage a .tap/.tzx; LOAD \"\" loads it normally\n"
@@ -761,6 +777,10 @@ int main(int argc, char *argv[])
 			z80Path = argv[++i];
 		else if (0 == strcmp(argv[i], "--tape-fastload"))
 			minZX.setTapeFastload(true);
+		else if (0 == strcmp(argv[i], "--show-indicators"))
+			osdMenu.setShowIndicators(true);
+		else if (0 == strcmp(argv[i], "--show-fps"))
+			osdMenu.setShowFps(true);
 		else if (0 == strcmp(argv[i], "--multiface1"))
 			minZX.getMultiface()->setEnabled(true);
 		else if (0 == strcmp(argv[i], "--multiface1-rom") && i + 1 < argc) {
@@ -1024,6 +1044,7 @@ int main(int argc, char *argv[])
 	// and shows a warning instead -- a second close attempt (the user
 	// explicitly insisting) goes through.
 	bool quitConfirmPending = false;
+	double currentFps = 50.0; // osdMenu.renderHud()'s own display value -- updated every ~2s below, drawn every frame
 
 	unsigned int frames = 0;
 	Uint64 start = SDL_GetPerformanceCounter();
@@ -1177,6 +1198,7 @@ int main(int argc, char *argv[])
 		debugServer.poll(minZX);
 
 		osdMenu.render(&pixels[0], texWidth, texHeight);
+		osdMenu.renderHud(&pixels[0], texWidth, texHeight, currentFps);
 
 		if (useLocktexture)
 		{
@@ -1248,10 +1270,11 @@ int main(int argc, char *argv[])
 		const double seconds = (end - start) / static_cast< double >(freq);
 		if (seconds > 2.0)
 		{
+			currentFps = frames / seconds;
 			std::cout
 				<< frames << " frames in "
 				<< std::setprecision(1) << std::fixed << seconds << " seconds = "
-				<< std::setprecision(1) << std::fixed << frames / seconds << " FPS ("
+				<< std::setprecision(1) << std::fixed << currentFps << " FPS ("
 				<< std::setprecision(3) << std::fixed << (seconds * 1000.0) / frames << " ms/frame)"
 				<< std::endl;
 			start = end;

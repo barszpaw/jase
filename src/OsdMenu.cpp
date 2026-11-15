@@ -204,6 +204,8 @@ void OsdMenu::activateOptions()
 		case 2: minZX_->setTimexVideo(!minZX_->isTimexVideo()); break;    // live
 		case 3: minZX_->setPcKeys(!minZX_->isPcKeys()); break;             // live
 		case 4: minZX_->setTapeFastload(!minZX_->isTapeFastload()); break; // live
+		case 5: showIndicators_ = !showIndicators_; break; // live, this class's own state
+		case 6: showFps_ = !showFps_; break;               // live, this class's own state
 	}
 }
 
@@ -492,6 +494,8 @@ void OsdMenu::saveConfig()
 	j["machine"]["timexHires"] = minZX_->isTimexVideo();
 	j["machine"]["pcKeys"] = minZX_->isPcKeys();
 	j["media"]["tapeFastload"] = minZX_->isTapeFastload();
+	j["ui"]["showIndicators"] = showIndicators_;
+	j["ui"]["showFps"] = showFps_;
 
 	Multiface* mf = minZX_->getMultiface();
 	j["peripherals"]["multiface1"]["enabled"] = mf->isEnabled();
@@ -1311,6 +1315,8 @@ void OsdMenu::render(uint8_t* pixels, int texW, int texH)
 			std::string("TIMEX HIRES: ") + (minZX_->isTimexVideo() ? "ON" : "OFF"),
 			std::string("PC KEYS: ") + (minZX_->isPcKeys() ? "ON" : "OFF"),
 			std::string("TAPE FASTLOAD: ") + (minZX_->isTapeFastload() ? "ON" : "OFF"),
+			std::string("SHOW INDICATORS: ") + (showIndicators_ ? "ON" : "OFF"),
+			std::string("SHOW FPS: ") + (showFps_ ? "ON" : "OFF"),
 		};
 		renderSimpleList(pixels, texW, texH, "OPTIONS", items, optionsSel_,
 			statusFramesLeft_ > 0 ? status_ : "", statusOk_);
@@ -1430,5 +1436,42 @@ void OsdMenu::render(uint8_t* pixels, int texW, int texH)
 	{
 		fillRect(pixels, texW, texH, boxX, rowY0 - 1, boxW, rowH, kOsdWhiteBri);
 		drawText(pixels, texW, texH, textX, rowY0, truncateToWidth(status_, maxWidthPx), statusOk_ ? kOsdGreenBri : kOsdRedBri);
+	}
+}
+
+void OsdMenu::renderHud(uint8_t* pixels, int texW, int texH, double fps)
+{
+	const int kPad = 2;
+
+	// Disk-activity LED, bottom-right -- small square, GREEN while
+	// active, drawn NOT AT ALL while idle (user's own call, 2026-11-14:
+	// "w stanie spoczynku powinien mieć kolor transparentny - lepiej
+	// wtedy widać" -- a solid idle-color square was more visual clutter
+	// than signal; skipping the draw entirely is simpler and more
+	// correct than attempting real alpha blending into this ARGB8888
+	// buffer). Not a copy of any specific icon shape (see CLAUDE.md's
+	// GPL firewall note) -- this is original.
+	if (showIndicators_ && minZX_->getFdd3000()->isEnabled() && minZX_->getFdd3000()->isRecentlyActive())
+	{
+		const int kLedSize = 4 * kFontScale;
+		int x = texW - kLedSize - kPad;
+		int y = texH - kLedSize - kPad;
+		fillRect(pixels, texW, texH, x, y, kLedSize, kLedSize, kOsdGreenBri);
+	}
+
+	// Short FPS readout, top-right -- deliberately terse (just the
+	// number, per the user's own request: "napis skrócony to tylko FPS
+	// -- więcej nie trzeba"), with a solid background so it stays
+	// legible over any live Spectrum picture underneath.
+	if (showFps_)
+	{
+		char buf[16];
+		snprintf(buf, sizeof(buf), "%.0f FPS", fps);
+		int w = textWidth(buf);
+		int x = texW - w - kPad - kFontScale;
+		int y = kPad;
+		fillRect(pixels, texW, texH, x - kFontScale, y - kFontScale,
+		         w + 2 * kFontScale, kOsdFontHeight * kFontScale + 2 * kFontScale, kOsdBlack);
+		drawText(pixels, texW, texH, x, y, buf, kOsdWhiteBri);
 	}
 }
