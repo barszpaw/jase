@@ -983,7 +983,7 @@ int main(int argc, char *argv[])
 
 	SDL_Window* window = SDL_CreateWindow
 		(
-		"SDL2",
+		"JASE",
 		SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
 //		960, 720,
 		1280, 960,
