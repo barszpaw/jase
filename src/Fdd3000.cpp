@@ -25,6 +25,10 @@ Fdd3000::~Fdd3000()
 {
 	if (linkFd_ >= 0) close(linkFd_);
 	if (debugFd_ >= 0) close(debugFd_);
+	for (int ch = 0; ch < 2; ch++) {
+		if (serialListener_[ch].clientFd >= 0) close(serialListener_[ch].clientFd);
+		if (serialListener_[ch].listenFd >= 0) close(serialListener_[ch].listenFd);
+	}
 }
 
 // Accepts three real file shapes, all confirmed against docs/FDD3000/M397
@@ -270,6 +274,87 @@ bool Fdd3000::isWdTraceEnabled() const
 {
 	return bridgeMode_ ? false /* bridge mode doesn't cache remote state locally */
 	                    : station_.fdc().isTraceEnabled();
+}
+
+// Local TCP listener for one WD2123 channel -- same minimal shape as
+// fdd3000_station/main.cpp's own Listener::init(), just as a plain member
+// pair instead of a struct method (this class already has its own
+// bridge-mode socket fields following that convention).
+bool Fdd3000::setSerialPort(int channel, int port)
+{
+	if (channel != 0 && channel != 1) return false;
+	SerialListener& l = serialListener_[channel];
+	l.listenFd = socket(AF_INET, SOCK_STREAM, 0);
+	if (l.listenFd < 0) return false;
+	int opt = 1;
+	setsockopt(l.listenFd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+	sockaddr_in addr{};
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = INADDR_ANY;
+	addr.sin_port = htons((uint16_t)port);
+	if (bind(l.listenFd, (sockaddr*)&addr, sizeof(addr)) < 0) { close(l.listenFd); l.listenFd = -1; return false; }
+	if (listen(l.listenFd, 1) < 0) { close(l.listenFd); l.listenFd = -1; return false; }
+	fcntl(l.listenFd, F_SETFL, O_NONBLOCK);
+	serialPort_[channel] = port;
+	return true;
+}
+
+void Fdd3000::acceptSerialIfIdle(int channel)
+{
+	SerialListener& l = serialListener_[channel];
+	if (l.clientFd >= 0 || l.listenFd < 0) return;
+	int fd = accept(l.listenFd, nullptr, nullptr);
+	if (fd >= 0) {
+		fcntl(fd, F_SETFL, O_NONBLOCK);
+		int one = 1;
+		setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+		l.clientFd = fd;
+		fprintf(stderr, "Fdd3000: serial%d client connected\n", channel + 1);
+	}
+}
+
+void Fdd3000::dropSerialClient(int channel)
+{
+	SerialListener& l = serialListener_[channel];
+	if (l.clientFd >= 0) {
+		close(l.clientFd);
+		l.clientFd = -1;
+		fprintf(stderr, "Fdd3000: serial%d client disconnected\n", channel + 1);
+	}
+}
+
+// Byte-level shortcut, same transport as fdd3000_station/main.cpp's own
+// pumpSerialSocket() against the SAME FddStation::serial() API (Wd2123's
+// per-channel FIFOs) -- this is just the in-process side of it. Bridge
+// mode's station lives in a separate process reachable only through the
+// existing debug command channel (RESET/REGS/...), which has no
+// provision for raw byte streams; wiring CH1/CH2 through there would mean
+// another socket hop end-to-end and isn't attempted here.
+void Fdd3000::pumpSerial()
+{
+	if (bridgeMode_) return;
+	for (int ch = 0; ch < 2; ch++) {
+		if (serialPort_[ch] == 0) continue;
+		acceptSerialIfIdle(ch);
+		SerialListener& l = serialListener_[ch];
+		if (l.clientFd < 0) continue;
+
+		uint8_t buf[256];
+		ssize_t n = recv(l.clientFd, buf, sizeof(buf), 0);
+		if (n == 0) {
+			dropSerialClient(ch);
+		} else if (n > 0) {
+			for (ssize_t i = 0; i < n; i++) station_.serial().pushRxByte(ch, buf[i]);
+		}
+
+		uint8_t out[256];
+		size_t outLen = 0;
+		uint8_t b;
+		while (outLen < sizeof(out) && station_.serial().popTxByte(ch, b)) out[outLen++] = b;
+		if (outLen > 0) {
+			if (send(l.clientFd, out, outLen, 0) < 0) dropSerialClient(ch);
+		}
+	}
 }
 
 // See Fdd3000.h's setLinkTraceEnabled() comment for why this exists and

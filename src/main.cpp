@@ -128,6 +128,14 @@ static std::vector<std::string> settingsToArgs(const json& root)
 	valFlag(fdd3000, "diskC", "--fdd3000-disk-c");
 	valFlag(fdd3000, "diskD", "--fdd3000-disk-d");
 	hostPort(fdd3000, "bridgeHost", "bridgePort", "--fdd3000-bridge");
+	if (fdd3000.contains("serial1Port") && !fdd3000["serial1Port"].is_null()) {
+		args.push_back("--fdd3000-serial1-port");
+		args.push_back(std::to_string(fdd3000["serial1Port"].get<int>()));
+	}
+	if (fdd3000.contains("serial2Port") && !fdd3000["serial2Port"].is_null()) {
+		args.push_back("--fdd3000-serial2-port");
+		args.push_back(std::to_string(fdd3000["serial2Port"].get<int>()));
+	}
 
 	const json& dbg = jObj(root, "debugging");
 	if (dbg.contains("debugPort") && !dbg["debugPort"].is_null()) {
@@ -200,7 +208,7 @@ static const char* const kKnownFlags[] = {
 	"--sdi8255", "--sdi8255-rom", "--sdi8255-bridge",
 	"--fdd3000", "--fdd3000-rom", "--fdd3000-station-rom",
 	"--fdd3000-disk-a", "--fdd3000-disk-b", "--fdd3000-disk-c", "--fdd3000-disk-d",
-	"--fdd3000-bridge",
+	"--fdd3000-bridge", "--fdd3000-serial1-port", "--fdd3000-serial2-port",
 	"--debug-port", "--poke", "--pc", "--out", "--trace-port",
 	"--debug-instrtrace", "--debug-iectrace", "--debug-iotrace", "--debug-fdd3000-linktrace",
 	"--debug-fdd3000-wdtrace",
@@ -483,6 +491,12 @@ static void printUsage(const char* argv0)
 		"                         --fdd3000; --fdd3000-station-rom is not\n"
 		"                         meaningful here (the station loads its own\n"
 		"                         boot ROM at its own process startup instead).\n"
+		"  --fdd3000-serial1-port PORT  WD2123 CH1 (src/Wd2123.h) as a local\n"
+		"                         TCP listener -- byte-level test\n"
+		"                         passthrough, no framing. In-process mode\n"
+		"                         only (no effect under --fdd3000-bridge).\n"
+		"                         Implies --fdd3000.\n"
+		"  --fdd3000-serial2-port PORT  same, for WD2123 CH2.\n"
 		"\n"
 		"Debugging:\n"
 		"  --debug-port PORT      listen for the line-based debug protocol:\n"
@@ -892,6 +906,20 @@ int main(int argc, char *argv[])
 			}
 			if (!minZX.getFdd3000()->connectBridge(arg, atoi(linkPortStr), debugPort)) {
 				std::cerr << "--fdd3000-bridge: failed to connect to " << arg << std::endl;
+			}
+		}
+		else if (0 == strcmp(argv[i], "--fdd3000-serial1-port") && i + 1 < argc) {
+			minZX.getFdd3000()->setEnabled(true);
+			if (!minZX.getFdd3000()->setSerialPort(0, atoi(argv[++i]))) {
+				std::cerr << "FATAL: --fdd3000-serial1-port: failed to listen on " << argv[i] << std::endl;
+				exit(1);
+			}
+		}
+		else if (0 == strcmp(argv[i], "--fdd3000-serial2-port") && i + 1 < argc) {
+			minZX.getFdd3000()->setEnabled(true);
+			if (!minZX.getFdd3000()->setSerialPort(1, atoi(argv[++i]))) {
+				std::cerr << "FATAL: --fdd3000-serial2-port: failed to listen on " << argv[i] << std::endl;
+				exit(1);
 			}
 		}
 		else if (0 == strcmp(argv[i], "--debug-instrtrace")) {

@@ -178,10 +178,26 @@ public:
 	void setWdTraceEnabled(bool on);
 	bool isWdTraceEnabled() const;
 
+	// WD2123 CH1/CH2 (src/Wd2123.h) as local TCP listeners -- in-process
+	// mode only (see pumpSerial()'s own comment on why bridge mode is a
+	// no-op here). channel: 0=CH1, 1=CH2. Same byte-level-shortcut
+	// transport fdd3000_station/main.cpp's own --serial1/2-port already
+	// uses against the SAME FddStation::serial() API -- this is the
+	// in-process side of that, not a different protocol.
+	bool setSerialPort(int channel, int port);
+	int getSerialPort(int channel) const { return (channel == 0 || channel == 1) ? serialPort_[channel] : 0; }
+
+	// Call once per emulated frame (50Hz, same convention as ZiFi::pump()/
+	// Multiply::pump() -- see MinZX::update()): accepts/drops clients and
+	// drains both channels' FIFOs against their sockets.
+	void pumpSerial();
+
 private:
 	void applyHostPaging(MemoryMap& memory);
 	void logLinkTrace(const char* direction, uint8_t value) const;
 	void stepStationForOneHostInstruction(uint32_t hostTstates);
+	void acceptSerialIfIdle(int channel);
+	void dropSerialClient(int channel);
 
 	// ---- Bridge-mode-only: the command channel to the external station
 	// process. debugRequest() is blocking/short-timeout -- fine for
@@ -233,4 +249,13 @@ private:
 	// In-process mode's actual station computer (see class comment) --
 	// unused, but still constructed, in bridge mode.
 	FddStation station_;
+
+	// WD2123 CH1/CH2 local TCP listeners -- see setSerialPort()/
+	// pumpSerial()'s own comments. Index 0=CH1, 1=CH2.
+	struct SerialListener {
+		int listenFd = -1;
+		int clientFd = -1;
+	};
+	SerialListener serialListener_[2];
+	int serialPort_[2] = {0, 0};
 };

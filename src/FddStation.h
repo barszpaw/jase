@@ -1,5 +1,6 @@
 #pragma once
 #include "Wd1772Fsm.h"
+#include "Wd2123.h"
 #include "z80.h"
 #include <cstdint>
 #include <string>
@@ -88,6 +89,8 @@ public:
 	bool bootRomVisible() const { return stationPaged_; }
 	Wd1772Fsm& fdc() { return wd_; }
 	const Wd1772Fsm& fdc() const { return wd_; }
+	Wd2123& serial() { return wd2123_; }
+	const Wd2123& serial() const { return wd2123_; }
 
 	// Register accessors for the debug protocol's FDD3000 REGS/SETREG/STEP
 	// sub-commands -- forward straight to the station's own Z80 instance.
@@ -185,6 +188,7 @@ private:
 	std::chrono::steady_clock::time_point traceStart_;
 
 	Wd1772Fsm wd_;
+	Wd2123 wd2123_;
 	std::string diskPaths_[kNumDrives];
 	bool diskIsTemporary_[kNumDrives] = {}; // see isDiskTemporary()'s own comment
 

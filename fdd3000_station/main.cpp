@@ -95,6 +95,39 @@ struct Listener {
 static Listener g_linkListener;
 static Listener g_debugListener;
 
+// WD2123 CH1/CH2 (src/Wd2123.h) -- test listeners, one TCP port per
+// channel. Only bound if a port was given on the command line (unlike
+// link/debug, which are mandatory). Byte-level: unlike pumpLinkSocket()'s
+// deliberate one-byte-per-call restriction (that one's guarding a SINGLE
+// shared latch against desync), each channel here has its own FIFO (see
+// Wd2123::popTxByte()/pushRxByte()), so draining everything available per
+// call is both safe and more efficient -- nothing to desync.
+static Listener g_serial1Listener;
+static Listener g_serial2Listener;
+static int g_serial1Port = 0;
+static int g_serial2Port = 0;
+
+static void pumpSerialSocket(Listener& listener, int ch, const char* label)
+{
+	listener.acceptIfIdle(label);
+	if (listener.clientFd < 0) return;
+
+	uint8_t buf[256];
+	ssize_t n = recv(listener.clientFd, buf, sizeof(buf), 0);
+	if (n == 0) { listener.dropClient(label); }
+	else if (n > 0) {
+		for (ssize_t i = 0; i < n; i++) g_station.serial().pushRxByte(ch, buf[i]);
+	}
+
+	uint8_t out[256];
+	size_t outLen = 0;
+	uint8_t b;
+	while (outLen < sizeof(out) && g_station.serial().popTxByte(ch, b)) out[outLen++] = b;
+	if (outLen > 0) {
+		if (send(listener.clientFd, out, outLen, 0) < 0) listener.dropClient(label);
+	}
+}
+
 // Consumes AT MOST ONE byte per call, even if more are already queued on
 // the socket -- a tight drain-everything loop here would overwrite the
 // host-to-station latch N times with nothing ever observing the
@@ -407,6 +440,11 @@ static void printUsage(const char* argv0)
 		"                         stderr from startup (same shape as\n"
 		"                         \"WDTRACE ON\" below, and as jase's own\n"
 		"                         --debug-fdd3000-wdtrace).\n"
+		"  --serial1-port PORT    TCP port for WD2123 CH1 (src/Wd2123.h) --\n"
+		"                         byte-level test passthrough, no framing.\n"
+		"                         Not bound unless given.\n"
+		"  --serial2-port PORT    same, for WD2123 CH2. Not bound unless\n"
+		"                         given.\n"
 		"  --max-speed            skip the real-time 8MHz pacing sleep and\n"
 		"                         run the station as fast as the OS\n"
 		"                         scheduler allows -- diagnostic flag, to\n"
@@ -482,6 +520,8 @@ int main(int argc, char** argv)
 		else if (a == "--linktrace") g_station.setLinkTraceEnabled(true);
 		else if (a == "--wdtrace") g_station.fdc().setTraceEnabled(true);
 		else if (a == "--max-speed") g_maxSpeed = true;
+		else if (a == "--serial1-port" && i + 1 < argc) g_serial1Port = atoi(argv[++i]);
+		else if (a == "--serial2-port" && i + 1 < argc) g_serial2Port = atoi(argv[++i]);
 		else { fprintf(stderr, "unknown arg: %s (try --help)\n", a.c_str()); return 1; }
 	}
 
@@ -498,6 +538,15 @@ int main(int argc, char** argv)
 	if (!g_linkListener.init(linkPort)) { fprintf(stderr, "cannot listen on link port %d\n", linkPort); return 1; }
 	if (!g_debugListener.init(debugPort)) { fprintf(stderr, "cannot listen on debug port %d\n", debugPort); return 1; }
 	fprintf(stderr, "fdd3000_station: link port %d, debug port %d\n", linkPort, debugPort);
+
+	if (g_serial1Port != 0) {
+		if (!g_serial1Listener.init(g_serial1Port)) { fprintf(stderr, "cannot listen on serial1 port %d\n", g_serial1Port); return 1; }
+		fprintf(stderr, "fdd3000_station: serial1 (WD2123 CH1) port %d\n", g_serial1Port);
+	}
+	if (g_serial2Port != 0) {
+		if (!g_serial2Listener.init(g_serial2Port)) { fprintf(stderr, "cannot listen on serial2 port %d\n", g_serial2Port); return 1; }
+		fprintf(stderr, "fdd3000_station: serial2 (WD2123 CH2) port %d\n", g_serial2Port);
+	}
 
 	// Real-time pacing to the station's own clock -- EXPERIMENTAL 8MHz
 	// (2x the real 4MHz Z80A, M397/FDD35 schematics), matching the
@@ -521,6 +570,8 @@ int main(int argc, char** argv)
 			pumpLinkSocket();
 		}
 		pumpDebugSocket();
+		if (g_serial1Port != 0) pumpSerialSocket(g_serial1Listener, 0, "serial1");
+		if (g_serial2Port != 0) pumpSerialSocket(g_serial2Listener, 1, "serial2");
 
 		if (g_maxSpeed) continue; // see --max-speed's own comment
 

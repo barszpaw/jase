@@ -369,6 +369,7 @@ void MinZX::update(uint8_t* screen)
 	advanceAutoType();
 	if (zifi_) zifi_->pump();
 	if (multiply_) multiply_->pump();
+	if (fdd3000_) fdd3000_->pumpSerial();
 
 	while (tstates < cycleTstates)
 	{

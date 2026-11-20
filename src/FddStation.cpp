@@ -99,6 +99,7 @@ void FddStation::reset()
 	stationCpu_->reset();
 	stationPaged_ = true;
 	wd_.reset();
+	wd2123_.reset(); // same station reset line as wd_ -- no real-hardware reference either way, but no reason it'd be exempt
 }
 
 uint32_t FddStation::step()
@@ -173,6 +174,8 @@ uint8_t FddStation::stationInPort(uint16_t port)
 		logLinkTrace("IN ", v);
 		return v;
 	}
+	case 2: return wd2123_.readChannel(1, (port & 0x01) != 0); // RS2 = WD2123 CH2, see Wd2123.h
+	case 4: return wd2123_.readChannel(0, (port & 0x01) != 0); // RS1 = WD2123 CH1
 	case 6: // WD1772 register window: C0=status/cmd, C1=track, C2=sector, C3=data
 		switch (port & 0x03) {
 		case 0: return wd_.readStatus();
@@ -180,9 +183,10 @@ uint8_t FddStation::stationInPort(uint16_t port)
 		case 2: return wd_.readSectorReg();
 		default: return wd_.readDataReg();
 		}
-	// Block 7 (config register) is write-only on real hardware. Idle-bus
-	// default for everything else (serial, block 0), matching the real
-	// hardware's own undriven-port convention.
+	// Block 7 (config register) is write-only on real hardware. Block 0
+	// (RS3/WD2123 CTRL) is also write-only per the PLD. Idle-bus default
+	// for everything else, matching the real hardware's own undriven-port
+	// convention.
 	default: return 0xFF;
 	}
 }
@@ -191,11 +195,14 @@ void FddStation::stationOutPort(uint16_t port, uint8_t value)
 {
 	int ioport = (port & 0xFF) >> 5;
 	switch (ioport) {
+	case 0: wd2123_.writeGlobalControl(value); break; // RS3 = WD2123 CTRL, see Wd2123.h
 	case 1:
 		linkFromStation_ = value;
 		linkDirty_ = true; // unconditional -- see stationByteDirty()'s own comment
 		logLinkTrace("OUT", value);
 		break;
+	case 2: wd2123_.writeChannel(1, (port & 0x01) != 0, value); break; // RS2 = WD2123 CH2
+	case 4: wd2123_.writeChannel(0, (port & 0x01) != 0, value); break; // RS1 = WD2123 CH1
 	case 6:
 		switch (port & 0x03) {
 		case 0: wd_.writeCommand(value); break;
@@ -205,7 +212,7 @@ void FddStation::stationOutPort(uint16_t port, uint8_t value)
 		}
 		break;
 	case 7: writeConfigRegister(value); break;
-	// Everything else (serial, block 0) ignored.
+	// Block 3/5 have no select equation in the PLD -- left ignored.
 	default: break;
 	}
 }
