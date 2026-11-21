@@ -105,6 +105,31 @@
 // subdirectory silently vanish from their own parent's listing. The two
 // originally-checked 170KB samples never exercised this (no subdirectory
 // there has bit7 set), which is why it went unnoticed until this one.
+//
+// 2026-11-22, user pointed at an independent, separately-developed tool
+// (~/src/TOStools/tostools/definitions.py's DISK_DEFS table) listing FOUR
+// tos-timex-* geometries. Two match what's already independently verified
+// above (`TosTimex` = this file's 170KB; `TosTimex640` = the 640KB dense
+// shape -- modulo one discrepancy, see Preset::TosTimex640's own comment).
+// The other two (`TosTimex320`/`TosTimex320Alt`, two DIFFERENT physical
+// layouts for the same 320KB nominal capacity) are NOT independently
+// verified here -- no real sample of either exists in this repo. Their
+// geometry numbers (reserved tracks, dirEntries) are taken from that
+// table as a reasonable starting point, but their SECTOR ORDERING uses
+// this file's own confirmed natural-order convention, NOT that table's
+// own `generate_xlt_table(16, skew=7)` -- that function implements the
+// exact same skew=7 FORMULA this project's CpmFs.cpp once wrongly
+// assumed for CP/M (found wrong by live memory dump, see CpmFs.h's own
+// class comment) and never independently verified for TOS either (that
+// tool's own `main_cli()` only ever prints directory listings, which
+// -- as this project's own CP/M saga demonstrated -- can look completely
+// correct while the underlying sector mapping is wrong, since listing
+// doesn't exercise translate-table correctness the way reading real file
+// content does). Natural order is this file's OWN independently-verified
+// convention (confirmed by reading real, named, plausible file content on
+// two different real disks); used here as the more trustworthy default
+// for the two unverified presets too, rather than inheriting an
+// unverified assumption from elsewhere.
 class TosFs
 {
 public:
@@ -118,10 +143,25 @@ public:
 		bool protected_;       // E[1] bit7
 	};
 
-	// Binds to an already-loaded DskImage. Returns false if the geometry
-	// doesn't match (currently: 170/320KB single-sided and 640KB 2-sided
-	// are handled -- see class comment).
+	// Named geometry presets, for manual override when auto-detection
+	// fails or guesses wrong (see dsk_browser.cpp's own format-choice
+	// dialog). TosTimex/TosTimex640 are independently verified (see class
+	// comment); TosTimex320/TosTimex320Alt are NOT -- best-effort from an
+	// external reference table, no real sample to check against.
+	enum class Preset { TosTimex, TosTimex640, TosTimex320, TosTimex320Alt };
+	static const char* presetName(Preset p);
+	static const char* presetDescription(Preset p);
+
+	// Binds to an already-loaded DskImage, auto-detecting between the two
+	// independently-verified presets (TosTimex/TosTimex640) by numSides().
+	// Returns false if the geometry doesn't match either.
 	bool open(DskImage& dsk);
+
+	// Binds using an EXPLICIT preset, bypassing auto-detection entirely --
+	// for manual override (wrong auto-guess, or one of the two unverified
+	// presets, which open() above never picks on its own). Only fails if
+	// the disk's own numSides() genuinely can't match the preset's.
+	bool openWithPreset(DskImage& dsk, Preset preset);
 
 	// True if this disk's geometry only supports reading (640KB 2-sided
 	// write-path allocation/layout isn't independently verified the way
@@ -161,6 +201,8 @@ private:
 		int sectorsPerBlock = 4;
 		int dirEntries = 128;
 	};
+
+	static Geometry geometryForPreset(Preset preset);
 
 	DskImage* dsk_ = nullptr;
 	Geometry geo_;

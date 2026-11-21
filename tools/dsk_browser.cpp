@@ -428,6 +428,31 @@ public:
 		return true;
 	}
 
+	// Rozne-niz-autodetekcja otwarcie (F7... Alt+F dialog wyboru formatu w
+	// App) -- wymusza CP/M, albo jeden z czterech TosFs::Preset,
+	// ignorujac detectDiskFormat() calkowicie. `presetIndex`: 0=CP/M,
+	// 1..4=TosFs::Preset w kolejnosci deklaracji enuma.
+	bool openDiskManual(int presetIndex, std::string& errOut)
+	{
+		if (!dsk.load(path)) { errOut = "Nie udalo sie wczytac obrazu."; return false; }
+		userStack = {0};
+		if (presetIndex == 0) {
+			if (!cpmFs.open(dsk)) { errOut = "CpmFs::open nieudane (geometria?)."; return false; }
+			format = DiskFormat::Cpm;
+			title = "CP/M";
+			return true;
+		}
+		auto preset = static_cast<TosFs::Preset>(presetIndex - 1);
+		if (!tosFs.openWithPreset(dsk, preset)) {
+			errOut = std::string("TosFs::openWithPreset nieudane dla ") + TosFs::presetName(preset) +
+				" (zla liczba stron dla tej geometrii?).";
+			return false;
+		}
+		format = DiskFormat::Tos;
+		title = std::string("TOS (") + TosFs::presetName(preset) + ")";
+		return true;
+	}
+
 	bool atRoot() const { return format != DiskFormat::Tos || userStack.size() <= 1; }
 	// CP/M jest zawsze R/W (zweryfikowane). TOS jest R/W TYLKO na
 	// zweryfikowanej 1-stronnej geometrii -- TosFs sama odmawia
@@ -641,6 +666,55 @@ static std::string dialogInput(const std::string& prompt, const std::string& def
 	}
 }
 
+// Lista wyboru (jedna z `options`, nawigacja strzałkami, Enter wybiera,
+// Esc anuluje) -- uzyte przez format-override dialog (Alt+F / auto-pytanie
+// gdy auto-detekcja zawiedzie, patrz App::chooseAndOpenDisk()). Zwraca
+// indeks wybranej opcji, albo -1 przy Esc.
+static int dialogChoice(const std::string& title_, const std::vector<std::pair<std::string, std::string>>& options)
+{
+	int sh, sw; getmaxyx(stdscr, sh, sw);
+	size_t maxLabelLen = title_.size();
+	for (auto& [label, desc] : options) maxLabelLen = std::max(maxLabelLen, label.size());
+	int dw = std::min(sw - 4, std::max(60, (int)maxLabelLen + 8));
+	int dh = std::min(sh - 4, (int)options.size() + 4); // border+title, N options, 1 desc line, border
+	int dy = (sh - dh) / 2, dx = (sw - dw) / 2;
+	WINDOW* win = newwin(dh, dw, dy, dx);
+	keypad(win, TRUE);
+
+	int cursor = 0;
+	for (;;) {
+		werase(win);
+		wattron(win, COLOR_PAIR(1));
+		box(win, 0, 0);
+		wattroff(win, COLOR_PAIR(1));
+		wattron(win, COLOR_PAIR(3) | A_BOLD);
+		mvwaddnstr(win, 0, 2, (" " + title_ + " ").c_str(), dw - 4);
+		wattroff(win, COLOR_PAIR(3) | A_BOLD);
+
+		int row = 1;
+		for (size_t i = 0; i < options.size() && row < dh - 2; i++, row++) {
+			int attr = ((int)i == cursor) ? (COLOR_PAIR(2) | A_BOLD) : COLOR_PAIR(0);
+			wattron(win, attr);
+			std::string line = " " + options[i].first;
+			line.resize(dw - 2, ' ');
+			mvwaddnstr(win, row, 1, line.c_str(), dw - 2);
+			wattroff(win, attr);
+		}
+		if (cursor >= 0 && cursor < (int)options.size()) {
+			wattron(win, COLOR_PAIR(6));
+			mvwaddnstr(win, dh - 2, 2, options[cursor].second.c_str(), dw - 4);
+			wattroff(win, COLOR_PAIR(6));
+		}
+		wrefresh(win);
+
+		int ch = wgetch(win);
+		if (ch == KEY_UP) cursor = std::max(0, cursor - 1);
+		else if (ch == KEY_DOWN) cursor = std::min((int)options.size() - 1, cursor + 1);
+		else if (ch == '\n' || ch == '\r' || ch == KEY_ENTER) { delwin(win); return cursor; }
+		else if (ch == 27) { delwin(win); return -1; }
+	}
+}
+
 // ── Aplikacja ─────────────────────────────────────────────────────────────
 
 class App
@@ -718,9 +792,18 @@ public:
 		auto dp = std::make_unique<DskPanel>(win, dskPath);
 		std::string err;
 		if (!dp->openDisk(err)) {
-			status("Nie udalo sie otworzyc " + dskPath + ": " + err, true);
+			// Auto-detekcja zawiodla -- zapytaj o format recznie, zamiast
+			// tylko pokazac blad (user-directed, 2026-11-22: "zrobmy okno
+			// modalne gdzie nasz browser pyta sie o format jesli nie
+			// rozpoznal").
+			chooseAndOpenDisk(slot, dskPath);
 			return;
 		}
+		finishOpenDisk(slot, std::move(dp));
+	}
+
+	void finishOpenDisk(int slot, std::unique_ptr<DskPanel> dp)
+	{
 		panels[slot] = std::move(dp);
 		panels[slot]->loading = true;
 		redraw();
@@ -733,6 +816,55 @@ public:
 		// though, so it doesn't keep looking like this one failed too.
 		status("");
 		redraw();
+	}
+
+	// Alt+F (dowolny panel) i fallback automatyczny gdy auto-detekcja w
+	// openDisk() nie rozpozna formatu -- pokazuje liste do wyboru (CP/M +
+	// 4 presety TosFs, patrz src/TosFs.h) i otwiera obraz z WYMUSZONYM
+	// formatem, ignorujac detectDiskFormat() calkowicie.
+	void chooseAndOpenDisk(int slot, const std::string& dskPath)
+	{
+		std::vector<std::pair<std::string, std::string>> options = {
+			{"CP/M", "Wymusza CP/M (jedyna zweryfikowana geometria, 170KB)."},
+			{TosFs::presetName(TosFs::Preset::TosTimex), TosFs::presetDescription(TosFs::Preset::TosTimex)},
+			{TosFs::presetName(TosFs::Preset::TosTimex640), TosFs::presetDescription(TosFs::Preset::TosTimex640)},
+			{TosFs::presetName(TosFs::Preset::TosTimex320), TosFs::presetDescription(TosFs::Preset::TosTimex320)},
+			{TosFs::presetName(TosFs::Preset::TosTimex320Alt), TosFs::presetDescription(TosFs::Preset::TosTimex320Alt)},
+			{"Anuluj", ""},
+		};
+		int choice = dialogChoice("Wybierz format .dsk: " + dskPath, options);
+		redraw();
+		if (choice < 0 || choice == (int)options.size() - 1) return; // Esc lub "Anuluj"
+
+		WINDOW* win = panels[slot]->win;
+		auto dp = std::make_unique<DskPanel>(win, dskPath);
+		std::string err;
+		if (!dp->openDiskManual(choice, err)) {
+			status("Nie udalo sie otworzyc " + dskPath + " jako " + options[choice].first + ": " + err, true);
+			return;
+		}
+		finishOpenDisk(slot, std::move(dp));
+	}
+
+	// Alt+F: na panelu Lokalnym z wybranym ".dsk" dziala jak Enter ale z
+	// recznym wyborem formatu; na panelu DskPanel otwiera TEN SAM obraz
+	// na nowo z innym formatem (naprawia zly auto-detect bez zamykania
+	// najpierw).
+	void opChooseFormat()
+	{
+		if (auto* lp = dynamic_cast<LocalPanel*>(activePanel())) {
+			const Entry* e = lp->selected();
+			if (!e || e->isDir || e->name == "..") {
+				status("Alt+F: wybierz plik .dsk w panelu lokalnym (albo badz juz w panelu dysku).", true);
+				return;
+			}
+			chooseAndOpenDisk(active, lp->path + "/" + e->name);
+			return;
+		}
+		if (auto* dp = dynamic_cast<DskPanel*>(activePanel())) {
+			chooseAndOpenDisk(active, dp->path);
+			return;
+		}
 	}
 
 	// Backspace na korzeniu DskPanel (CP/M: zawsze; TOS: tylko gdy nie
@@ -1033,6 +1165,17 @@ public:
 			else if (ch == KEY_F(5)) opCopy();
 			else if (ch == KEY_F(7)) opMkdir();
 			else if (ch == KEY_F(8)) opDelete();
+			else if (ch == 27) {
+				// Mozliwy Alt+<klawisz> -- terminal wysyla ESC (0x1B),
+				// natychmiast potem drugi bajt, oba w jednym zapisie.
+				// Krotki nodelay() odbiera ten drugi bajt jesli istnieje
+				// (Alt+F), inaczej (samotny Escape, nieuzywany tutaj)
+				// getch() zwraca ERR i nic sie nie dzieje.
+				nodelay(stdscr, TRUE);
+				int ch2 = getch();
+				nodelay(stdscr, FALSE);
+				if (ch2 == 'f' || ch2 == 'F') opChooseFormat();
+			}
 			else if (ch == KEY_RESIZE) resizeLayout();
 		}
 	}

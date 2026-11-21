@@ -2,14 +2,76 @@
 #include <algorithm>
 #include <cstring>
 
+const char* TosFs::presetName(Preset p)
+{
+	switch (p) {
+		case Preset::TosTimex: return "TOS 170KB";
+		case Preset::TosTimex640: return "TOS 640KB (gesty, 2 strony)";
+		case Preset::TosTimex320: return "TOS 320KB (80 sciezek, 1 strona)";
+		case Preset::TosTimex320Alt: return "TOS 320KB-alt (40 sciezek, 2 strony)";
+	}
+	return "?";
+}
+
+const char* TosFs::presetDescription(Preset p)
+{
+	switch (p) {
+		case Preset::TosTimex:
+			return "Zweryfikowany na 2 realnych dyskach (40 sciezek, 1 strona).";
+		case Preset::TosTimex640:
+			return "Zweryfikowany na realnym dysku (80 sciezek, 2 strony, przeplot stron).";
+		case Preset::TosTimex320:
+			return "NIEZWERYFIKOWANY -- parametry z zewnetrznego narzedzia (~/src/TOStools), brak realnej probki.";
+		case Preset::TosTimex320Alt:
+			return "NIEZWERYFIKOWANY -- parametry z zewnetrznego narzedzia (~/src/TOStools), brak realnej probki.";
+	}
+	return "";
+}
+
+TosFs::Geometry TosFs::geometryForPreset(Preset preset)
+{
+	Geometry g;
+	switch (preset) {
+		case Preset::TosTimex:
+			g.numSides = 1; g.physicalReservedTracks = 4; g.dirEntries = 128;
+			break;
+		case Preset::TosTimex640:
+			g.numSides = 2; g.physicalReservedTracks = 2; g.dirEntries = 128;
+			break;
+		case Preset::TosTimex320:
+			// 80 tracks, 1 side -- per ~/src/TOStools's own 'tos-timex-320'
+			// entry (boottrk=2, maxdir=64). UNVERIFIED, see class comment.
+			g.numSides = 1; g.physicalReservedTracks = 2; g.dirEntries = 64;
+			break;
+		case Preset::TosTimex320Alt:
+			// 40 tracks, 2 sides -- per that same table's 'tos-timex-320-alt'
+			// entry (boottrk=4, maxdir=64). UNVERIFIED, see class comment.
+			g.numSides = 2; g.physicalReservedTracks = 4; g.dirEntries = 64;
+			break;
+	}
+	return g;
+}
+
 bool TosFs::open(DskImage& dsk)
 {
 	if (!dsk.loaded()) return false;
-	if (dsk.numSides() != 1 && dsk.numSides() != 2) return false;
+	// Auto-detect only between the two INDEPENDENTLY VERIFIED presets --
+	// the other two need an explicit openWithPreset() call (see
+	// dsk_browser.cpp's format-choice dialog), since there's no reliable
+	// signature to pick them out automatically from numSides() alone (both
+	// unverified presets share a numSides value with a verified one).
+	if (dsk.numSides() == 1) return openWithPreset(dsk, Preset::TosTimex);
+	if (dsk.numSides() == 2) return openWithPreset(dsk, Preset::TosTimex640);
+	return false;
+}
+
+bool TosFs::openWithPreset(DskImage& dsk, Preset preset)
+{
+	if (!dsk.loaded()) return false;
+	Geometry g = geometryForPreset(preset);
+	if (dsk.numSides() != g.numSides) return false;
 	dsk_ = &dsk;
-	geo_ = Geometry();
-	geo_.numSides = dsk.numSides();
-	geo_.physicalReservedTracks = (geo_.numSides == 2) ? 2 : 4; // see class comment
+	geo_ = g;
 	return true;
 }
 
