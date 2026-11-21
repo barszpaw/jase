@@ -139,9 +139,6 @@ bool DskImage::load(const std::string& path)
 	}
 
 	path_ = path;
-
-	printf("DskImage::load: loaded %s (%d tracks x %d side%s)\n",
-	       path.c_str(), numTracks_, numSides_, numSides_ == 1 ? "" : "s");
 	return true;
 }
 

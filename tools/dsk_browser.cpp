@@ -342,6 +342,17 @@ enum class DiskFormat { Unknown, Cpm, Tos };
 
 static DiskFormat detectDiskFormat(DskImage& dsk)
 {
+	// Obie biblioteki (CpmFs, TosFs) sa zweryfikowane TYLKO dla
+	// jednostronnych 170KB obrazow (40 tracks x 1 side) -- patrz ich
+	// wlasne komentarze klas. Dwustronne gestosci (np. 620KB, 80 tracks
+	// x 2 sides -- znaleziony real-world przypadek: "CPM 525.dsk", ktory
+	// zanim ten guard istnial, falszywie dopasowywal sie jako CP/M na
+	// przypadkowych bajtach danych, pokazujac smieci zamiast bledu) NIE
+	// MAJA zweryfikowanego katalogu/translate table -- odrzucane tutaj
+	// explicite, zamiast ryzykowac falszywe dopasowanie na nieznanej
+	// geometrii.
+	if (dsk.numSides() != 1) return DiskFormat::Unknown;
+
 	// TOS: wpis "nazwa dysku" NA ściezce 4 ZAWSZE istnieje jako pierwszy
 	// wpis (K=0xFF, ext="DIR") -- silny, specyficzny sygnał (patrz
 	// src/TosFs.h). Sprawdzony pierwszy.
@@ -691,7 +702,12 @@ public:
 		redraw();
 		panels[slot]->loading = false;
 		panels[slot]->load();
-		status("Otworzono " + dskPath + " (" + static_cast<DskPanel*>(panels[slot].get())->title + ")");
+		// Panel's own title (CP/M:/TOS:) already shows in its border --
+		// no need for a redundant status-line message, which otherwise
+		// stayed on screen distractingly until the next action. Still
+		// clear out any STALE error from a previous failed attempt,
+		// though, so it doesn't keep looking like this one failed too.
+		status("");
 		redraw();
 	}
 
