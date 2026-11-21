@@ -55,13 +55,22 @@ STATION_OBJS := fdd3000_station/main.o src/FddStation.o src/Wd1772Fsm.o src/DskI
 WRITE_TEST_TARGET := tools/wd1772_write_test
 WRITE_TEST_OBJS := tools/wd1772_write_test.o src/Wd1772Fsm.o src/DskImage.o
 
-.PHONY: all clean station write-test
+# dsk_browser (2026-11-21 -- see its own file comment): standalone
+# dual-pane R/W browser for CP/M .dsk images, built on CpmFs/DskImage.
+# No SDL/MinZX dependency; needs libncurses-dev (ncurses pkg-config module).
+DSK_BROWSER_TARGET := tools/dsk_browser
+DSK_BROWSER_OBJS := tools/dsk_browser.o src/CpmFs.o src/DskImage.o
+DSK_BROWSER_LIBS := $(shell pkg-config --libs ncurses)
+
+.PHONY: all clean station write-test dsk-browser
 
 all: $(TARGET) $(PLUGIN_KEMPSTON)
 
 station: $(STATION_TARGET)
 
 write-test: $(WRITE_TEST_TARGET)
+
+dsk-browser: $(DSK_BROWSER_TARGET)
 
 $(TARGET): $(OBJS)
 	$(CXX) $(OBJS) -o $@ $(LIBS)
@@ -72,10 +81,16 @@ $(STATION_TARGET): $(STATION_OBJS)
 $(WRITE_TEST_TARGET): $(WRITE_TEST_OBJS)
 	$(CXX) $(WRITE_TEST_OBJS) -o $@
 
+$(DSK_BROWSER_TARGET): $(DSK_BROWSER_OBJS)
+	$(CXX) $(DSK_BROWSER_OBJS) -o $@ $(DSK_BROWSER_LIBS)
+
 fdd3000_station/main.o: fdd3000_station/main.cpp
 	$(CXX) $(CXXFLAGS) $(STATION_INCLUDES) -c $< -o $@
 
 tools/wd1772_write_test.o: tools/wd1772_write_test.cpp
+	$(CXX) $(CXXFLAGS) -Isrc -c $< -o $@
+
+tools/dsk_browser.o: tools/dsk_browser.cpp
 	$(CXX) $(CXXFLAGS) -Isrc -c $< -o $@
 
 %.o: %.cpp
@@ -103,3 +118,4 @@ clean:
 	rm -f $(PLUGIN_KEMPSTON_OBJS) $(PLUGIN_KEMPSTON_OBJS:.o=.d) $(PLUGIN_KEMPSTON)
 	rm -f fdd3000_station/main.o fdd3000_station/main.d $(STATION_TARGET)
 	rm -f tools/wd1772_write_test.o tools/wd1772_write_test.d $(WRITE_TEST_TARGET)
+	rm -f tools/dsk_browser.o tools/dsk_browser.d $(DSK_BROWSER_TARGET)
