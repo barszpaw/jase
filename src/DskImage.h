@@ -21,9 +21,16 @@
 // data itself immediately after, in the SAME order as the descriptor
 // list (which real images don't always store in ascending R order --
 // confirmed the real physical interleave the "TOS bez tajemnic" article
-// documents, E=0,7,14,5,12,3,10,1,8,15,6,13,4,11,2,9, is exactly why a
-// sector must be found by matching R in this list, never assumed to sit
-// at a fixed offset).
+// documents, E=0,7,14,5,12,3,10,1,8,15,6,13,4,11,2,9 (skew=7, TOS's own
+// `#27` "Wczytanie sektora" OS call's documented argument sequence for
+// reading a whole track at full speed), is exactly why a sector must be
+// found by matching R in this list, never assumed to sit at a fixed
+// offset. NOTE: this is the PHYSICAL media interleave, a property of the
+// formatted disk itself -- a genuinely different, independent fact from
+// src/CpmFs.h's own skew=5 BDOS logical-to-physical translate table
+// (that CBIOS's own choice for how it maps ITS logical sector numbering
+// onto this same physical media -- confirmed not to match the physical
+// interleave above, and there's no reason it would have to).
 class DskImage
 {
 public:

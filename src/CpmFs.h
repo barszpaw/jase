@@ -24,13 +24,32 @@
 // (BSH=3,BLM=7,EXM=0,DSM=151,DRM=63,AL0=0xF0,AL1=0,CKS=16,OFF=2) sits right
 // next to a 2-byte pointer (0xfc6b) to the REAL translate table -- a
 // literal 16-byte permutation of 1..16 in RAM, found by searching for
-// exactly that signature. It is NOT the skew=7 formula's output:
+// exactly that signature:
 //   real:   [0,5,10,15,4,9,14,3,8,13,2,7,12,1,6,11]  (0-based)
-//   wrong:  [0,7,14,5,12,3,10,1,8,15,6,13,4,11,2,9]  (the old skew=7 guess)
-// They agree at logical index 0 (trivial for any permutation) and
-// COINCIDENTALLY at a couple of others, which is exactly why reading
-// pre-existing files never exposed the mismatch -- those files all
-// happened to live within the real table's valid range anyway.
+//   wrong:  [0,7,14,5,12,3,10,1,8,15,6,13,4,11,2,9]  (the old guess)
+// The MECHANISM (a skew-factor formula, not an arbitrary hardcoded table)
+// was right all along -- confirmed afterward that the real table above is
+// EXACTLY buildSkewTable(16, 5)'s output, i.e. BDOS's own logical-to-
+// physical translate table uses skew=5, not 7. The two tables agree at
+// logical index 0 (trivial for any skew value) and COINCIDENTALLY at a
+// couple of others, which is exactly why reading pre-existing files never
+// exposed the mismatch -- those files all happened to live within the
+// real table's valid range anyway.
+//
+// skew=7 is ALSO real, confirmed, and still correctly used elsewhere in
+// this project (DskImage.h's own class comment, for MFM track synthesis)
+// -- it's docs/FDD3000/tos_bez_tajemnic.html's documented value for TOS's
+// own `#27` "Wczytanie sektora" OS call, i.e. the raw PHYSICAL sector
+// interleave the media/controller itself uses (read a whole track at
+// full speed by asking for physical sector IDs in that exact order). That
+// is a genuinely DIFFERENT, independent fact from BDOS's own choice of
+// LOGICAL-sector-to-physical-sector translate table above -- the physical
+// interleave is a property of the formatted media itself (same for
+// anything reading it), while skew=5 here is specifically this CBIOS
+// author's own choice of how BDOS maps ITS OWN logical sector numbering
+// onto that same physical media, and the two don't have to match (and
+// here, don't). Not a contradiction -- two different abstraction layers,
+// confirmed independently, simply don't share a value on this disk.
 // DRM=63 is the other half of the bug: only 64 directory entries (logical
 // sectors 0-7) are real/scanned, not 128 -- AL0=0xF0/AL1=0x00 reserve a
 // full 4 blocks (16 sectors) of physical space for the directory, but only

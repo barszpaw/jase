@@ -4,11 +4,23 @@
 
 namespace {
 
-// The REAL translate (XLT) table, pulled directly out of a live, running
-// CBIOS's own RAM (see CpmFs.h's class comment for how/why) -- NOT a
-// skew-factor formula. Logical directory/data sector index (0-15) ->
-// physical sector id (0-based).
-const int kRealXlt[16] = {0, 5, 10, 15, 4, 9, 14, 3, 8, 13, 2, 7, 12, 1, 6, 11};
+// The REAL translate (XLT) table, confirmed by pulling it directly out of
+// a live, running CBIOS's own RAM (see CpmFs.h's class comment for how/
+// why) -- IS a skew-factor formula after all, just skew=5, not the
+// skew=7 this file originally (wrongly) assumed. Logical directory/data
+// sector index (0-15) -> physical sector id (0-based).
+std::vector<int> buildSkewTable(int n, int skew)
+{
+	std::vector<int> table(n), used(n, 0);
+	int phys = 0;
+	for (int logical = 0; logical < n; logical++) {
+		while (used[phys]) phys = (phys + 1) % n;
+		table[logical] = phys;
+		used[phys] = 1;
+		phys = (phys + skew) % n;
+	}
+	return table;
+}
 
 } // namespace
 
@@ -46,7 +58,8 @@ uint8_t* CpmFs::logicalSector(int logicalIndex, int& len) const
 		side = 0;
 	}
 
-	int physicalSectorId = kRealXlt[logicalSectorInTrack];
+	static const std::vector<int> xlt = buildSkewTable(16, 5); // see class comment -- CONFIRMED real skew value
+	int physicalSectorId = xlt[logicalSectorInTrack];
 	return dsk_->findSector(track, side, physicalSectorId, len);
 }
 
