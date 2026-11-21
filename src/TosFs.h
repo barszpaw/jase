@@ -56,16 +56,26 @@
 //     +0    K   parent subdirectory number (0xFF for the disk-name record,
 //                which is always the directory's very first entry)
 //     +1-11 N,E same as a file record
-//     +12-14    always zero in both samples
-//     +15   D   this subdirectory's OWN number -- matched against other
-//                entries' K byte to list "inside" it
-//     +16-31    always zero in both samples
+//     +12-15    always zero (the file-record O/L/R fields, meaningless for
+//                a subdirectory, which occupies no allocation units)
+//     +16   D   this subdirectory's OWN number -- matched against other
+//                entries' K byte to list "inside" it. CORRECTED 2026-11-22:
+//                an earlier version of this file had D at +15, from
+//                mis-counting the magazine article's own already-mangled
+//                ASCII-art table (see top of this comment) -- found wrong
+//                live against a THIRD real disk with actual nested
+//                subdirectories (`TOS Demo Disk (Spectrum).DSK`, not one of
+//                the two originally checked), where every real subdirectory
+//                decoded to D=0 at +15 while +16 held a clean, sequential
+//                1,2,3,4,5 across MATHS/FUN/UTIL/GAMES(nested in FUN)/FILING
+//                -- i.e. this project's FIRST real multi-level-subdirectory
+//                sample, which is also what originally exposed the bug
+//                (dsk_browser couldn't enter any subdirectory at all).
+//     +17-31    always zero in every sample checked
 //
-// NOT independently verified: an actual multi-level subdirectory (neither
-// real sample has one -- both are flat, K=0 throughout except the
-// mandatory disk-name record). The K/D navigation model below follows the
-// article's own description exactly, but has only been exercised with
-// K=0/D=0 (the implicit root) in practice.
+// Subdirectory nesting (K chains to a parent's own D, FF = root) IS now
+// independently verified against a real sample with actual nesting
+// (FUN, D=2, contains GAMES, K=2/D=4) -- not just the article's description.
 //
 // 320KB/640KB densities: NOT implemented. The article describes a
 // genuinely different side-interleaving convention for the dense (640KB,

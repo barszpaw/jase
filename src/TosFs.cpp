@@ -138,7 +138,7 @@ std::vector<TosFs::DirEntry> TosFs::list(int userNumber) const
 			a.isDir = isDirRecord(e);
 			a.hidden = (e[9] & 0x80) != 0;
 			a.protected_ = (e[10] & 0x80) != 0;
-			if (a.isDir) a.dirNumber = e[15];
+			if (a.isDir) a.dirNumber = e[16]; // see TosFs.h class comment -- corrected 2026-11-22, was +15
 			files.emplace_back(name, a);
 			it = files.end() - 1;
 		}
