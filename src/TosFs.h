@@ -151,6 +151,10 @@ public:
 	enum class Preset { TosTimex, TosTimex640, TosTimex320, TosTimex320Alt };
 	static const char* presetName(Preset p);
 	static const char* presetDescription(Preset p);
+	// (tracks, sides) a preset expects -- exposed so callers building a
+	// RAW-geometry UI (dsk_browser's format-choice dialog) don't have to
+	// duplicate these numbers themselves.
+	static void presetGeometry(Preset p, int& tracks, int& sides);
 
 	// Binds to an already-loaded DskImage, auto-detecting between the two
 	// independently-verified presets (TosTimex/TosTimex640) by numSides().

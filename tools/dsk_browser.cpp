@@ -391,6 +391,26 @@ static DiskFormat detectDiskFormat(DskImage& dsk)
 	return DiskFormat::Unknown;
 }
 
+// ── Reczny wybor formatu (Alt+F / auto-pytanie) ──────────────────────────
+//
+// Dwie NIEZALEZNE decyzje: (1) jaki FILESYSTEM -- CP/M albo jeden z
+// czterech TosFs::Preset; (2) jak wczytac KONTENER -- normalny .dsk
+// CPCEMU/Extended (DskImage::load()), albo RAW -- goly, bezglowkowy zrzut
+// sekwencyjny bez ZADNEGO formatu kontenera (DskImage::loadRaw(), patrz
+// jej wlasny komentarz -- user-directed 2026-11-22, maja realne pliki
+// .img w tym ukladzie, np. ~/src/TOStools/*.img). Zamiast duplikowac
+// wszystkie 5 wyborow filesystemu w warianty RAW (user's own
+// simplification: "checkbox wystarczy by zaznaczyc ze raw"), dialog ma
+// JEDEN przelacznik RAW obok listy -- kazdy filesystem juz ma swoja
+// wlasna geometrie (tracks/sides), ktora RAW po prostu uzywa zamiast
+// czytac ja z (nieistniejacego w RAW) naglowka kontenera.
+struct FormatOption {
+	std::string label;
+	bool isRaw = false;
+	int rawTracks = 0, rawSides = 0;
+	int fsChoice = -1; // 0=CP/M, 1..4=TosFs::Preset+1 (patrz DskPanel::openDiskManual), -1=Anuluj
+};
+
 // ── Panel obrazu .dsk (CP/M R/W, lub TOS tylko-do-odczytu) ───────────────
 //
 // TOS "katalogi" nie są nawigacją po ściezkach -- to zmiana wartości
@@ -428,28 +448,31 @@ public:
 		return true;
 	}
 
-	// Rozne-niz-autodetekcja otwarcie (F7... Alt+F dialog wyboru formatu w
-	// App) -- wymusza CP/M, albo jeden z czterech TosFs::Preset,
-	// ignorujac detectDiskFormat() calkowicie. `presetIndex`: 0=CP/M,
-	// 1..4=TosFs::Preset w kolejnosci deklaracji enuma.
-	bool openDiskManual(int presetIndex, std::string& errOut)
+	// Rozne-niz-autodetekcja otwarcie (Alt+F / auto-pytanie w App) --
+	// wymusza wybrany kontener (normalny .dsk albo RAW, patrz
+	// FormatOption's own comment) i filesystem, ignorujac
+	// detectDiskFormat() calkowicie.
+	bool openDiskManual(const FormatOption& opt, std::string& errOut)
 	{
-		if (!dsk.load(path)) { errOut = "Nie udalo sie wczytac obrazu."; return false; }
+		bool loaded = opt.isRaw
+			? dsk.loadRaw(path, opt.rawTracks, opt.rawSides, 16, 256)
+			: dsk.load(path);
+		if (!loaded) { errOut = "Nie udalo sie wczytac obrazu (zla geometria dla RAW?)."; return false; }
 		userStack = {0};
-		if (presetIndex == 0) {
+		if (opt.fsChoice == 0) {
 			if (!cpmFs.open(dsk)) { errOut = "CpmFs::open nieudane (geometria?)."; return false; }
 			format = DiskFormat::Cpm;
-			title = "CP/M";
+			title = opt.isRaw ? "CP/M (RAW)" : "CP/M";
 			return true;
 		}
-		auto preset = static_cast<TosFs::Preset>(presetIndex - 1);
+		auto preset = static_cast<TosFs::Preset>(opt.fsChoice - 1);
 		if (!tosFs.openWithPreset(dsk, preset)) {
 			errOut = std::string("TosFs::openWithPreset nieudane dla ") + TosFs::presetName(preset) +
 				" (zla liczba stron dla tej geometrii?).";
 			return false;
 		}
 		format = DiskFormat::Tos;
-		title = std::string("TOS (") + TosFs::presetName(preset) + ")";
+		title = std::string("TOS (") + TosFs::presetName(preset) + (opt.isRaw ? ", RAW)" : ")");
 		return true;
 	}
 
@@ -666,22 +689,47 @@ static std::string dialogInput(const std::string& prompt, const std::string& def
 	}
 }
 
-// Lista wyboru (jedna z `options`, nawigacja strzałkami, Enter wybiera,
-// Esc anuluje) -- uzyte przez format-override dialog (Alt+F / auto-pytanie
+// Lista 5 filesystemow (CP/M + 4 TosFs::Preset) plus jeden "[ ] RAW"
+// checkbox-wiersz (Space lub Enter na nim: toggle, NIE zamyka dialogu) i
+// "Anuluj" -- uzyte przez format-override dialog (Alt+F / auto-pytanie
 // gdy auto-detekcja zawiedzie, patrz App::chooseAndOpenDisk()). Zwraca
-// indeks wybranej opcji, albo -1 przy Esc.
-static int dialogChoice(const std::string& title_, const std::vector<std::pair<std::string, std::string>>& options)
+// FormatOption z fsChoice=-1 przy Esc/Anuluj.
+static FormatOption dialogChooseFormatOption(const std::string& title_)
 {
+	struct Row { std::string label, desc; int fsChoice, tracks, sides; };
+	std::vector<Row> rows;
+	rows.push_back({"CP/M", "Wymusza CP/M (jedyna zweryfikowana geometria, 170KB).", 0, 40, 1});
+	for (int p = 0; p < 4; p++) {
+		auto preset = static_cast<TosFs::Preset>(p);
+		int tracks, sides;
+		TosFs::presetGeometry(preset, tracks, sides);
+		rows.push_back({TosFs::presetName(preset), TosFs::presetDescription(preset), p + 1, tracks, sides});
+	}
+
+	bool rawToggle = false;
+	int cursor = 0;
+	const int kToggleRow = (int)rows.size();
+	const int kCancelRow = kToggleRow + 1;
+	const int kTotalRows = kCancelRow + 1;
+
 	int sh, sw; getmaxyx(stdscr, sh, sw);
 	size_t maxLabelLen = title_.size();
-	for (auto& [label, desc] : options) maxLabelLen = std::max(maxLabelLen, label.size());
+	for (auto& r : rows) maxLabelLen = std::max(maxLabelLen, r.label.size());
 	int dw = std::min(sw - 4, std::max(60, (int)maxLabelLen + 8));
-	int dh = std::min(sh - 4, (int)options.size() + 4); // border+title, N options, 1 desc line, border
+	int dh = std::min(sh - 4, kTotalRows + 4); // border+title, rows, 1 desc line, border
 	int dy = (sh - dh) / 2, dx = (sw - dw) / 2;
 	WINDOW* win = newwin(dh, dw, dy, dx);
 	keypad(win, TRUE);
 
-	int cursor = 0;
+	auto drawRow = [&](int row, int logicalIdx, const std::string& text) {
+		int attr = (logicalIdx == cursor) ? (COLOR_PAIR(2) | A_BOLD) : COLOR_PAIR(0);
+		wattron(win, attr);
+		std::string line = " " + text;
+		line.resize(dw - 2, ' ');
+		mvwaddnstr(win, row, 1, line.c_str(), dw - 2);
+		wattroff(win, attr);
+	};
+
 	for (;;) {
 		werase(win);
 		wattron(win, COLOR_PAIR(1));
@@ -692,26 +740,42 @@ static int dialogChoice(const std::string& title_, const std::vector<std::pair<s
 		wattroff(win, COLOR_PAIR(3) | A_BOLD);
 
 		int row = 1;
-		for (size_t i = 0; i < options.size() && row < dh - 2; i++, row++) {
-			int attr = ((int)i == cursor) ? (COLOR_PAIR(2) | A_BOLD) : COLOR_PAIR(0);
-			wattron(win, attr);
-			std::string line = " " + options[i].first;
-			line.resize(dw - 2, ' ');
-			mvwaddnstr(win, row, 1, line.c_str(), dw - 2);
-			wattroff(win, attr);
+		for (size_t i = 0; i < rows.size() && row < dh - 2; i++, row++) drawRow(row, (int)i, rows[i].label);
+		if (row < dh - 2) {
+			drawRow(row, kToggleRow, std::string("[") + (rawToggle ? "X" : " ") + "] RAW (bez naglowka kontenera)");
+			row++;
 		}
-		if (cursor >= 0 && cursor < (int)options.size()) {
-			wattron(win, COLOR_PAIR(6));
-			mvwaddnstr(win, dh - 2, 2, options[cursor].second.c_str(), dw - 4);
-			wattroff(win, COLOR_PAIR(6));
-		}
+		if (row < dh - 2) drawRow(row, kCancelRow, "Anuluj");
+
+		std::string desc;
+		if (cursor >= 0 && cursor < (int)rows.size()) desc = rows[cursor].desc;
+		else if (cursor == kToggleRow) desc = "Golutki, sekwencyjny zrzut bez formatu kontenera (16 sek/sciezke, 256B/sektor) -- jak ~/src/TOStools's own --raw.";
+		wattron(win, COLOR_PAIR(6));
+		mvwaddnstr(win, dh - 2, 2, desc.c_str(), dw - 4);
+		wattroff(win, COLOR_PAIR(6));
 		wrefresh(win);
 
 		int ch = wgetch(win);
 		if (ch == KEY_UP) cursor = std::max(0, cursor - 1);
-		else if (ch == KEY_DOWN) cursor = std::min((int)options.size() - 1, cursor + 1);
-		else if (ch == '\n' || ch == '\r' || ch == KEY_ENTER) { delwin(win); return cursor; }
-		else if (ch == 27) { delwin(win); return -1; }
+		else if (ch == KEY_DOWN) cursor = std::min(kTotalRows - 1, cursor + 1);
+		else if (ch == ' ' && cursor == kToggleRow) rawToggle = !rawToggle;
+		else if (ch == '\n' || ch == '\r' || ch == KEY_ENTER) {
+			if (cursor == kToggleRow) { rawToggle = !rawToggle; continue; }
+			delwin(win);
+			FormatOption result;
+			if (cursor == kCancelRow) { result.fsChoice = -1; return result; }
+			result.label = rows[cursor].label;
+			result.fsChoice = rows[cursor].fsChoice;
+			result.isRaw = rawToggle;
+			result.rawTracks = rows[cursor].tracks;
+			result.rawSides = rows[cursor].sides;
+			return result;
+		} else if (ch == 27) {
+			delwin(win);
+			FormatOption result;
+			result.fsChoice = -1;
+			return result;
+		}
 	}
 }
 
@@ -824,23 +888,16 @@ public:
 	// formatem, ignorujac detectDiskFormat() calkowicie.
 	void chooseAndOpenDisk(int slot, const std::string& dskPath)
 	{
-		std::vector<std::pair<std::string, std::string>> options = {
-			{"CP/M", "Wymusza CP/M (jedyna zweryfikowana geometria, 170KB)."},
-			{TosFs::presetName(TosFs::Preset::TosTimex), TosFs::presetDescription(TosFs::Preset::TosTimex)},
-			{TosFs::presetName(TosFs::Preset::TosTimex640), TosFs::presetDescription(TosFs::Preset::TosTimex640)},
-			{TosFs::presetName(TosFs::Preset::TosTimex320), TosFs::presetDescription(TosFs::Preset::TosTimex320)},
-			{TosFs::presetName(TosFs::Preset::TosTimex320Alt), TosFs::presetDescription(TosFs::Preset::TosTimex320Alt)},
-			{"Anuluj", ""},
-		};
-		int choice = dialogChoice("Wybierz format .dsk: " + dskPath, options);
+		FormatOption opt = dialogChooseFormatOption("Wybierz format: " + dskPath);
 		redraw();
-		if (choice < 0 || choice == (int)options.size() - 1) return; // Esc lub "Anuluj"
+		if (opt.fsChoice < 0) return; // Esc lub "Anuluj"
 
 		WINDOW* win = panels[slot]->win;
 		auto dp = std::make_unique<DskPanel>(win, dskPath);
 		std::string err;
-		if (!dp->openDiskManual(choice, err)) {
-			status("Nie udalo sie otworzyc " + dskPath + " jako " + options[choice].first + ": " + err, true);
+		if (!dp->openDiskManual(opt, err)) {
+			status("Nie udalo sie otworzyc " + dskPath + " jako " + opt.label +
+				(opt.isRaw ? " (RAW)" : "") + ": " + err, true);
 			return;
 		}
 		finishOpenDisk(slot, std::move(dp));

@@ -45,6 +45,24 @@ public:
 
 	bool load(const std::string& path);
 
+	// Loads a "raw" image: a headerless, plain sequential dump with no
+	// container format at all -- track 0/side 0's sectors, then track
+	// 0/side 1 (if 2-sided), then track 1/side 0, etc., each sector
+	// exactly `sectorSize` bytes with no gaps, sector IDs implicitly
+	// 0..sectorsPerTrack-1 in that stored order (there's nothing in a raw
+	// file to record a physical interleave at all -- same convention
+	// ~/src/TOStools's own RawImageAsDSK adapter uses for its own `--raw`
+	// mode, which is where this request came from). Internally
+	// synthesizes an Extended-DSK-shaped in-memory buffer so every other
+	// method (findSector()/sectorData()/...) works completely unchanged;
+	// flush()/saveAs() detect this and write back out in the ORIGINAL
+	// raw shape, not the synthesized one -- a raw image must stay a raw
+	// image on disk, or writeFile()/deleteFile() (which just call
+	// flush()) would silently corrupt it into a different format at the
+	// same path. Fails if the file size doesn't exactly match
+	// numTracks*numSides*sectorsPerTrack*sectorSize.
+	bool loadRaw(const std::string& path, int numTracks, int numSides, int sectorsPerTrack, int sectorSize);
+
 	// Creates a new, already-formatted, blank FDD3000 disk image at
 	// `path` and writes it to disk -- see DskImage.cpp's own comment for
 	// the exact byte layout, reverse-engineered from real, working FDD3000
@@ -115,6 +133,8 @@ private:
 	int numTracks_ = 0;
 	int numSides_ = 0;
 	std::vector<TrackInfo> tracks_; // index = track*numSides_ + side
+	bool rawFormat_ = false; // see loadRaw()'s own comment -- changes how flush() serializes
 
 	const TrackInfo* trackInfo(int track, int side) const;
+	bool flushRaw();
 };

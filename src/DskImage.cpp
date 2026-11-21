@@ -142,8 +142,115 @@ bool DskImage::load(const std::string& path)
 	return true;
 }
 
+bool DskImage::loadRaw(const std::string& path, int numTracks, int numSides, int sectorsPerTrack, int sectorSize)
+{
+	data_.clear();
+	tracks_.clear();
+	numTracks_ = numSides_ = 0;
+	path_.clear();
+	rawFormat_ = false;
+
+	if (numTracks < 1 || numTracks > 254 || (numSides != 1 && numSides != 2) ||
+	    sectorsPerTrack < 1 || sectorsPerTrack > 255) {
+		fprintf(stderr, "DskImage::loadRaw: implausible geometry (%d tracks, %d sides, %d sectors/track)\n",
+		        numTracks, numSides, sectorsPerTrack);
+		return false;
+	}
+	int sizeCode = -1;
+	for (int n = 0; n <= 6; n++) if ((128 << n) == sectorSize) { sizeCode = n; break; }
+	if (sizeCode < 0) {
+		fprintf(stderr, "DskImage::loadRaw: sector size %d is not a real 128<<N code\n", sectorSize);
+		return false;
+	}
+	if ((size_t)(0x34 + numTracks * numSides) > 256) {
+		fprintf(stderr, "DskImage::loadRaw: too many tracks for the fixed 256-byte header\n");
+		return false;
+	}
+
+	FILE* pf = fopen(path.c_str(), "rb");
+	if (!pf) {
+		fprintf(stderr, "DskImage::loadRaw: cannot open %s\n", path.c_str());
+		return false;
+	}
+	fseek(pf, 0, SEEK_END);
+	long size = ftell(pf);
+	fseek(pf, 0, SEEK_SET);
+	long expected = (long)numTracks * numSides * sectorsPerTrack * sectorSize;
+	if (size != expected) {
+		fprintf(stderr, "DskImage::loadRaw: %s is %ld bytes, expected exactly %ld for this geometry\n",
+		        path.c_str(), size, expected);
+		fclose(pf);
+		return false;
+	}
+	std::vector<uint8_t> raw((size_t)size);
+	size_t n = fread(raw.data(), 1, (size_t)size, pf);
+	fclose(pf);
+	if (n != (size_t)size) {
+		fprintf(stderr, "DskImage::loadRaw: short read on %s\n", path.c_str());
+		return false;
+	}
+
+	// Synthesize an Extended-DSK-shaped buffer so findSector()/sectorData()/
+	// etc. work completely unchanged -- a raw dump has no header at all, so
+	// build one matching what they already expect: sectors stored
+	// sequentially, IDs 0..sectorsPerTrack-1 in that same order (nothing in
+	// a raw file records a physical interleave to begin with). Track-major,
+	// side-minor order (track0/side0, track0/side1, track1/side0, ...) --
+	// same iteration order ~/src/TOStools's own RawImageAsDSK adapter uses.
+	const int trackSize = 256 + sectorsPerTrack * sectorSize;
+	const int trackSizeUnits = trackSize / 256;
+	data_.assign(256, 0);
+	const char* sig = "EXTENDED CPC DSK File\r\nDisk-Info\r\nJASE raw-wrapped\r\n";
+	memcpy(data_.data(), sig, strlen(sig) < 0x30 ? strlen(sig) : 0x30);
+	data_[0x30] = (uint8_t)numTracks;
+	data_[0x31] = (uint8_t)numSides;
+	for (int i = 0; i < numTracks * numSides; i++) data_[0x34 + i] = (uint8_t)trackSizeUnits;
+
+	data_.reserve(data_.size() + (size_t)numTracks * numSides * trackSize);
+	size_t rawPos = 0;
+	for (int i = 0; i < numTracks * numSides; i++) {
+		int t = i / numSides, s = i % numSides;
+		std::vector<uint8_t> track(trackSize, 0);
+		memcpy(track.data(), "Track-Info\r\n", 12);
+		track[0x14] = (uint8_t)sizeCode;
+		track[0x15] = (uint8_t)sectorsPerTrack;
+		track[0x16] = 0x2A;
+		track[0x17] = 0xE5;
+		for (int j = 0; j < sectorsPerTrack; j++) {
+			uint8_t* d = &track[0x18 + j * 8];
+			d[0] = (uint8_t)t; d[1] = (uint8_t)s; d[2] = (uint8_t)j; d[3] = (uint8_t)sizeCode;
+			d[4] = 0; d[5] = 0;
+			d[6] = (uint8_t)(sectorSize & 0xFF); d[7] = (uint8_t)(sectorSize >> 8);
+		}
+		memcpy(track.data() + 0x100, &raw[rawPos], (size_t)sectorsPerTrack * sectorSize);
+		rawPos += (size_t)sectorsPerTrack * sectorSize;
+		data_.insert(data_.end(), track.begin(), track.end());
+	}
+
+	numTracks_ = numTracks;
+	numSides_ = numSides;
+	tracks_.resize((size_t)(numTracks_ * numSides_));
+	long offset = 256;
+	for (int i = 0; i < numTracks_ * numSides_; i++) {
+		tracks_[i].dataOffset = offset;
+		tracks_[i].sectorLengths.assign(sectorsPerTrack, sectorSize);
+		tracks_[i].sectorDataOffsets.resize(sectorsPerTrack);
+		long dataPos = offset + 0x100;
+		for (int j = 0; j < sectorsPerTrack; j++) {
+			tracks_[i].sectorDataOffsets[j] = dataPos;
+			dataPos += sectorSize;
+		}
+		offset += trackSize;
+	}
+
+	path_ = path;
+	rawFormat_ = true;
+	return true;
+}
+
 bool DskImage::flush()
 {
+	if (rawFormat_) return flushRaw();
 	// Writes the WHOLE in-memory image back to its original file, not
 	// just the bytes WD1772Fsm's Write Sector most recently touched --
 	// simplicity over micro-optimizing a write path that's inherently
@@ -160,6 +267,42 @@ bool DskImage::flush()
 	fclose(pf);
 	if (n != data_.size()) {
 		fprintf(stderr, "DskImage::flush: short write on %s\n", path_.c_str());
+		return false;
+	}
+	return true;
+}
+
+// Re-extracts the real sector bytes (in the same track-major/side-minor,
+// sequential-ID order loadRaw() read them in) out of the synthesized
+// Extended-DSK-shaped data_ and writes THAT flat dump to path_ -- the
+// in-memory synthesized header/descriptors must never reach disk, or a
+// raw image would silently turn into a differently-shaped file at the
+// same path the next time anything calls flush() (every writeFile()/
+// deleteFile() does).
+bool DskImage::flushRaw()
+{
+	if (path_.empty() || data_.empty()) return false;
+	std::vector<uint8_t> out;
+	out.reserve(data_.size());
+	for (int i = 0; i < numTracks_ * numSides_; i++) {
+		const TrackInfo& t = tracks_[(size_t)i];
+		int sectorsPerTrack = (int)t.sectorLengths.size();
+		for (int j = 0; j < sectorsPerTrack; j++) {
+			int len = t.sectorLengths[j];
+			long pos = t.sectorDataOffsets[j];
+			if (pos + len > (long)data_.size()) return false;
+			out.insert(out.end(), data_.begin() + pos, data_.begin() + pos + len);
+		}
+	}
+	FILE* pf = fopen(path_.c_str(), "wb");
+	if (!pf) {
+		fprintf(stderr, "DskImage::flushRaw: cannot open %s for writing\n", path_.c_str());
+		return false;
+	}
+	size_t n = fwrite(out.data(), 1, out.size(), pf);
+	fclose(pf);
+	if (n != out.size()) {
+		fprintf(stderr, "DskImage::flushRaw: short write on %s\n", path_.c_str());
 		return false;
 	}
 	return true;

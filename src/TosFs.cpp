@@ -13,6 +13,19 @@ const char* TosFs::presetName(Preset p)
 	return "?";
 }
 
+void TosFs::presetGeometry(Preset p, int& tracks, int& sides)
+{
+	// Total disk geometry each preset expects -- a DIFFERENT fact from
+	// Geometry::physicalReservedTracks (how many of those tracks the
+	// directory reserves), which geometryForPreset() already handles.
+	switch (p) {
+		case Preset::TosTimex:       tracks = 40; sides = 1; break;
+		case Preset::TosTimex640:    tracks = 80; sides = 2; break;
+		case Preset::TosTimex320:    tracks = 80; sides = 1; break;
+		case Preset::TosTimex320Alt: tracks = 40; sides = 2; break;
+	}
+}
+
 const char* TosFs::presetDescription(Preset p)
 {
 	switch (p) {
