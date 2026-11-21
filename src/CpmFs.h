@@ -50,6 +50,16 @@
 // onto that same physical media, and the two don't have to match (and
 // here, don't). Not a contradiction -- two different abstraction layers,
 // confirmed independently, simply don't share a value on this disk.
+//
+// Crucially, these are NOT chained/composed (BDOS's skew=5 isn't "applied
+// on top of" the physical skew=7) -- they're two INDEPENDENT choices that
+// both resolve directly to a physical sector ID, which the real
+// controller locates by matching that ID regardless of where it
+// physically sits on the track (same reason DskImage::findSector() never
+// assumes a fixed offset, see its own comment). BDOS asks for "sector ID
+// skewTable[logicalIndex]" and gets it correctly no matter how the media
+// happens to be physically laid out; the physical interleave only affects
+// how FAST a given access pattern is, never whether it's correct.
 // DRM=63 is the other half of the bug: only 64 directory entries (logical
 // sectors 0-7) are real/scanned, not 128 -- AL0=0xF0/AL1=0x00 reserve a
 // full 4 blocks (16 sectors) of physical space for the directory, but only
