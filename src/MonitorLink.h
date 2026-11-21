@@ -72,10 +72,28 @@ public:
 			} else if ((v & kMask) == kWsta && !inQueue_.empty()) {
 				txByte_ = inQueue_.front();
 				station.setHostByte(kRxAck);
-				state_ = State::TxSendLo;
+				state_ = State::TxSettle;
+				retries_ = kTimeoutAttempts;
 			}
 			break;
 		}
+
+		// Found live, 2026-11-21: unlike every OTHER state transition here,
+		// writing RXACK isn't a reaction to something the station just
+		// wrote -- there's nothing from the station to wait for before
+		// moving on, so a version of this file that went straight to
+		// TxSendLo on the very next tick raced CBIOS's own RXBY polling
+		// loop and (at standalone fdd3000_station's 1:1 tick-per-station-
+		// instruction rate, unlike in-process's clock-ratio stepping,
+		// which happened to leave enough of a gap to mask this) NEVER
+		// delivered a single byte. Holding RXACK stable for a full
+		// kTimeoutAttempts-worth of ticks gives RXBY's own ~256-iteration
+		// poll loop room to actually see it. Confirmed live: standalone
+		// DIR/TYPE now work end-to-end for the first time.
+		case State::TxSettle:
+			station.setHostByte(kRxAck); // keep re-asserting -- harmless, same value
+			if (--retries_ == 0) state_ = State::TxSendLo;
+			break;
 
 		// ---- RX: station -> host (mirrors CBIOS's TXBY) ----
 		case State::RxWaitNibbleLo: {
@@ -175,7 +193,7 @@ private:
 	enum class State {
 		Idle,
 		RxWaitNibbleLo, RxWaitNibbleHi,
-		TxSendLo, TxWaitEchoLo, TxWaitEchoHi, TxWaitEndEcho
+		TxSettle, TxSendLo, TxWaitEchoLo, TxWaitEchoHi, TxWaitEndEcho
 	};
 
 	static const uint8_t kMask = 0x5F;

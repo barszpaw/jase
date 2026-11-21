@@ -46,6 +46,12 @@ static FddStation g_station;
 // left as a cause.
 static bool g_maxSpeed = false;
 
+// Same convention as the in-process side's own debug server
+// (src/debugserver.cpp): STEP pauses the free-running main loop so
+// SETREG/POKE/REGS become deterministic instead of racing a background
+// thread that keeps calling g_station.step() in real time; CONT resumes it.
+static bool g_running = true;
+
 // ---- Minimal TCP listener helper (same shape as DebugServer::init(),
 // src/debugserver.cpp) ----
 struct Listener {
@@ -305,9 +311,15 @@ static std::string handleDebugCommand(const std::string& line)
 	}
 
 	if (cmd == "STEP") {
+		g_running = false;
 		int n = toks.size() >= 2 ? atoi(toks[1].c_str()) : 1;
 		if (n < 1) n = 1;
 		for (int i = 0; i < n; i++) g_station.step();
+		return "OK";
+	}
+
+	if (cmd == "CONT") {
+		g_running = true;
 		return "OK";
 	}
 
@@ -504,7 +516,13 @@ static void printUsage(const char* argv0)
 		"  SETREG <reg> <hex>     set one station register (AF/BC/.../PC).\n"
 		"  MEM <hexaddr> <len>    read station memory as hex.\n"
 		"  POKE <hexaddr> <b1,b2,...>  write station memory (hex bytes).\n"
-		"  STEP [n]               single-step the station CPU (default 1).\n"
+		"  STEP [n]               single-step the station CPU (default 1) --\n"
+		"                         also PAUSES the free-running main loop\n"
+		"                         (same convention as jase's own --debug-port\n"
+		"                         STEP), so SETREG/POKE/REGS become\n"
+		"                         deterministic instead of racing it.\n"
+		"  CONT                   resume free-running real-time execution\n"
+		"                         after a STEP paused it.\n"
 		"  RESET                  the station's own physical reset button --\n"
 		"                         resets CPU/paging/FDC, NOT the link latches.\n"
 		"  CHANGEDISK <drive> <path>  swap which disk image is in a drive\n"
@@ -611,7 +629,7 @@ int main(int argc, char** argv)
 	long long virtualTstatesRun = 0;
 
 	for (;;) {
-		for (int i = 0; i < kBatchInstructions; i++) {
+		for (int i = 0; i < kBatchInstructions && g_running; i++) {
 			virtualTstatesRun += g_station.step();
 			// --monitor-port drives the SAME link-byte latch as the raw
 			// link-port bridge above (flushLinkByteIfDirty()/
@@ -633,6 +651,7 @@ int main(int argc, char** argv)
 		if (g_serial2Port != 0) pumpSerialSocket(g_serial2Listener, 1, "serial2");
 		if (g_monitorPort != 0) pumpMonitorSocket();
 
+		if (!g_running) { std::this_thread::sleep_for(std::chrono::milliseconds(1)); continue; }
 		if (g_maxSpeed) continue; // see --max-speed's own comment
 
 		double targetElapsed = (double)virtualTstatesRun / kStationHz;
