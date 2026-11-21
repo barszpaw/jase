@@ -4,6 +4,7 @@ jase
 *.o
 *.d
 tools/virtual_esp01/virtual_esp01
+tools/fsrv/FSRV.COM
 bin/Win32/
 bin/x64/
 
