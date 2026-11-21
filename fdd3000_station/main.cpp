@@ -32,6 +32,7 @@
 #include <thread>
 
 #include "../src/FddStation.h"
+#include "../src/MonitorLink.h"
 
 static FddStation g_station;
 
@@ -125,6 +126,40 @@ static void pumpSerialSocket(Listener& listener, int ch, const char* label)
 	while (outLen < sizeof(out) && g_station.serial().popTxByte(ch, b)) out[outLen++] = b;
 	if (outLen > 0) {
 		if (send(listener.clientFd, out, outLen, 0) < 0) listener.dropClient(label);
+	}
+}
+
+// MonitorLink (src/MonitorLink.h) -- the standalone-process side of the
+// SAME headless-CP/M-console bridge Fdd3000's own setMonitorPort()/
+// pumpMonitorSocket() provide in-process (see docs/FDD3000/HEADLESS_CPM.md).
+// g_monitorLink.tick() is driven once per g_station.step() in the main
+// loop below -- the standalone process has no host CPU to hang a
+// per-instruction hook off of, so "once per station instruction" is this
+// process's own equivalent of that cadence. Socket I/O itself stays
+// separate (pumpMonitorSocket(), once per batch), same split as
+// pumpSerialSocket() above.
+static MonitorLink g_monitorLink;
+static Listener g_monitorListener;
+static int g_monitorPort = 0;
+
+static void pumpMonitorSocket()
+{
+	g_monitorListener.acceptIfIdle("monitor");
+	if (g_monitorListener.clientFd < 0) return;
+
+	uint8_t buf[256];
+	ssize_t n = recv(g_monitorListener.clientFd, buf, sizeof(buf), 0);
+	if (n == 0) { g_monitorListener.dropClient("monitor"); }
+	else if (n > 0) {
+		for (ssize_t i = 0; i < n; i++) g_monitorLink.pushIncomingByte(buf[i]);
+	}
+
+	uint8_t out[256];
+	size_t outLen = 0;
+	uint8_t b;
+	while (outLen < sizeof(out) && g_monitorLink.popOutgoingByte(b)) out[outLen++] = b;
+	if (outLen > 0) {
+		if (send(g_monitorListener.clientFd, out, outLen, 0) < 0) g_monitorListener.dropClient("monitor");
 	}
 }
 
@@ -445,6 +480,13 @@ static void printUsage(const char* argv0)
 		"                         Not bound unless given.\n"
 		"  --serial2-port PORT    same, for WD2123 CH2. Not bound unless\n"
 		"                         given.\n"
+		"  --monitor-port PORT    src/MonitorLink.h as a local TCP listener --\n"
+		"                         a native reimplementation of the real\n"
+		"                         Monitor Emulator's host-link protocol, so\n"
+		"                         a telnet client can act as CP/M's console\n"
+		"                         with no ZX Spectrum Z80 code or screen\n"
+		"                         involved. Not bound unless given. See\n"
+		"                         docs/FDD3000/HEADLESS_CPM.md.\n"
 		"  --max-speed            skip the real-time 8MHz pacing sleep and\n"
 		"                         run the station as fast as the OS\n"
 		"                         scheduler allows -- diagnostic flag, to\n"
@@ -522,6 +564,7 @@ int main(int argc, char** argv)
 		else if (a == "--max-speed") g_maxSpeed = true;
 		else if (a == "--serial1-port" && i + 1 < argc) g_serial1Port = atoi(argv[++i]);
 		else if (a == "--serial2-port" && i + 1 < argc) g_serial2Port = atoi(argv[++i]);
+		else if (a == "--monitor-port" && i + 1 < argc) g_monitorPort = atoi(argv[++i]);
 		else { fprintf(stderr, "unknown arg: %s (try --help)\n", a.c_str()); return 1; }
 	}
 
@@ -547,6 +590,10 @@ int main(int argc, char** argv)
 		if (!g_serial2Listener.init(g_serial2Port)) { fprintf(stderr, "cannot listen on serial2 port %d\n", g_serial2Port); return 1; }
 		fprintf(stderr, "fdd3000_station: serial2 (WD2123 CH2) port %d\n", g_serial2Port);
 	}
+	if (g_monitorPort != 0) {
+		if (!g_monitorListener.init(g_monitorPort)) { fprintf(stderr, "cannot listen on monitor port %d\n", g_monitorPort); return 1; }
+		fprintf(stderr, "fdd3000_station: monitor (headless CP/M console) port %d\n", g_monitorPort);
+	}
 
 	// Real-time pacing to the station's own clock -- EXPERIMENTAL 8MHz
 	// (2x the real 4MHz Z80A, M397/FDD35 schematics), matching the
@@ -566,12 +613,25 @@ int main(int argc, char** argv)
 	for (;;) {
 		for (int i = 0; i < kBatchInstructions; i++) {
 			virtualTstatesRun += g_station.step();
-			flushLinkByteIfDirty();
-			pumpLinkSocket();
+			// --monitor-port drives the SAME link-byte latch as the raw
+			// link-port bridge above (flushLinkByteIfDirty()/
+			// pumpLinkSocket()) -- both at once would fight over it, same
+			// caveat as a real Monitor program running at the same time
+			// as Fdd3000's own MonitorLink in-process. Gated mutually
+			// exclusive here rather than just documented, since nothing
+			// stops a remote --fdd3000-bridge host from also being
+			// connected to g_linkListener at the same time otherwise.
+			if (g_monitorPort != 0) {
+				g_monitorLink.tick(g_station);
+			} else {
+				flushLinkByteIfDirty();
+				pumpLinkSocket();
+			}
 		}
 		pumpDebugSocket();
 		if (g_serial1Port != 0) pumpSerialSocket(g_serial1Listener, 0, "serial1");
 		if (g_serial2Port != 0) pumpSerialSocket(g_serial2Listener, 1, "serial2");
+		if (g_monitorPort != 0) pumpMonitorSocket();
 
 		if (g_maxSpeed) continue; // see --max-speed's own comment
 

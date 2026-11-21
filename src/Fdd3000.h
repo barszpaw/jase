@@ -2,6 +2,7 @@
 #include "Peripheral.h"
 #include "MemoryMap.h"
 #include "FddStation.h"
+#include "MonitorLink.h"
 #include <cstdint>
 #include <string>
 
@@ -192,12 +193,25 @@ public:
 	// drains both channels' FIFOs against their sockets.
 	void pumpSerial();
 
+	// MonitorLink (src/MonitorLink.h) as a local TCP listener -- a native
+	// C++ reimplementation of the real Monitor Emulator's host-link
+	// protocol, so a TCP client (telnet) can act as CP/M's console
+	// without any ZX Spectrum Z80 code or screen at all. In-process mode
+	// only, same reasoning as setSerialPort() above. Not meant to be used
+	// AT THE SAME TIME as a real Monitor program also running on the
+	// emulated host CPU -- both would drive the same link-byte latch.
+	bool setMonitorPort(int port);
+	int getMonitorPort() const { return monitorPort_; }
+	void pumpMonitorSocket(); // once per frame -- the actual socket I/O
+
 private:
 	void applyHostPaging(MemoryMap& memory);
 	void logLinkTrace(const char* direction, uint8_t value) const;
 	void stepStationForOneHostInstruction(uint32_t hostTstates);
 	void acceptSerialIfIdle(int channel);
 	void dropSerialClient(int channel);
+	void acceptMonitorIfIdle();
+	void dropMonitorClient();
 
 	// ---- Bridge-mode-only: the command channel to the external station
 	// process. debugRequest() is blocking/short-timeout -- fine for
@@ -258,4 +272,11 @@ private:
 	};
 	SerialListener serialListener_[2];
 	int serialPort_[2] = {0, 0};
+
+	// MonitorLink local TCP listener -- see setMonitorPort()/
+	// pumpMonitorSocket()'s own comments. Reuses the same SerialListener
+	// shape (listenFd/clientFd) since the accept/drop logic is identical.
+	MonitorLink monitorLink_;
+	SerialListener monitorListener_;
+	int monitorPort_ = 0;
 };

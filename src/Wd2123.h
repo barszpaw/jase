@@ -2,27 +2,48 @@
 #include <cstdint>
 #include <vector>
 
-// FDD3000 station's serial chip, per PLD_equations.md's own pin comments
-// ("enable WD2123 CH1"/"CH2"/"CTRL" on RS1/RS2/RS3 -- see
-// EMULATION_SPEC.md's I/O table). NOT yet exercised by any firmware we've
-// disassembled (fdd3boot_disasm.md's 86 known lines never touch these
-// ports), so none of this has been verified against a real trace -- unlike
-// Wd1772Fsm, which was built against (and iteratively corrected by) real
-// boot-ROM behavior. Treat every register-level detail here as a
-// best-effort placeholder until real firmware traffic on RS1/RS2/RS3 shows
-// otherwise.
+// FDD3000 station's serial chip. Port map CONFIRMED (2026-11-20) against
+// a real, published source -- Jarek Adamski's "The FDD Interface" writeup
+// on loadzx.com/timexcomputerworld/ti-technical-info/, which lists the
+// station's own internal port map directly:
+//   #10  WD2123 configuration (write) CHA
+//   #11  WD2123 configuration (write) CHB
+//   #40  WD2123 data            CHB
+//   #41  WD2123 status/command  CHB
+//   #80  WD2123 data            CHA
+//   #81  WD2123 status/command  CHA
+// This matches PLD_equations.md's own RS1/RS2/RS3 decode (RS1=#80-#9F,
+// RS2=#40-#5F, RS3=#00-#1F -- see EMULATION_SPEC.md) with one real
+// correction over an earlier version of this file's GUESS: RS3 is not a
+// single whole-chip latch with no per-channel meaning -- it's TWO
+// separate per-channel "configuration" registers, CHA at #10 and CHB at
+// #11, selected by the port's own bit 0 exactly like data-vs-status
+// already is within the #80/#40 blocks. CHA=channel index 0 (our RS1/
+// #80-#81), CHB=channel index 1 (our RS2/#40-#41) -- matches the TOS
+// Secrets article's own ":CH_A"/":CH_B" channel names.
+// STILL NOT confirmed anywhere: the actual BIT layout of the
+// configuration register or the status/command register's command bits
+// -- the source above explicitly says so ("How to use these ports? I
+// still wait for the info..."). An earlier version of this file guessed
+// a Mode1->Mode2->Command 3-write sequence on the status/command port
+// (borrowed from an unrelated generic DUART model) -- dropped now that a
+// real, SEPARATE configuration port is confirmed to exist, which
+// undermines the reason that guess existed in the first place. The
+// status/command port is now a single direct write (confirmed
+// read=status / write=command by the source above), same as data.
 //
-// Register-level facts corrected against the PLD (an earlier Gemini-
-// generated starting point assumed something different and would not
-// have matched this board): the PLD decodes THREE SEPARATE enables
-// (RS1=CH1, RS2=CH2, RS3=CTRL), not one chip-select plus a 2-bit internal
-// address selecting among four registers. Channel is therefore selected
-// by WHICH enable fired (FddStation's own block switch), not by an
-// address bit -- only one address bit (the port's bit 0) is left to pick
-// data-vs-control/status WITHIN a channel. RS3 ("CTRL") is a separate,
-// WRITE-ONLY, whole-chip enable with no per-channel meaning in the PLD at
-// all; its real function is unknown, modeled here as a latch with no
-// behavior (see writeGlobalControl()).
+// kStatRxReady CONFIRMED bit0 (2026-11-20), against a second, independent
+// real source: the real CBIOS (CBIOS.MAC, pulled off a real TMX Portugal
+// CP/M system disk -- see docs/FDD3000/sources/ -- names the chip "WD
+// 2123" directly in a comment and defines the exact same port map as
+// above (CANALA=#80, SIOASTS/SIOACMD=CANALA+1=#81, SIOABR=#10; CANALB=
+// #40, +1=#41, SIOBBR=#11) PLUS `RXRDY EQU 00000001B ;Receiver READY`,
+// polled as `BIT RXRDY,A ;byte ready?` in the real RXBYTE routine. An
+// earlier version of this file put RX-ready on bit1 (borrowed from the
+// same unrelated generic-DUART starting point as the dropped Mode1/
+// Mode2/Command sequence above) -- moved to bit0 to match; kStatTxReady
+// swapped to bit1 to keep the two apart (its own bit position is NOT
+// independently confirmed by either source, unlike kStatRxReady's).
 //
 // DATA PATH (user-directed, 2026-11-20): a byte-level TCP shortcut, not a
 // bit-accurate async serial simulation. There is no real external line on
@@ -35,23 +56,17 @@
 // register (or its FIFO, if the CPU hasn't read the previous one yet) the
 // instant it arrives. An earlier version of this file DID implement a
 // real bit-level RX/TX finite-state machine with its own baud-rate
-// generator (the user's original Gemini-generated starting point) -- it's
-// gone now that nothing drives it bit-by-bit; see git history if real
-// async timing is ever needed (e.g. a genuine external serial backend).
-// The Mode1/Mode2/Command write SEQUENCE (three writes to the control
-// register) is kept, because that's the one part of the register-level
-// contract that still matters: real firmware still has to perform it to
-// reach the Command write that sets the TX/RX enable bits the byte-level
-// shortcut gates on. Mode1/Mode2's own CONTENTS (format/baud) are no
-// longer interpreted -- nothing left reads them.
+// generator (the user's original Gemini-generated starting point) -- see
+// git history if real async timing is ever needed (e.g. a genuine
+// external serial backend).
 class Wd2123
 {
 public:
 	Wd2123() { reset(); }
 
 	enum StatusFlags : uint8_t {
-		kStatTxReady   = 0x01,
-		kStatRxReady   = 0x02,
+		kStatRxReady   = 0x01,
+		kStatTxReady   = 0x02,
 		kStatTxEmpty   = 0x04,
 		kStatParityErr = 0x08,
 		kStatOverrunErr= 0x10,
@@ -68,10 +83,9 @@ public:
 		}
 	}
 
-	// ch: 0=CH1 (RS1), 1=CH2 (RS2). ctrlSel: the port's own bit 0 (the one
-	// address bit the PLD leaves undecoded within each 32-port block) --
-	// false selects the data register, true selects control/status. See
-	// class comment: this split is inferred, not confirmed.
+	// ch: 0=CHA (#80/#81), 1=CHB (#40/#41). ctrlSel: false selects the
+	// data register, true the status/command register -- both CONFIRMED
+	// (see class comment), not inferred.
 	uint8_t readChannel(int ch, bool ctrlSel)
 	{
 		Channel& c = channels_[ch & 1];
@@ -89,7 +103,6 @@ public:
 			}
 			return v;
 		}
-		c.ctrlWriteStep = 0; // reading status resets the Mode1/Mode2/Command sequence, same as the generated model
 		return c.status;
 	}
 
@@ -107,14 +120,22 @@ public:
 			if ((c.commandReg & 0x01) && c.txFifo.size() < kFifoCap)
 				c.txFifo.push_back(value);
 		} else {
-			handleControlWrite(c, value);
+			// Status/command port write -- confirmed single direct write,
+			// no multi-step sequence (see class comment). Bit meanings
+			// beyond TX enable (0x01)/RX enable (0x04), which the
+			// byte-level shortcut gates on, are NOT confirmed; 0x10
+			// (clear error flags) is our own best-effort guess, kept from
+			// the original generic-DUART starting point.
+			c.commandReg = value;
+			if (value & 0x10) c.status &= ~(kStatParityErr | kStatOverrunErr | kStatFrameErr);
 		}
 	}
 
-	// RS3 -- see class comment. No confirmed behavior; stored only, for
-	// debug visibility, until real firmware traffic defines it.
-	void writeGlobalControl(uint8_t value) { globalControl_ = value; }
-	uint8_t peekGlobalControl() const { return globalControl_; }
+	// #10 (CHA) / #11 (CHB) -- CONFIRMED to exist, write-only, per-channel
+	// (see class comment), but its CONTENTS are not documented anywhere
+	// we have. Stored only, for debug visibility.
+	void writeConfig(int ch, uint8_t value) { channels_[ch & 1].configReg = value; }
+	uint8_t peekConfig(int ch) const { return channels_[ch & 1].configReg; }
 
 	uint8_t peekStatus(int ch) const { return channels_[ch & 1].status; }
 
@@ -159,7 +180,7 @@ private:
 	struct Channel {
 		uint8_t status = 0;
 		uint8_t commandReg = 0;
-		uint8_t ctrlWriteStep = 0; // 0/1=expect Mode1/Mode2 (contents unused), 2=expect Command
+		uint8_t configReg = 0; // see writeConfig()'s own comment
 
 		uint8_t rxHoldingReg = 0;
 		std::vector<uint8_t> rxFifo;
@@ -167,19 +188,4 @@ private:
 	};
 
 	Channel channels_[2];
-	uint8_t globalControl_ = 0;
-
-	// Mode1 -> Mode2 -> Command write sequence -- see class comment on why
-	// only the Command write (the third one, which sets commandReg) still
-	// has any behavioral effect.
-	void handleControlWrite(Channel& c, uint8_t val)
-	{
-		if (c.ctrlWriteStep < 2) {
-			c.ctrlWriteStep++;
-			return;
-		}
-		c.commandReg = val;
-		if (val & 0x10) c.status &= ~(kStatParityErr | kStatOverrunErr | kStatFrameErr);
-		if (val & 0x40) c.ctrlWriteStep = 0; // internal reset -- re-arm the Mode1/Mode2/Command sequence
-	}
 };

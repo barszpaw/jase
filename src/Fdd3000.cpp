@@ -29,6 +29,8 @@ Fdd3000::~Fdd3000()
 		if (serialListener_[ch].clientFd >= 0) close(serialListener_[ch].clientFd);
 		if (serialListener_[ch].listenFd >= 0) close(serialListener_[ch].listenFd);
 	}
+	if (monitorListener_.clientFd >= 0) close(monitorListener_.clientFd);
+	if (monitorListener_.listenFd >= 0) close(monitorListener_.listenFd);
 }
 
 // Accepts three real file shapes, all confirmed against docs/FDD3000/M397
@@ -357,6 +359,74 @@ void Fdd3000::pumpSerial()
 	}
 }
 
+bool Fdd3000::setMonitorPort(int port)
+{
+	SerialListener& l = monitorListener_;
+	l.listenFd = socket(AF_INET, SOCK_STREAM, 0);
+	if (l.listenFd < 0) return false;
+	int opt = 1;
+	setsockopt(l.listenFd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+	sockaddr_in addr{};
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = INADDR_ANY;
+	addr.sin_port = htons((uint16_t)port);
+	if (bind(l.listenFd, (sockaddr*)&addr, sizeof(addr)) < 0) { close(l.listenFd); l.listenFd = -1; return false; }
+	if (listen(l.listenFd, 1) < 0) { close(l.listenFd); l.listenFd = -1; return false; }
+	fcntl(l.listenFd, F_SETFL, O_NONBLOCK);
+	monitorPort_ = port;
+	return true;
+}
+
+void Fdd3000::acceptMonitorIfIdle()
+{
+	SerialListener& l = monitorListener_;
+	if (l.clientFd >= 0 || l.listenFd < 0) return;
+	int fd = accept(l.listenFd, nullptr, nullptr);
+	if (fd >= 0) {
+		fcntl(fd, F_SETFL, O_NONBLOCK);
+		int one = 1;
+		setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+		l.clientFd = fd;
+		fprintf(stderr, "Fdd3000: monitor client connected\n");
+	}
+}
+
+void Fdd3000::dropMonitorClient()
+{
+	SerialListener& l = monitorListener_;
+	if (l.clientFd >= 0) {
+		close(l.clientFd);
+		l.clientFd = -1;
+		fprintf(stderr, "Fdd3000: monitor client disconnected\n");
+	}
+}
+
+// Pure socket I/O -- the protocol state machine itself (MonitorLink::tick())
+// runs separately, once per host instruction, from onInstructionExecuted().
+void Fdd3000::pumpMonitorSocket()
+{
+	if (bridgeMode_ || monitorPort_ == 0) return;
+	acceptMonitorIfIdle();
+	SerialListener& l = monitorListener_;
+	if (l.clientFd < 0) return;
+
+	uint8_t buf[256];
+	ssize_t n = recv(l.clientFd, buf, sizeof(buf), 0);
+	if (n == 0) {
+		dropMonitorClient();
+	} else if (n > 0) {
+		for (ssize_t i = 0; i < n; i++) monitorLink_.pushIncomingByte(buf[i]);
+	}
+
+	uint8_t out[256];
+	size_t outLen = 0;
+	uint8_t b;
+	while (outLen < sizeof(out) && monitorLink_.popOutgoingByte(b)) out[outLen++] = b;
+	if (outLen > 0) {
+		if (send(l.clientFd, out, outLen, 0) < 0) dropMonitorClient();
+	}
+}
+
 // See Fdd3000.h's setLinkTraceEnabled() comment for why this exists and
 // what it logs. Timestamped the same way IECTRACE/IOTRACE are (seconds
 // since SDL init via SDL_GetPerformanceCounter) so all three trace
@@ -466,6 +536,7 @@ void Fdd3000::onInstructionExecuted(MemoryMap& memory, uint32_t tstates)
 	uint32_t delta = (tstates >= lastRawTstates_) ? (tstates - lastRawTstates_) : tstates;
 	lastRawTstates_ = tstates;
 	stepStationForOneHostInstruction(delta);
+	if (monitorPort_ != 0) monitorLink_.tick(station_);
 }
 
 void Fdd3000::stepStationForOneHostInstruction(uint32_t hostTstates)
@@ -627,6 +698,17 @@ std::string Fdd3000::debugCommand(const std::vector<std::string>& toks)
 	if (sub == "RESET") {
 		stationReset();
 		return "OK";
+	}
+
+	if (sub == "CHANGEDISK" && toks.size() >= 4) {
+		// In-process mirror of fdd3000_station's own CHANGEDISK -- only
+		// the bridge-mode half of insertDisk() was reachable live before
+		// this (via the bridge's own command channel); in-process had no
+		// equivalent runtime debug command, only the --fdd3000-disk-a/b/c/d
+		// startup flags. Real workflow (see stationReset()'s own comment):
+		// swap the disk, THEN RESET.
+		int drive = atoi(toks[2].c_str());
+		return insertDisk(drive, toks[3].c_str()) ? "OK" : "ERR insertDisk failed";
 	}
 
 	if (sub == "LINKTRACE") {

@@ -136,6 +136,10 @@ static std::vector<std::string> settingsToArgs(const json& root)
 		args.push_back("--fdd3000-serial2-port");
 		args.push_back(std::to_string(fdd3000["serial2Port"].get<int>()));
 	}
+	if (fdd3000.contains("monitorPort") && !fdd3000["monitorPort"].is_null()) {
+		args.push_back("--fdd3000-monitor-port");
+		args.push_back(std::to_string(fdd3000["monitorPort"].get<int>()));
+	}
 
 	const json& dbg = jObj(root, "debugging");
 	if (dbg.contains("debugPort") && !dbg["debugPort"].is_null()) {
@@ -208,7 +212,7 @@ static const char* const kKnownFlags[] = {
 	"--sdi8255", "--sdi8255-rom", "--sdi8255-bridge",
 	"--fdd3000", "--fdd3000-rom", "--fdd3000-station-rom",
 	"--fdd3000-disk-a", "--fdd3000-disk-b", "--fdd3000-disk-c", "--fdd3000-disk-d",
-	"--fdd3000-bridge", "--fdd3000-serial1-port", "--fdd3000-serial2-port",
+	"--fdd3000-bridge", "--fdd3000-serial1-port", "--fdd3000-serial2-port", "--fdd3000-monitor-port",
 	"--debug-port", "--poke", "--pc", "--out", "--trace-port",
 	"--debug-instrtrace", "--debug-iectrace", "--debug-iotrace", "--debug-fdd3000-linktrace",
 	"--debug-fdd3000-wdtrace",
@@ -497,6 +501,16 @@ static void printUsage(const char* argv0)
 		"                         only (no effect under --fdd3000-bridge).\n"
 		"                         Implies --fdd3000.\n"
 		"  --fdd3000-serial2-port PORT  same, for WD2123 CH2.\n"
+		"  --fdd3000-monitor-port PORT  src/MonitorLink.h as a local TCP\n"
+		"                         listener -- a native reimplementation of\n"
+		"                         the real Monitor Emulator's host-link\n"
+		"                         protocol, so a telnet client can act as\n"
+		"                         CP/M's console with no ZX Spectrum Z80\n"
+		"                         code or screen involved. Don't also run a\n"
+		"                         real Monitor program on the host CPU at\n"
+		"                         the same time -- both drive the same\n"
+		"                         link-byte latch. In-process mode only.\n"
+		"                         Implies --fdd3000.\n"
 		"\n"
 		"Debugging:\n"
 		"  --debug-port PORT      listen for the line-based debug protocol:\n"
@@ -919,6 +933,13 @@ int main(int argc, char *argv[])
 			minZX.getFdd3000()->setEnabled(true);
 			if (!minZX.getFdd3000()->setSerialPort(1, atoi(argv[++i]))) {
 				std::cerr << "FATAL: --fdd3000-serial2-port: failed to listen on " << argv[i] << std::endl;
+				exit(1);
+			}
+		}
+		else if (0 == strcmp(argv[i], "--fdd3000-monitor-port") && i + 1 < argc) {
+			minZX.getFdd3000()->setEnabled(true);
+			if (!minZX.getFdd3000()->setMonitorPort(atoi(argv[++i]))) {
+				std::cerr << "FATAL: --fdd3000-monitor-port: failed to listen on " << argv[i] << std::endl;
 				exit(1);
 			}
 		}

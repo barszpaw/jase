@@ -174,8 +174,8 @@ uint8_t FddStation::stationInPort(uint16_t port)
 		logLinkTrace("IN ", v);
 		return v;
 	}
-	case 2: return wd2123_.readChannel(1, (port & 0x01) != 0); // RS2 = WD2123 CH2, see Wd2123.h
-	case 4: return wd2123_.readChannel(0, (port & 0x01) != 0); // RS1 = WD2123 CH1
+	case 2: return wd2123_.readChannel(1, (port & 0x01) != 0); // RS2 = WD2123 CHB (#40/#41), see Wd2123.h
+	case 4: return wd2123_.readChannel(0, (port & 0x01) != 0); // RS1 = WD2123 CHA (#80/#81)
 	case 6: // WD1772 register window: C0=status/cmd, C1=track, C2=sector, C3=data
 		switch (port & 0x03) {
 		case 0: return wd_.readStatus();
@@ -183,9 +183,11 @@ uint8_t FddStation::stationInPort(uint16_t port)
 		case 2: return wd_.readSectorReg();
 		default: return wd_.readDataReg();
 		}
-	// Block 7 (config register) is write-only on real hardware. Block 0
-	// (RS3/WD2123 CTRL) is also write-only per the PLD. Idle-bus default
-	// for everything else, matching the real hardware's own undriven-port
+	// Block 7 (FDD3000 config register) and block 0 (RS3/WD2123 config,
+	// #10/#11) are both write-only, confirmed by independent sources (the
+	// PLD's own RS3 equation has no read term; loadzx.com's port map
+	// labels #10/#11 "(write)" explicitly). Idle-bus default for
+	// everything else, matching the real hardware's own undriven-port
 	// convention.
 	default: return 0xFF;
 	}
@@ -195,14 +197,14 @@ void FddStation::stationOutPort(uint16_t port, uint8_t value)
 {
 	int ioport = (port & 0xFF) >> 5;
 	switch (ioport) {
-	case 0: wd2123_.writeGlobalControl(value); break; // RS3 = WD2123 CTRL, see Wd2123.h
+	case 0: wd2123_.writeConfig(port & 0x01, value); break; // RS3 = WD2123 config, #10=CHA #11=CHB (see Wd2123.h)
 	case 1:
 		linkFromStation_ = value;
 		linkDirty_ = true; // unconditional -- see stationByteDirty()'s own comment
 		logLinkTrace("OUT", value);
 		break;
-	case 2: wd2123_.writeChannel(1, (port & 0x01) != 0, value); break; // RS2 = WD2123 CH2
-	case 4: wd2123_.writeChannel(0, (port & 0x01) != 0, value); break; // RS1 = WD2123 CH1
+	case 2: wd2123_.writeChannel(1, (port & 0x01) != 0, value); break; // RS2 = WD2123 CHB (#40/#41)
+	case 4: wd2123_.writeChannel(0, (port & 0x01) != 0, value); break; // RS1 = WD2123 CHA (#80/#81)
 	case 6:
 		switch (port & 0x03) {
 		case 0: wd_.writeCommand(value); break;
