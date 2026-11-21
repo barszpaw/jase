@@ -420,6 +420,13 @@ public:
 	{
 		error.clear();
 		items.clear();
+		// ".." zawsze widoczny -- Enter na nim zamyka caly obraz (w korzeniu)
+		// albo wychodzi z podkatalogu TOS (patrz App::run()'s own special-case
+		// check, obok Backspace robiacego to samo). Dodane po uzywaniu na
+		// zywo: samo Backspace bywa niewiarygodne miedzy terminalami/klientami,
+		// widoczny wpis jest odkrywalny i nie zalezy od tego, jaki kod klawisza
+		// terminal faktycznie wysyla.
+		items.push_back({"..", true, 0, false, false});
 		if (format == DiskFormat::Cpm) {
 			for (auto& d : cpmFs.list()) {
 				Entry e;
@@ -691,6 +698,17 @@ public:
 	// Backspace na korzeniu DskPanel (CP/M: zawsze; TOS: tylko gdy nie
 	// jest zagniezdzony w podkatalogu) zamyka obraz i wraca do widoku
 	// lokalnego katalogu, ktory go zawieral.
+	// Wspolna obsluga ".." (Enter na widocznym wpisie ".." w DskPanel) i
+	// Backspace: w korzeniu zamyka caly obraz, inaczej (TOS w
+	// podkatalogu) wychodzi jeden poziom wyzej.
+	void goUpOrCloseDisk(int slot)
+	{
+		auto* dp = dynamic_cast<DskPanel*>(panels[slot].get());
+		if (!dp) { panels[slot]->goUp(); return; }
+		if (dp->atRoot()) closeDisk(slot);
+		else dp->goUp();
+	}
+
 	void closeDisk(int slot)
 	{
 		auto* dp = dynamic_cast<DskPanel*>(panels[slot].get());
@@ -927,16 +945,21 @@ public:
 			else if (ch == '\n' || ch == '\r' || ch == KEY_ENTER) {
 				auto* lp = dynamic_cast<LocalPanel*>(activePanel());
 				const Entry* e = activePanel()->selected();
-				if (lp && e && !e->isDir && e->name != ".." && looksLikeDskFile(e->name)) {
+				if (e && e->name == ".." && dynamic_cast<DskPanel*>(activePanel())) {
+					// ".." w DskPanel -- zawsze widoczny wpis (patrz
+					// DskPanel::load()), ta sama akcja co Backspace, ale
+					// odkrywalna/klikalna przez Enter niezaleznie od tego,
+					// jaki kod klawisza Backspace faktycznie wysyla dany
+					// terminal/klient.
+					goUpOrCloseDisk(active);
+				} else if (lp && e && !e->isDir && e->name != ".." && looksLikeDskFile(e->name)) {
 					openDisk(active, lp->path + "/" + e->name);
 				} else if (!activePanel()->enter()) {
 					opView();
 				}
 			}
 			else if (ch == KEY_BACKSPACE || ch == 127 || ch == 263) {
-				auto* dp = dynamic_cast<DskPanel*>(activePanel());
-				if (dp && dp->atRoot()) closeDisk(active);
-				else activePanel()->goUp();
+				goUpOrCloseDisk(active);
 			}
 			else if (ch == 'r' || ch == KEY_F(2)) loadActive();
 			else if (ch == KEY_F(3)) opView();
