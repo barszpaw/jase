@@ -121,6 +121,17 @@ public:
 		return flush();
 	}
 
+	// Writes the in-memory image out as a genuine CPCEMU/Extended DSK
+	// container file, regardless of how THIS instance was loaded --
+	// unlike saveAs()/flush(), which deliberately preserve a raw image's
+	// original flat shape on write-back (see loadRaw()'s own comment),
+	// this is for the opposite, one-shot case: explicitly converting a
+	// raw image into a real container file (see tools/raw2dsk.cpp).
+	// Does not touch this instance's own path_/rawFormat_. Safe to call
+	// right after loadRaw() because that already leaves data_ holding a
+	// genuine synthesized Extended DSK buffer -- this just dumps it.
+	bool exportAsContainer(const std::string& path) const;
+
 private:
 	struct TrackInfo {
 		long dataOffset = -1; // offset of this track's 256-byte header in data_, -1 = not present

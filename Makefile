@@ -62,7 +62,15 @@ DSK_BROWSER_TARGET := tools/dsk_browser
 DSK_BROWSER_OBJS := tools/dsk_browser.o src/CpmFs.o src/TosFs.o src/DskImage.o
 DSK_BROWSER_LIBS := $(shell pkg-config --libs ncurses)
 
-.PHONY: all clean station write-test dsk-browser
+# raw2dsk (2026-11-22 -- see its own file comment): one-shot CLI converter
+# from a headerless raw dump into a real CPCEMU/Extended DSK container, so
+# JASE itself (which only ever calls DskImage::load(), never loadRaw())
+# can open what started out as a raw image, with no --raw/--format
+# switches needed in main.cpp/Wd1772Fsm at all.
+RAW2DSK_TARGET := tools/raw2dsk
+RAW2DSK_OBJS := tools/raw2dsk.o src/TosFs.o src/DskImage.o
+
+.PHONY: all clean station write-test dsk-browser raw2dsk
 
 all: $(TARGET) $(PLUGIN_KEMPSTON)
 
@@ -71,6 +79,8 @@ station: $(STATION_TARGET)
 write-test: $(WRITE_TEST_TARGET)
 
 dsk-browser: $(DSK_BROWSER_TARGET)
+
+raw2dsk: $(RAW2DSK_TARGET)
 
 $(TARGET): $(OBJS)
 	$(CXX) $(OBJS) -o $@ $(LIBS)
@@ -84,6 +94,9 @@ $(WRITE_TEST_TARGET): $(WRITE_TEST_OBJS)
 $(DSK_BROWSER_TARGET): $(DSK_BROWSER_OBJS)
 	$(CXX) $(DSK_BROWSER_OBJS) -o $@ $(DSK_BROWSER_LIBS)
 
+$(RAW2DSK_TARGET): $(RAW2DSK_OBJS)
+	$(CXX) $(RAW2DSK_OBJS) -o $@
+
 fdd3000_station/main.o: fdd3000_station/main.cpp
 	$(CXX) $(CXXFLAGS) $(STATION_INCLUDES) -c $< -o $@
 
@@ -91,6 +104,9 @@ tools/wd1772_write_test.o: tools/wd1772_write_test.cpp
 	$(CXX) $(CXXFLAGS) -Isrc -c $< -o $@
 
 tools/dsk_browser.o: tools/dsk_browser.cpp
+	$(CXX) $(CXXFLAGS) -Isrc -c $< -o $@
+
+tools/raw2dsk.o: tools/raw2dsk.cpp
 	$(CXX) $(CXXFLAGS) -Isrc -c $< -o $@
 
 %.o: %.cpp
@@ -119,3 +135,4 @@ clean:
 	rm -f fdd3000_station/main.o fdd3000_station/main.d $(STATION_TARGET)
 	rm -f tools/wd1772_write_test.o tools/wd1772_write_test.d $(WRITE_TEST_TARGET)
 	rm -f tools/dsk_browser.o tools/dsk_browser.d $(DSK_BROWSER_TARGET)
+	rm -f tools/raw2dsk.o tools/raw2dsk.d $(RAW2DSK_TARGET)

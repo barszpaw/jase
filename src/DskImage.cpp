@@ -272,6 +272,23 @@ bool DskImage::flush()
 	return true;
 }
 
+bool DskImage::exportAsContainer(const std::string& path) const
+{
+	if (data_.empty()) return false;
+	FILE* pf = fopen(path.c_str(), "wb");
+	if (!pf) {
+		fprintf(stderr, "DskImage::exportAsContainer: cannot open %s for writing\n", path.c_str());
+		return false;
+	}
+	size_t n = fwrite(data_.data(), 1, data_.size(), pf);
+	fclose(pf);
+	if (n != data_.size()) {
+		fprintf(stderr, "DskImage::exportAsContainer: short write on %s\n", path.c_str());
+		return false;
+	}
+	return true;
+}
+
 // Re-extracts the real sector bytes (in the same track-major/side-minor,
 // sequential-ID order loadRaw() read them in) out of the synthesized
 // Extended-DSK-shaped data_ and writes THAT flat dump to path_ -- the
