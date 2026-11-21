@@ -5,16 +5,31 @@
 bool TosFs::open(DskImage& dsk)
 {
 	if (!dsk.loaded()) return false;
-	if (dsk.numSides() != 1) return false; // only the 170/320KB single-sided shape, see class comment
+	if (dsk.numSides() != 1 && dsk.numSides() != 2) return false;
 	dsk_ = &dsk;
 	geo_ = Geometry();
+	geo_.numSides = dsk.numSides();
+	geo_.physicalReservedTracks = (geo_.numSides == 2) ? 2 : 4; // see class comment
 	return true;
 }
 
 uint8_t* TosFs::blockSector(int blockNumber, int sectorInBlock, int& len) const
 {
-	int unitsPerTrack = geo_.sectorsPerTrack / geo_.sectorsPerBlock; // 4
-	int track = geo_.reservedTracks + blockNumber / unitsPerTrack;
+	int unitsPerTrack = geo_.sectorsPerTrack / geo_.sectorsPerBlock; // 4, per side
+	if (geo_.numSides == 2) {
+		// Cylinder-interleaved: side alternates every physical track, same
+		// cylinder fully used (both sides) before stepping -- see class
+		// comment for how this was confirmed against a real 2-sided sample.
+		int unitsPerCylinder = unitsPerTrack * 2; // 8
+		int cylinder = blockNumber / unitsPerCylinder;
+		int rem = blockNumber % unitsPerCylinder;
+		int side = rem / unitsPerTrack;
+		int unitInTrack = rem % unitsPerTrack;
+		int track = geo_.physicalReservedTracks + cylinder;
+		int sectorId = unitInTrack * geo_.sectorsPerBlock + sectorInBlock;
+		return dsk_->findSector(track, side, sectorId, len);
+	}
+	int track = geo_.physicalReservedTracks + blockNumber / unitsPerTrack;
 	int unitInTrack = blockNumber % unitsPerTrack;
 	int sectorId = unitInTrack * geo_.sectorsPerBlock + sectorInBlock; // natural order, see class comment
 	return dsk_->findSector(track, 0, sectorId, len);
@@ -86,29 +101,40 @@ bool isDirRecord(const std::vector<uint8_t>& e)
 	return (e[9] & 0x7F) == 'D' && (e[10] & 0x7F) == 'I' && (e[11] & 0x7F) == 'R';
 }
 
-// R (byte14*256+byte15) and L (byte13) together give the exact file size --
-// see TosFs.h's own class comment for how this was cross-validated against
-// two real samples. `extents` must already be sorted by O (byte12).
-size_t computeFileSize(const std::vector<const std::vector<uint8_t>*>& extents)
+// Full CP/M-style extent number (S2<<5 | EX, not just EX) -- matters once a
+// file exceeds 32 extents (>512KB on this format), which none of this
+// project's own samples do, but matches the independent ~/src/TOStools
+// project's own `full_extent_no` exactly (cross-checked 2026-11-22, see
+// TosFs.h class comment), so there's no reason to cut the corner here.
+int fullExtentNo(const std::vector<uint8_t>& e) { return (e[14] << 5) | e[12]; }
+
+void sortByExtentNo(std::vector<const std::vector<uint8_t>*>& extents)
 {
-	size_t total = 0;
-	for (size_t i = 0; i < extents.size(); i++) {
-		const auto& e = *extents[i];
-		int r = (e[14] << 8) | e[15];
-		int numSectors = r / 2;
-		bool isLast = (i + 1 == extents.size());
-		if (!isLast) {
-			total += (size_t)numSectors * 256;
-		} else if (numSectors > 0) {
-			total += (size_t)(numSectors - 1) * 256;
-			int l = e[13];
-			total += (l == 0) ? 256 : (size_t)l; // L==0 on a real last extent is unconfirmed
-			                                       // against any sample (see class comment) --
-			                                       // treated as "last sector full" rather than
-			                                       // "zero real bytes", the only sane reading.
-		}
-	}
-	return total;
+	std::sort(extents.begin(), extents.end(), [](const std::vector<uint8_t>* a, const std::vector<uint8_t>* b) {
+		return fullExtentNo(*a) < fullExtentNo(*b);
+	});
+}
+
+// RC (byte15, standard CP/M-style 128-byte record count for THIS extent --
+// NOT a 2-byte field; byte14 is S2, part of the extent number above, see
+// TosFs.h's own class comment on how this was found wrong) and S1/L
+// (byte13, exact byte count in the file's last 256-byte sector) together
+// give the exact file size. Formula independently cross-checked against
+// ~/src/TOStools/tostools/formats.py's own `_calculate_final_size()`
+// (2026-11-22, user pointed at it): `(sum(rc) - 2)*128 + s1` when s1 != 0,
+// else `sum(rc)*128` -- algebraically identical to this function's own
+// per-extent running total, confirmed by hand. `extents` need not be
+// pre-sorted; this sorts its own local copy by full extent number to find
+// the real last one.
+size_t computeFileSize(std::vector<const std::vector<uint8_t>*> extents)
+{
+	sortByExtentNo(extents);
+	int totalRecords = 0;
+	for (auto* e : extents) totalRecords += (*e)[15];
+	if (totalRecords == 0) return 0;
+	int l = (*extents.back())[13];
+	if (l != 0) return (size_t)(totalRecords - 2) * 128 + (size_t)l;
+	return (size_t)totalRecords * 128;
 }
 
 } // namespace
@@ -128,7 +154,7 @@ std::vector<TosFs::DirEntry> TosFs::list(int userNumber) const
 	for (const auto& e : rawDir) {
 		if (e[0] == 0xE5) continue;   // deleted/unused
 		if (e[0] == 0xFF) continue;   // disk-name record, not a browsable entry
-		if ((int)e[0] != userNumber) continue;
+		if (((int)e[0] & 0x7F) != userNumber) continue; // mask bit7 -- see class comment
 
 		std::string name = decodeName(e.data());
 		auto it = std::find_if(files.begin(), files.end(),
@@ -172,38 +198,112 @@ bool TosFs::readFile(const std::string& name, int userNumber, std::vector<uint8_
 	std::vector<const std::vector<uint8_t>*> extents;
 	for (const auto& e : rawDir) {
 		if (e[0] == 0xE5 || e[0] == 0xFF) continue;
-		if ((int)e[0] != userNumber) continue;
+		if (((int)e[0] & 0x7F) != userNumber) continue; // mask bit7 -- see class comment
 		if (isDirRecord(e)) continue;
 		if (!matchesName(e.data(), normalized)) continue;
 		extents.push_back(&e);
 	}
 	if (extents.empty()) return false;
+	sortByExtentNo(extents);
 
-	std::sort(extents.begin(), extents.end(), [](const std::vector<uint8_t>* a, const std::vector<uint8_t>* b) {
-		return (*a)[12] < (*b)[12]; // O, extent/sequence number
-	});
-
+	// Read every sector actually ALLOCATED to each extent (RC rounded up,
+	// not down -- see class comment/computeFileSize()'s own, for why this
+	// matters if RC is ever odd), then trim to the exact size at the end.
+	// Matches ~/src/TOStools's own read_file_content()'s approach (read
+	// every allocation_blocks entry in full, slice to size_in_bytes after)
+	// rather than trying to compute a precise per-sector cutoff while
+	// reading, which is what this function did before and is more fragile.
 	out.clear();
-	for (size_t i = 0; i < extents.size(); i++) {
-		const auto& e = *extents[i];
-		int r = (e[14] << 8) | e[15];
-		int numSectors = r / 2;
-		bool isLast = (i + 1 == extents.size());
-
+	for (auto* ePtr : extents) {
+		const auto& e = *ePtr;
+		int rc = e[15];
+		int numSectors = (rc + 1) / 2; // round up
 		for (int s = 0; s < numSectors; s++) {
 			int unit = e[16 + s / geo_.sectorsPerBlock];
 			int sectorInUnit = s % geo_.sectorsPerBlock;
 			int len = 0;
 			uint8_t* p = blockSector(unit, sectorInUnit, len);
 			if (!p) return false;
-
-			size_t realBytes = (size_t)len;
-			if (isLast && s == numSectors - 1) {
-				int l = e[13];
-				realBytes = (l == 0) ? (size_t)len : std::min((size_t)l, (size_t)len);
-			}
-			out.insert(out.end(), p, p + realBytes);
+			out.insert(out.end(), p, p + len);
 		}
 	}
+
+	size_t exact = computeFileSize(extents);
+	if (exact < out.size()) out.resize(exact);
+	return true;
+}
+
+bool TosFs::writeRawDirectoryEntry(int entryIndex, const uint8_t bytes[32])
+{
+	int entriesPerSector = geo_.sectorSize / 32;
+	int sectorIndex = entryIndex / entriesPerSector;
+	int offsetInSector = (entryIndex % entriesPerSector) * 32;
+	int len = 0;
+	uint8_t* p = logicalSector(sectorIndex, len);
+	if (!p || offsetInSector + 32 > len) return false;
+	memcpy(p + offsetInSector, bytes, 32);
+	return true;
+}
+
+bool TosFs::deleteFile(const std::string& name, int userNumber)
+{
+	if (!isWritableGeometry()) return false;
+	std::string normalized = normalizeName(name);
+	auto rawDir = readRawDirectory();
+
+	bool any = false;
+	for (size_t i = 0; i < rawDir.size(); i++) {
+		if (rawDir[i][0] == 0xE5 || rawDir[i][0] == 0xFF) continue;
+		if (((int)rawDir[i][0] & 0x7F) != userNumber) continue;
+		if (isDirRecord(rawDir[i])) continue; // F8 deletes FILES; rmdir needs its own
+		                                        // emptiness-check convention, not
+		                                        // confirmed against any real sample
+		if (!matchesName(rawDir[i].data(), normalized)) continue;
+		uint8_t entry[32];
+		memcpy(entry, rawDir[i].data(), 32);
+		entry[0] = 0xE5;
+		if (!writeRawDirectoryEntry((int)i, entry)) return false;
+		any = true;
+	}
+	if (!any) return false;
+	return dsk_->flush();
+}
+
+bool TosFs::createDirectory(const std::string& name, int parentUserNumber, int& outDirNumber)
+{
+	if (!isWritableGeometry()) return false;
+	std::string normalized = normalizeName(name);
+	auto rawDir = readRawDirectory();
+
+	int freeEntry = -1;
+	int maxD = 0;
+	for (size_t i = 0; i < rawDir.size(); i++) {
+		const auto& e = rawDir[i];
+		if (e[0] == 0xE5) { if (freeEntry < 0) freeEntry = (int)i; continue; }
+		if (e[0] == 0xFF) continue;
+		if (!isDirRecord(e)) continue;
+		if (e[16] > maxD) maxD = e[16];
+		if (((int)e[0] & 0x7F) == parentUserNumber && matchesName(e.data(), normalized)) {
+			return false; // already exists under this parent
+		}
+	}
+	if (freeEntry < 0) return false; // directory full
+
+	int newD = maxD + 1;
+	if (newD > 0x7F) return false; // would collide with the bit7 flag -- see class comment
+
+	uint8_t entry[32] = {};
+	entry[0] = (uint8_t)parentUserNumber;
+	memcpy(entry + 1, normalized.data(), 11);
+	// ext must be the literal text "DIR" per the format, regardless of
+	// whatever normalizeName() computed from the caller's own name string.
+	entry[9] = 'D';
+	entry[10] = 'I';
+	entry[11] = 'R';
+	entry[16] = (uint8_t)newD;
+
+	if (!writeRawDirectoryEntry(freeEntry, entry)) return false;
+	if (!dsk_->flush()) return false;
+	outDirNumber = newD;
 	return true;
 }

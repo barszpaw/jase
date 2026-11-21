@@ -342,30 +342,34 @@ enum class DiskFormat { Unknown, Cpm, Tos };
 
 static DiskFormat detectDiskFormat(DskImage& dsk)
 {
-	// Obie biblioteki (CpmFs, TosFs) sa zweryfikowane TYLKO dla
-	// jednostronnych 170KB obrazow (40 tracks x 1 side) -- patrz ich
-	// wlasne komentarze klas. Dwustronne gestosci (np. 620KB, 80 tracks
-	// x 2 sides -- znaleziony real-world przypadek: "CPM 525.dsk", ktory
-	// zanim ten guard istnial, falszywie dopasowywal sie jako CP/M na
-	// przypadkowych bajtach danych, pokazujac smieci zamiast bledu) NIE
-	// MAJA zweryfikowanego katalogu/translate table -- odrzucane tutaj
-	// explicite, zamiast ryzykowac falszywe dopasowanie na nieznanej
-	// geometrii.
-	if (dsk.numSides() != 1) return DiskFormat::Unknown;
-
-	// TOS: wpis "nazwa dysku" NA ściezce 4 ZAWSZE istnieje jako pierwszy
-	// wpis (K=0xFF, ext="DIR") -- silny, specyficzny sygnał (patrz
-	// src/TosFs.h). Sprawdzony pierwszy.
+	// TOS: wpis "nazwa dysku" ZAWSZE istnieje jako pierwszy wpis katalogu
+	// (K=0xFF, ext="DIR") -- silny, specyficzny sygnał (patrz
+	// src/TosFs.h). Na dysku jednostronnym katalog jest na sciezce 4; na
+	// "gestym" (2-stronnym, np. 620/640KB) 4 LOGICZNE zarezerwowane
+	// ściezki to tylko 2 FIZYCZNE ściezki (strony sie przeplatają) --
+	// katalog wtedy jest na fizycznej sciezce 2/stronie 0, potwierdzone
+	// zywo na realnym dwustronnym dysku TOS ("CPM tos a2 start cpm
+	// 525.dsk"). TosFs::open() samo wybiera wlasciwa geometrie na
+	// podstawie numSides().
 	{
+		int dirTrack = (dsk.numSides() == 2) ? 2 : 4;
 		int len = 0;
-		uint8_t* e = dsk.findSector(4, 0, 0, len);
+		uint8_t* e = dsk.findSector(dirTrack, 0, 0, len);
 		if (e && len >= 32 && e[0] == 0xFF &&
 		    (e[9] & 0x7F) == 'D' && (e[10] & 0x7F) == 'I' && (e[11] & 0x7F) == 'R') {
 			return DiskFormat::Tos;
 		}
 	}
-	// CP/M: brak gwarantowanej pozycji, więc szukamy JEDNEGO sensownego
-	// wpisu gdziekolwiek w 16 fizycznych sektorach ścieżki 2 (kolejność
+	// CP/M: jednostronne 170KB jest jedyna zweryfikowana geometria (patrz
+	// CpmFs.h's own class comment) -- dwustronne gestosci maja
+	// NIEZNANY uklad katalogu/translate table, wiec nie ma tu nic
+	// sensownego do sprawdzenia; odrzucone explicite, zamiast ryzykowac
+	// falszywe dopasowanie na przypadkowych bajtach danych (zdarzyło się
+	// realnie -- "CPM 525.dsk" pokazywało smieciowy listing zanim ten
+	// guard istnial).
+	if (dsk.numSides() != 1) return DiskFormat::Unknown;
+	// Brak gwarantowanej pozycji, więc szukamy JEDNEGO sensownego wpisu
+	// gdziekolwiek w 16 fizycznych sektorach ścieżki 2 (kolejność
 	// nieważna -- patrz CpmFs.h's own class comment: wizyta wszystkich 16
 	// sektorów w DOWOLNYM porządku i tak znajdzie te same wpisy).
 	for (int sec = 0; sec < 16; sec++) {
@@ -425,7 +429,15 @@ public:
 	}
 
 	bool atRoot() const { return format != DiskFormat::Tos || userStack.size() <= 1; }
-	bool isReadOnly() const { return format == DiskFormat::Tos; }
+	// CP/M jest zawsze R/W (zweryfikowane). TOS jest R/W TYLKO na
+	// zweryfikowanej 1-stronnej geometrii -- TosFs sama odmawia
+	// delete/mkdir na 2-stronnej (patrz TosFs.h's own class comment),
+	// zwraca tu to samo zamiast duplikowac regule.
+	bool isReadOnly() const
+	{
+		if (format == DiskFormat::Tos) return !tosFs.isWritableGeometry();
+		return false;
+	}
 
 	void load() override
 	{
@@ -506,7 +518,19 @@ public:
 	bool deleteFile(const std::string& name)
 	{
 		if (format == DiskFormat::Cpm) return cpmFs.deleteFile(name);
-		return false; // TOS: tylko odczyt
+		if (format == DiskFormat::Tos) return tosFs.deleteFile(name, userStack.back());
+		return false;
+	}
+
+	// F7: mkdir. Tylko TOS ma podkatalogi -- CP/M 2.2 nie, wiec wywolujacy
+	// (App::opMkdir()) musi sam sprawdzic format przed pokazaniem dialogu.
+	bool createDirectory(const std::string& name)
+	{
+		if (format != DiskFormat::Tos) return false;
+		int newD = 0;
+		if (!tosFs.createDirectory(name, userStack.back(), newD)) return false;
+		load();
+		return true;
 	}
 };
 
@@ -518,8 +542,8 @@ static void drawFkeys(int screenH, int screenW)
 	clrtoeol();
 	struct FKey { const char* key; const char* label; };
 	static const FKey keys[] = {
-		{"Ins", "Zaznacz"}, {"F2", "Odswiez"}, {"F3", "Podglad"},
-		{"F5", "Kopiuj"}, {"F8", "Usun(dsk)"}, {"Tab", "Panel"}, {"F10", "Wyjscie"},
+		{"Ins", "Zaznacz"}, {"F2", "Odswiez"}, {"F3", "Podglad"}, {"F5", "Kopiuj"},
+		{"F7", "Mkdir(tos)"}, {"F8", "Usun(dsk)"}, {"Tab", "Panel"}, {"F10", "Wyjscie"},
 	};
 	int n = (int)(sizeof(keys) / sizeof(keys[0]));
 	int x = 0;
@@ -841,7 +865,15 @@ public:
 
 	void copyLocalToDsk(LocalPanel* src, DskPanel* dst)
 	{
-		if (dst->isReadOnly()) { status("TOS jest tylko do odczytu w tej przegladarce.", true); return; }
+		// Pisanie NOWEGO pliku to inna operacja niz delete/mkdir (ponizej,
+		// isReadOnly()) -- wymagaloby budowania poprawnych pol O/L/R/A, co
+		// nie jest tu zaimplementowane dla TOS niezaleznie od geometrii
+		// (w przeciwienstwie do delete/mkdir, ktore sa teraz wspierane na
+		// zweryfikowanej 1-stronnej geometrii).
+		if (dst->format == DiskFormat::Tos) {
+			status("Zapis NOWEGO pliku na TOS nie jest wspierany (delete/mkdir tak -- F7/F8).", true);
+			return;
+		}
 
 		std::vector<Entry> toCopy = src->getMarked();
 		if (toCopy.empty()) {
@@ -916,6 +948,25 @@ public:
 		return out;
 	}
 
+	// F7: mkdir -- tylko TOS ma podkatalogi w ogole; CP/M 2.2 nie, wiec
+	// zawsze blokowane tam niezaleznie od isReadOnly().
+	void opMkdir()
+	{
+		auto* dp = dynamic_cast<DskPanel*>(activePanel());
+		if (!dp) { status("F7 tworzy podkatalog tylko w panelu obrazu .dsk.", true); return; }
+		if (dp->format != DiskFormat::Tos) { status("Podkatalogi istnieja tylko na TOS (CP/M 2.2 ich nie ma).", true); return; }
+		if (dp->isReadOnly()) { status("TOS jest tylko do odczytu w tej przegladarce.", true); return; }
+		bool ok = false;
+		std::string name = dialogInput("Nazwa nowego podkatalogu:", "", ok);
+		if (!ok || name.empty()) return;
+		if (!dp->createDirectory(name)) {
+			status("Nie udalo sie utworzyc podkatalogu \"" + name + "\" (juz istnieje lub katalog pelny).", true);
+			return;
+		}
+		status("Utworzono podkatalog \"" + name + "\".");
+		redraw();
+	}
+
 	void opDelete()
 	{
 		auto* dp = dynamic_cast<DskPanel*>(activePanel());
@@ -980,6 +1031,7 @@ public:
 			else if (ch == 'r' || ch == KEY_F(2)) loadActive();
 			else if (ch == KEY_F(3)) opView();
 			else if (ch == KEY_F(5)) opCopy();
+			else if (ch == KEY_F(7)) opMkdir();
 			else if (ch == KEY_F(8)) opDelete();
 			else if (ch == KEY_RESIZE) resizeLayout();
 		}

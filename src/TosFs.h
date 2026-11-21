@@ -77,10 +77,34 @@
 // independently verified against a real sample with actual nesting
 // (FUN, D=2, contains GAMES, K=2/D=4) -- not just the article's description.
 //
-// 320KB/640KB densities: NOT implemented. The article describes a
-// genuinely different side-interleaving convention for the dense (640KB,
-// 80-track double-sided) format that would need its own real sample to
-// verify, same discipline as CpmFs's own 340/620KB caveat.
+// 640KB "dense" (80-track, 2-sided) density: CONFIRMED 2026-11-22 against a
+// real sample (`CPM tos a2 start cpm 525.dsk`, a 2-sided TOS disk that also
+// boots CP/M) -- the article's own "napęd gęsty numeruje naprzemiennie obie
+// strony dyskietki" (dense drive numbers both sides alternately) means the
+// article's "4 reserved tracks" are 4 LOGICAL units, not 4 physical tracks:
+// on a 2-sided disk that's only 2 PHYSICAL tracks (each holding 2 logical
+// units' worth via its 2 sides), so the directory sits at PHYSICAL track 2,
+// side 0 -- confirmed live (found the mandatory disk-name record exactly
+// there, nowhere else checked). Allocation units cylinder-interleave the
+// same way past the directory: unit 0-3 = track R/side0 (R=physicalReserved
+// Tracks), unit 4-7 = track R/side1, unit 8-11 = track R+1/side0, etc. --
+// i.e. side alternates every physical track, same cylinder fully used
+// before stepping (same convention CpmFs's own class comment speculates
+// for CP/M's still-unconfirmed 2-sided densities, now independently
+// confirmed true for TOS specifically). Verified by reading real files
+// through this mapping and getting plausible, non-garbage content.
+//
+// Found and fixed one more real bug while verifying this sample: a
+// subdirectory's own K byte (which subdirectory it's nested inside) can
+// have bit7 set -- this disk's real "GAMES" entry (nested inside "FUN",
+// FUN's own D=4) has K=0x84, not 0x04. Bit7 here is almost certainly a
+// "this subdirectory is hidden" flag, by analogy with a file's own E[0]/
+// E[1] bit7 flags -- but regardless of its exact meaning, every K
+// comparison MUST mask it off (`& 0x7F`) before comparing to a
+// userNumber/parent filter, or entries nested inside a bit7-flagged
+// subdirectory silently vanish from their own parent's listing. The two
+// originally-checked 170KB samples never exercised this (no subdirectory
+// there has bit7 set), which is why it went unnoticed until this one.
 class TosFs
 {
 public:
@@ -95,9 +119,17 @@ public:
 	};
 
 	// Binds to an already-loaded DskImage. Returns false if the geometry
-	// doesn't match (currently: only the 170KB/320KB single-density
-	// 40-track-1-side shape is handled -- see class comment).
+	// doesn't match (currently: 170/320KB single-sided and 640KB 2-sided
+	// are handled -- see class comment).
 	bool open(DskImage& dsk);
+
+	// True if this disk's geometry only supports reading (640KB 2-sided
+	// write-path allocation/layout isn't independently verified the way
+	// the 1-sided write path is -- see CpmFs.h's own discipline on
+	// unconfirmed densities). writeFile()/deleteFile() etc. check this
+	// themselves; exposed so callers (e.g. the browser UI) can show an
+	// accurate read-only indicator without duplicating the rule.
+	bool isWritableGeometry() const { return geo_.numSides == 1; }
 
 	// Lists entries whose K byte equals `userNumber` (0 = root) -- this IS
 	// "entering a subdirectory" per the article: no page/track navigation,
@@ -106,9 +138,23 @@ public:
 
 	bool readFile(const std::string& name, int userNumber, std::vector<uint8_t>& out) const;
 
+	// Write support -- ONLY for the 1-sided geometry (see
+	// isWritableGeometry()'s own comment); returns false immediately
+	// otherwise, same discipline as CpmFs's own blocks16bit refusal.
+	// Deletes a FILE (not a subdirectory -- rmdir isn't implemented, no
+	// real sample to confirm an emptiness-check convention against).
+	bool deleteFile(const std::string& name, int userNumber);
+	// Creates a new, empty subdirectory named `name` inside `parentUserNumber`
+	// (0 = root). Picks the lowest D number not already used anywhere on the
+	// disk (matching how every real sample's D values are small and appear
+	// densely packed from 1 up) and a free directory slot. Returns the new
+	// subdirectory's own D number via `outDirNumber` on success.
+	bool createDirectory(const std::string& name, int parentUserNumber, int& outDirNumber);
+
 private:
 	struct Geometry {
-		int reservedTracks = 4;
+		int numSides = 1;
+		int physicalReservedTracks = 4; // 4 for 1-sided (track 4); 2 for 2-sided (track 2, see class comment)
 		int sectorsPerTrack = 16;
 		int sectorSize = 256;
 		int blockSize = 1024;
@@ -125,6 +171,7 @@ private:
 	uint8_t* blockSector(int blockNumber, int sectorInBlock, int& len) const;
 
 	std::vector<std::vector<uint8_t>> readRawDirectory() const;
+	bool writeRawDirectoryEntry(int entryIndex, const uint8_t bytes[32]);
 	static std::string decodeName(const uint8_t entry[32]);
 	static bool matchesName(const uint8_t entry[32], const std::string& normalized11);
 	static std::string normalizeName(const std::string& name);
