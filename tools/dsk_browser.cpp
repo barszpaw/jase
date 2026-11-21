@@ -1,32 +1,43 @@
 // dsk_browser -- dwupanelowa (Midnight Commander-style) przeglądarka
-// R/W dla obrazów .dsk CP/M 2.2, stylizowana na
+// R/W dla obrazów .dsk CP/M i (tylko odczyt) Timex TOS, stylizowana na
 // /home/pawelb/src/tnfsd_v2/tnfs_server/gopher_browser.py (ten sam
-// układ: lewy panel = lokalny filesystem, prawy panel = zdalny/obcy
-// filesystem, Tab przełącza panel, Insert/Ctrl-T zaznacza wiele
-// pozycji, F5 kopiuje między panelami, F3 podgląd, F2 odśwież, F10/q
-// wyjście) -- zbudowana na już istniejącej, zweryfikowanej żywym
-// bootem realnego CP/M bibliotece src/CpmFs.h/.cpp (patrz jej własny
-// komentarz klasy co do DPB/translate table -- 2026-11-21).
+// układ: Tab przełącza panel, Insert/Ctrl-T zaznacza wiele pozycji, F5
+// kopiuje między panelami, F3 podgląd, F2 odśwież, F10/q wyjście).
 //
-// ZAKRES (2026-11-21): tylko CP/M -- TOS (inny filesystem na tych
-// samych obrazach .dsk, patrz docs/FDD3000/tos_bez_tajemnic.html) NIE
-// jest tu zaimplementowany; DskPanel poniżej jest napisana tak, by
-// łatwo dało się dodać analogiczny "TosPanel" później, ale robienie
-// tego teraz byłoby zgadywaniem bez realnego sample'a do zweryfikowania
-// (ta sama zasada co przy CpmFs -- patrz jej komentarz).
+// 2026-11-21 REDESIGN (user-directed): obie strony startują jako
+// zwykłe panele LOKALNE -- Enter na pliku ".dsk" w DOWOLNYM panelu
+// OTWIERA jego zawartość w tym samym miejscu (auto-detekcja formatu
+// CP/M vs TOS), zamiast wymagać ścieżki .dsk jako argumentu CLI z
+// jednym panelem na trwałe przypisanym do obrazu.
 //
-// CP/M 2.2 nie ma podkatalogów -- DskPanel jest więc płaska (brak ".."),
-// inaczej niż LocalPanel/GopherPanel w oryginale.
+// Format auto-detekcja: TOS ma OBOWIĄZKOWY pierwszy wpis katalogu
+// (ścieżka 4, sektor 0) z K=0xFF i ext="DIR" (nazwa dysku -- patrz
+// src/TosFs.h), sprawdzany jako pierwszy, silny sygnał. CP/M nie ma
+// takiej gwarancji na konkretnej pozycji, więc jego sprawdzenie skanuje
+// wszystkie 16 sektorów ścieżki 2 (w KOLEJNOŚCI FIZYCZNEJ, bez translate
+// table -- wystarczy znaleźć JEDEN sensowny wpis, dokładnie ta sama
+// obserwacja co w CpmFs's own class comment: odwiedzenie wszystkich 16
+// sektorów w dowolnej kolejności znajdzie te samo wpisy).
+//
+// TOS "katalogi" (patrz src/TosFs.h) to nie nawigacja po ścieżkach --
+// to zmiana filtra "numeru użytkownika" nad tym samym, jedynym
+// katalogiem. Enter na wpisie <DIR> w panelu TOS wchodzi (push), Backspace
+// wychodzi (pop); Backspace w korzeniu zamyka obraz z powrotem do
+// widoku lokalnego (tak samo jak Backspace na CP/M, który jest płaski
+// i zawsze "w korzeniu").
+//
+// CP/M ma pełny odczyt/zapis (CpmFs, już zweryfikowana żywym bootem).
+// TOS jest TYLKO DO ODCZYTU -- TosFs nie implementuje zapisu (żaden
+// realny sampel do zweryfikowania formatu zapisu, patrz jej własny
+// komentarz klasy), F5 Lokalny->TOS i F8 na TOS zwracają błąd statusu
+// zamiast cokolwiek próbować.
 //
 // Każdy writeFile()/deleteFile() w CpmFs sam robi DskImage::flush() --
 // nie ma tu osobnego kroku "Zapisz", każda operacja od razu trwale
-// trafia do pliku .dsk na dysku (ten sam model co fdd3000_station's
-// SAVEDISK, tyle że bez kroku "Save As": ten browser operuje od razu
-// na podanej ścieżce .dsk).
-//
-// Użycie: dsk_browser obraz.dsk
+// trafia do pliku .dsk na dysku.
 
 #include "../src/CpmFs.h"
+#include "../src/TosFs.h"
 #include "../src/DskImage.h"
 
 #include <ncurses.h>
@@ -37,6 +48,7 @@
 #include <cstring>
 #include <algorithm>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -46,7 +58,7 @@ struct Entry {
 	std::string name;
 	bool isDir = false;
 	long size = 0;
-	bool readOnly = false;
+	bool readOnly = false; // CP/M R/O attribute, or TOS "protected" attribute
 	bool system = false;
 };
 
@@ -74,6 +86,14 @@ static bool programExists(const std::string& name)
 {
 	std::string cmd = "command -v " + name + " >/dev/null 2>&1";
 	return system(cmd.c_str()) == 0;
+}
+
+static bool looksLikeDskFile(const std::string& name)
+{
+	if (name.size() < 4) return false;
+	std::string ext = name.substr(name.size() - 4);
+	std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+	return ext == ".dsk";
 }
 
 // ── Panel bazowy (uproszczony odpowiednik Panel z gopher_browser.py) ────
@@ -232,8 +252,9 @@ public:
 class LocalPanel : public Panel
 {
 public:
-	explicit LocalPanel(WINDOW* w) : Panel(w, "Lokalny")
+	explicit LocalPanel(WINDOW* w, const std::string& startPath = "") : Panel(w, "Lokalny")
 	{
+		if (!startPath.empty()) { path = startPath; return; }
 		const char* home = getenv("HOME");
 		path = home ? home : "/";
 	}
@@ -279,6 +300,10 @@ public:
 		pruneMarks();
 	}
 
+	// Enter na katalogu zmienia panel (true); Enter na ".dsk" NIE jest
+	// obsłużone tutaj (App::run() sprawdza to przed wywołaniem enter(),
+	// żeby mogło zamienić caly panel na DskPanel) -- zwykły plik zwraca
+	// false (podgląd, jak dotąd).
 	bool enter() override
 	{
 		const Entry* e = selected();
@@ -311,36 +336,160 @@ public:
 	}
 };
 
-// ── Panel obrazu .dsk (CP/M, plaski -- bez podkatalogow) ─────────────────
+// ── Auto-detekcja formatu .dsk (CP/M vs TOS) ─────────────────────────────
 
+enum class DiskFormat { Unknown, Cpm, Tos };
+
+static DiskFormat detectDiskFormat(DskImage& dsk)
+{
+	// TOS: wpis "nazwa dysku" NA ściezce 4 ZAWSZE istnieje jako pierwszy
+	// wpis (K=0xFF, ext="DIR") -- silny, specyficzny sygnał (patrz
+	// src/TosFs.h). Sprawdzony pierwszy.
+	{
+		int len = 0;
+		uint8_t* e = dsk.findSector(4, 0, 0, len);
+		if (e && len >= 32 && e[0] == 0xFF &&
+		    (e[9] & 0x7F) == 'D' && (e[10] & 0x7F) == 'I' && (e[11] & 0x7F) == 'R') {
+			return DiskFormat::Tos;
+		}
+	}
+	// CP/M: brak gwarantowanej pozycji, więc szukamy JEDNEGO sensownego
+	// wpisu gdziekolwiek w 16 fizycznych sektorach ścieżki 2 (kolejność
+	// nieważna -- patrz CpmFs.h's own class comment: wizyta wszystkich 16
+	// sektorów w DOWOLNYM porządku i tak znajdzie te same wpisy).
+	for (int sec = 0; sec < 16; sec++) {
+		int len = 0;
+		uint8_t* p = dsk.findSector(2, 0, sec, len);
+		if (!p) continue;
+		for (int off = 0; off + 32 <= len; off += 32) {
+			uint8_t* e = p + off;
+			if (e[0] == 0xE5) continue;
+			if (e[0] > 0x1F) continue; // CP/M user number 0-15 (0-31 na niektorych systemach)
+			bool printable = true;
+			for (int i = 1; i <= 11; i++) {
+				uint8_t c = e[i] & 0x7F;
+				if (c < 0x20 || c > 0x7E) { printable = false; break; }
+			}
+			if (printable) return DiskFormat::Cpm;
+		}
+	}
+	return DiskFormat::Unknown;
+}
+
+// ── Panel obrazu .dsk (CP/M R/W, lub TOS tylko-do-odczytu) ───────────────
+//
+// TOS "katalogi" nie są nawigacją po ściezkach -- to zmiana wartości
+// filtra userStack_.back() nad tym samym, jedynym katalogiem (patrz
+// src/TosFs.h). atRoot() odróżnia "Backspace wyjdź z podkatalogu" od
+// "Backspace zamknij obraz", obsłużone w App::run().
 class DskPanel : public Panel
 {
 public:
-	CpmFs& fs;
-	explicit DskPanel(WINDOW* w, CpmFs& fsRef, const std::string& dskPath)
-		: Panel(w, "CP/M"), fs(fsRef)
+	DskImage dsk;
+	DiskFormat format = DiskFormat::Unknown;
+	CpmFs cpmFs;
+	TosFs tosFs;
+	std::vector<int> userStack{0}; // tylko TOS -- stos numerow user/subdir
+
+	explicit DskPanel(WINDOW* w, const std::string& dskPath) : Panel(w, "Dysk")
 	{
 		path = dskPath;
 	}
+
+	bool openDisk(std::string& errOut)
+	{
+		if (!dsk.load(path)) { errOut = "Nie udalo sie wczytac obrazu."; return false; }
+		format = detectDiskFormat(dsk);
+		if (format == DiskFormat::Cpm) {
+			if (!cpmFs.open(dsk)) { errOut = "CpmFs::open nieudane."; return false; }
+			title = "CP/M";
+		} else if (format == DiskFormat::Tos) {
+			if (!tosFs.open(dsk)) { errOut = "TosFs::open nieudane (geometria?)."; return false; }
+			title = "TOS";
+		} else {
+			errOut = "Nierozpoznany format .dsk (ani CP/M, ani TOS).";
+			return false;
+		}
+		return true;
+	}
+
+	bool atRoot() const { return format != DiskFormat::Tos || userStack.size() <= 1; }
+	bool isReadOnly() const { return format == DiskFormat::Tos; }
 
 	void load() override
 	{
 		error.clear();
 		items.clear();
-		for (auto& d : fs.list()) {
-			Entry e;
-			e.name = d.name;
-			e.isDir = false;
-			e.size = (long)d.sizeBytes;
-			e.readOnly = d.readOnly;
-			e.system = d.system;
-			items.push_back(e);
+		if (format == DiskFormat::Cpm) {
+			for (auto& d : cpmFs.list()) {
+				Entry e;
+				e.name = d.name;
+				e.size = (long)d.sizeBytes;
+				e.readOnly = d.readOnly;
+				e.system = d.system;
+				items.push_back(e);
+			}
+		} else if (format == DiskFormat::Tos) {
+			for (auto& d : tosFs.list(userStack.back())) {
+				Entry e;
+				e.name = d.name;
+				e.isDir = d.isDir;
+				e.size = (long)d.sizeBytes;
+				e.readOnly = d.protected_;
+				items.push_back(e);
+			}
 		}
 		pruneMarks();
 	}
 
-	bool enter() override { return false; } // plaski -- Enter na pliku = podglad (obsluzone w App)
-	void goUp() override {}                  // nic nad plaska lista
+	// TOS: Enter na <DIR> zmienia filtr (true). CP/M: zawsze plaskie (false).
+	bool enter() override
+	{
+		if (format != DiskFormat::Tos) return false;
+		const Entry* e = selected();
+		if (!e || !e->isDir) return false;
+		// Odszukaj D (numer wlasny podkatalogu) tego wpisu ponownie --
+		// Entry nie przechowuje go, wiec pytamy TosFs o liste jeszcze raz.
+		for (auto& d : tosFs.list(userStack.back())) {
+			if (d.name == e->name && d.isDir) {
+				userStack.push_back(d.dirNumber);
+				load();
+				cursor = offset = 0;
+				return true;
+			}
+		}
+		return false;
+	}
+
+	// Wyjscie z podkatalogu TOS (nie uzywane dla CP/M -- atRoot() jest
+	// tam zawsze true, App::run() od razu zamyka obraz).
+	void goUp() override
+	{
+		if (format == DiskFormat::Tos && userStack.size() > 1) {
+			userStack.pop_back();
+			load();
+			cursor = offset = 0;
+		}
+	}
+
+	bool readFile(const std::string& name, std::vector<uint8_t>& out)
+	{
+		if (format == DiskFormat::Cpm) return cpmFs.readFile(name, out);
+		if (format == DiskFormat::Tos) return tosFs.readFile(name, userStack.back(), out);
+		return false;
+	}
+
+	bool writeFile(const std::string& name, const std::vector<uint8_t>& data)
+	{
+		if (format == DiskFormat::Cpm) return cpmFs.writeFile(name, data);
+		return false; // TOS: tylko odczyt
+	}
+
+	bool deleteFile(const std::string& name)
+	{
+		if (format == DiskFormat::Cpm) return cpmFs.deleteFile(name);
+		return false; // TOS: tylko odczyt
+	}
 };
 
 // ── Stopka F-klawiszy / status ───────────────────────────────────────────
@@ -455,15 +604,19 @@ static std::string dialogInput(const std::string& prompt, const std::string& def
 class App
 {
 public:
-	Panel* panels[2];
+	std::unique_ptr<Panel> panels[2];
 	int active = 0;
 	std::string statusMsg;
 	bool statusError = false;
 
-	App(Panel* left, Panel* right) { panels[0] = left; panels[1] = right; }
+	App(std::unique_ptr<Panel> left, std::unique_ptr<Panel> right)
+	{
+		panels[0] = std::move(left);
+		panels[1] = std::move(right);
+	}
 
-	Panel* activePanel() { return panels[active]; }
-	Panel* otherPanel() { return panels[1 - active]; }
+	Panel* activePanel() { return panels[active].get(); }
+	Panel* otherPanel() { return panels[1 - active].get(); }
 
 	void status(const std::string& msg, bool err = false)
 	{
@@ -513,6 +666,44 @@ public:
 		doupdate();
 	}
 
+	// Enter na ".dsk" w panelu lokalnym zamienia TEN panel na DskPanel
+	// (zachowuje WINDOW*, wiec layout sie nie zmienia). Niepowodzenie
+	// (format nierozpoznany / wczytanie nieudane) zostawia panel lokalny
+	// bez zmian, z komunikatem bledu w statusie.
+	void openDisk(int slot, const std::string& dskPath)
+	{
+		WINDOW* win = panels[slot]->win;
+		auto dp = std::make_unique<DskPanel>(win, dskPath);
+		std::string err;
+		if (!dp->openDisk(err)) {
+			status("Nie udalo sie otworzyc " + dskPath + ": " + err, true);
+			return;
+		}
+		panels[slot] = std::move(dp);
+		panels[slot]->loading = true;
+		redraw();
+		panels[slot]->loading = false;
+		panels[slot]->load();
+		status("Otworzono " + dskPath + " (" + static_cast<DskPanel*>(panels[slot].get())->title + ")");
+		redraw();
+	}
+
+	// Backspace na korzeniu DskPanel (CP/M: zawsze; TOS: tylko gdy nie
+	// jest zagniezdzony w podkatalogu) zamyka obraz i wraca do widoku
+	// lokalnego katalogu, ktory go zawieral.
+	void closeDisk(int slot)
+	{
+		auto* dp = dynamic_cast<DskPanel*>(panels[slot].get());
+		if (!dp) return;
+		size_t lastSlash = dp->path.find_last_of('/');
+		std::string parentDir = (lastSlash == std::string::npos) ? "." : dp->path.substr(0, lastSlash);
+		WINDOW* win = dp->win;
+		auto lp = std::make_unique<LocalPanel>(win, parentDir);
+		panels[slot] = std::move(lp);
+		panels[slot]->load();
+		redraw();
+	}
+
 	void opView()
 	{
 		const Entry* e = activePanel()->selected();
@@ -525,7 +716,7 @@ public:
 		}
 		if (auto* dp = dynamic_cast<DskPanel*>(p)) {
 			std::vector<uint8_t> data;
-			if (!dp->fs.readFile(e->name, data)) {
+			if (!dp->readFile(e->name, data)) {
 				status("Nie udalo sie odczytac " + e->name + " z obrazu.", true);
 				return;
 			}
@@ -552,12 +743,8 @@ public:
 	}
 
 	// F5: kopiuj. Kierunek wynika z typow paneli -- Lokalny->Dsk = zapis
-	// do obrazu CP/M, Dsk->Lokalny = odczyt z obrazu. Inne kombinacje
-	// (Dsk<->Dsk, Lokalny<->Lokalny) nie sa tu sensowne -- ten browser
-	// laczy jeden realny .dsk z jednym katalogiem hosta, nie dwa obrazy
-	// naraz, w przeciwienstwie do gopher_browser.py, ktory moglby miec
-	// dwa zdalne panele teoretycznie (tu architektura to wyklucza: jest
-	// tylko jeden CpmFs na caly proces).
+	// na obraz (tylko CP/M -- TOS odrzuca), Dsk->Lokalny = odczyt z
+	// obrazu (oba formaty).
 	void opCopy()
 	{
 		Panel* src = activePanel();
@@ -569,25 +756,29 @@ public:
 
 		if (srcDsk && dstLocal) { copyDskToLocal(srcDsk, dstLocal); return; }
 		if (srcLocal && dstDsk) { copyLocalToDsk(srcLocal, dstDsk); return; }
-		status("F5 kopiuje tylko miedzy panelem Lokalnym i CP/M.", true);
+		status("F5 kopiuje tylko miedzy panelem Lokalnym i panelem obrazu .dsk.", true);
 	}
 
 	void copyDskToLocal(DskPanel* src, LocalPanel* dst)
 	{
-		// Pary (nazwa_na_obrazie, nazwa_docelowa_lokalna) -- odczyt z CP/M
-		// idzie ZAWSZE po pierwszej, zapis lokalny po drugiej, nigdy nie
-		// mieszane (wczesniejsza wersja nadpisywala jedyna nazwe przy
-		// zmianie nazwy docelowej, gubiac informacje potrzebna do
-		// readFile() -- naprawione).
+		// Pary (nazwa_na_obrazie, nazwa_docelowa_lokalna) -- odczyt z
+		// obrazu idzie ZAWSZE po pierwszej, zapis lokalny po drugiej,
+		// nigdy nie mieszane.
 		std::vector<std::pair<std::string, std::string>> pairs;
 		std::vector<Entry> marked = src->getMarked();
 		if (!marked.empty()) {
+			std::vector<Entry> files;
+			for (auto& e : marked) if (!e.isDir) files.push_back(e);
+			if (files.size() != marked.size())
+				status("Podkatalogi TOS w zaznaczeniu zostaly pominiete (kopiowanie nie jest rekurencyjne).");
+			marked = files;
+			if (marked.empty()) { redraw(); return; }
 			std::string label = std::to_string(marked.size()) + " zaznaczonych pozycji";
 			if (!dialogConfirm("Pobrac " + label + "?")) return;
 			for (auto& e : marked) pairs.push_back({e.name, e.name}); // bez zmiany nazwy
 		} else {
 			const Entry* e = src->selected();
-			if (!e || e->name == "..") return;
+			if (!e || e->name == ".." || e->isDir) return;
 			bool ok = false;
 			std::string dstName = dialogInput("Pobierz \"" + e->name + "\" jako:", e->name, ok);
 			if (!ok || dstName.empty()) return;
@@ -598,7 +789,7 @@ public:
 		std::vector<std::string> errors;
 		for (auto& [origName, localName] : pairs) {
 			std::vector<uint8_t> data;
-			if (!src->fs.readFile(origName, data)) { errors.push_back(origName + ": blad odczytu"); continue; }
+			if (!src->readFile(origName, data)) { errors.push_back(origName + ": blad odczytu"); continue; }
 			std::string fullPath = dst->path + "/" + localName;
 			FILE* f = fopen(fullPath.c_str(), "wb");
 			if (!f) { errors.push_back(localName + ": " + strerror(errno)); continue; }
@@ -616,20 +807,21 @@ public:
 
 	void copyLocalToDsk(LocalPanel* src, DskPanel* dst)
 	{
+		if (dst->isReadOnly()) { status("TOS jest tylko do odczytu w tej przegladarce.", true); return; }
+
 		std::vector<Entry> toCopy = src->getMarked();
 		if (toCopy.empty()) {
 			const Entry* e = src->selected();
 			if (!e || e->name == ".." || e->isDir) {
-				if (e && e->isDir) status("Kopiowanie katalogow na CP/M nie jest wspierane (brak podkatalogow w CP/M).", true);
+				if (e && e->isDir) status("Kopiowanie katalogow na obraz nie jest wspierane.", true);
 				return;
 			}
 			toCopy.push_back(*e);
 		} else {
-			// Odfiltruj katalogi z zaznaczenia -- CP/M nie ma podkatalogow.
 			std::vector<Entry> files;
 			for (auto& e : toCopy) if (!e.isDir) files.push_back(e);
 			if (files.size() != toCopy.size())
-				status("Katalogi w zaznaczeniu zostaly pominiete (brak podkatalogow w CP/M).");
+				status("Katalogi w zaznaczeniu zostaly pominiete.");
 			toCopy = files;
 			if (toCopy.empty()) { redraw(); return; }
 			std::string label = std::to_string(toCopy.size()) + " zaznaczonych pozycji";
@@ -642,7 +834,7 @@ public:
 		for (auto& e : toCopy) {
 			std::string dstName = e.name;
 			if (renamePrompt) {
-				std::string suggested = CpmFs_suggestName(e.name);
+				std::string suggested = suggestCpmName(e.name);
 				bool ok = false;
 				dstName = dialogInput("Zapisz \"" + e.name + "\" na obrazie jako:", suggested, ok);
 				if (!ok || dstName.empty()) return;
@@ -660,7 +852,7 @@ public:
 				data.resize(got);
 			}
 			fclose(f);
-			if (!dst->fs.writeFile(dstName, data)) {
+			if (!dst->writeFile(dstName, data)) {
 				errors.push_back(dstName + ": zapis nieudany (nazwa juz istnieje, dysk pelny, lub nieobslugiwana gestosc)");
 				continue;
 			}
@@ -675,9 +867,8 @@ public:
 	}
 
 	// Sugestia nazwy 8.3 dla pliku lokalnego (CpmFs::normalizeName() i
-	// tak to wymusi przy zapisie -- to tylko podglad w dialogu, zebysmy
-	// nie prosili o nazwe, ktora i tak zostanie uciêta po cichu).
-	static std::string CpmFs_suggestName(const std::string& localName)
+	// tak to wymusi przy zapisie -- to tylko podglad w dialogu).
+	static std::string suggestCpmName(const std::string& localName)
 	{
 		std::string base = localName, ext;
 		size_t dot = localName.find_last_of('.');
@@ -694,7 +885,8 @@ public:
 	void opDelete()
 	{
 		auto* dp = dynamic_cast<DskPanel*>(activePanel());
-		if (!dp) { status("F8 usuwa tylko z obrazu CP/M (panel aktywny musi byc CP/M).", true); return; }
+		if (!dp) { status("F8 usuwa tylko z panelu obrazu .dsk.", true); return; }
+		if (dp->isReadOnly()) { status("TOS jest tylko do odczytu w tej przegladarce.", true); return; }
 		std::vector<Entry> toDelete = dp->getMarked();
 		if (toDelete.empty()) {
 			const Entry* e = dp->selected();
@@ -705,7 +897,7 @@ public:
 			: std::to_string(toDelete.size()) + " zaznaczonych pozycji";
 		if (!dialogConfirm("Usunac " + label + " z obrazu?")) return;
 		int done = 0;
-		for (auto& e : toDelete) if (dp->fs.deleteFile(e.name)) done++;
+		for (auto& e : toDelete) if (dp->deleteFile(e.name)) done++;
 		dp->marked.clear();
 		status("Usunieto " + std::to_string(done) + "/" + std::to_string(toDelete.size()) + " plik(ow).");
 		dp->load();
@@ -733,9 +925,19 @@ public:
 			else if (ch == KEY_HOME) activePanel()->goFirst();
 			else if (ch == KEY_END) activePanel()->goLast();
 			else if (ch == '\n' || ch == '\r' || ch == KEY_ENTER) {
-				if (!activePanel()->enter()) opView();
+				auto* lp = dynamic_cast<LocalPanel*>(activePanel());
+				const Entry* e = activePanel()->selected();
+				if (lp && e && !e->isDir && e->name != ".." && looksLikeDskFile(e->name)) {
+					openDisk(active, lp->path + "/" + e->name);
+				} else if (!activePanel()->enter()) {
+					opView();
+				}
 			}
-			else if (ch == KEY_BACKSPACE || ch == 127 || ch == 263) activePanel()->goUp();
+			else if (ch == KEY_BACKSPACE || ch == 127 || ch == 263) {
+				auto* dp = dynamic_cast<DskPanel*>(activePanel());
+				if (dp && dp->atRoot()) closeDisk(active);
+				else activePanel()->goUp();
+			}
 			else if (ch == 'r' || ch == KEY_F(2)) loadActive();
 			else if (ch == KEY_F(3)) opView();
 			else if (ch == KEY_F(5)) opCopy();
@@ -764,22 +966,11 @@ static void initColors()
 
 int main(int argc, char** argv)
 {
-	if (argc < 2) {
-		fprintf(stderr, "uzycie: %s obraz.dsk\n", argv[0]);
-		return 1;
-	}
-	std::string dskPath = argv[1];
-
-	DskImage dsk;
-	if (!dsk.load(dskPath)) {
-		fprintf(stderr, "dsk_browser: nie udalo sie wczytac %s\n", dskPath.c_str());
-		return 1;
-	}
-	CpmFs fs;
-	if (!fs.open(dsk)) {
-		fprintf(stderr, "dsk_browser: %s nie wyglada na obraz CP/M (CpmFs::open nieudane)\n", dskPath.c_str());
-		return 1;
-	}
+	// Argument .dsk opcjonalny teraz -- jesli podany, prawy panel od
+	// razu otwiera sie na nim (wygoda), ale oba panele zaczynaja jako
+	// lokalne i kazdy plik ".dsk" w DOWOLNYM panelu da sie otworzyc
+	// przez Enter.
+	std::string initialDsk = argc > 1 ? argv[1] : "";
 
 	initscr();
 	initColors();
@@ -792,12 +983,29 @@ int main(int argc, char** argv)
 	WINDOW* lwin = newwin(sh - 2, pw, 0, 0);
 	WINDOW* rwin = newwin(sh - 2, sw - pw, 0, pw);
 
-	LocalPanel left(lwin);
-	DskPanel right(rwin, fs, dskPath);
+	auto left = std::make_unique<LocalPanel>(lwin);
+	std::unique_ptr<Panel> right;
+	if (!initialDsk.empty()) {
+		auto dp = std::make_unique<DskPanel>(rwin, initialDsk);
+		std::string err;
+		if (dp->openDisk(err)) {
+			right = std::move(dp);
+		} else {
+			endwin();
+			fprintf(stderr, "dsk_browser: nie udalo sie otworzyc %s: %s\n", initialDsk.c_str(), err.c_str());
+			return 1;
+		}
+	} else {
+		right = std::make_unique<LocalPanel>(rwin);
+	}
 
-	App app(&left, &right);
+	App app(std::move(left), std::move(right));
 	app.run();
 
+	// Oba panele moglys byc wymieniane w trakcie dzialania (Lokalny <->
+	// DskPanel), ale WINDOW* jest przekazywany dalej, nigdy tworzony na
+	// nowo -- te dwa wskazniki (lwin/rwin, nie app.panels[i]->win per se,
+	// choc aktualnie zawsze te same) sa jedynymi, ktore trzeba zwolnic.
 	delwin(lwin);
 	delwin(rwin);
 	endwin();

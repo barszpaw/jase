@@ -59,7 +59,7 @@ WRITE_TEST_OBJS := tools/wd1772_write_test.o src/Wd1772Fsm.o src/DskImage.o
 # dual-pane R/W browser for CP/M .dsk images, built on CpmFs/DskImage.
 # No SDL/MinZX dependency; needs libncurses-dev (ncurses pkg-config module).
 DSK_BROWSER_TARGET := tools/dsk_browser
-DSK_BROWSER_OBJS := tools/dsk_browser.o src/CpmFs.o src/DskImage.o
+DSK_BROWSER_OBJS := tools/dsk_browser.o src/CpmFs.o src/TosFs.o src/DskImage.o
 DSK_BROWSER_LIBS := $(shell pkg-config --libs ncurses)
 
 .PHONY: all clean station write-test dsk-browser
