@@ -194,9 +194,19 @@ def recv_cstring(conn, maxlen=255):
     return bytes(buf)
 
 
-def encode_entry(name, ft, index):
+def encode_entry(name, ft, index, raw_case=False):
     name_field = name[:NAME_LEN]
-    if name_field:
+    # Case-folded to Title Case, matching the real ListChapter()'s own
+    # documented behavior (see this function's class-level comment) --
+    # real FAT filenames arrive either ALL-CAPS (8.3 short names) or
+    # already mixed-case, and the firmware normalizes either way rather
+    # than showing them as typed on disk. raw_case=True skips this for
+    # names that were never a real filename to begin with (e.g. the
+    # synthetic "ONLINE" entry, a server name from servers.cfg, or a real
+    # mixed-case game title from zxds.py -- would otherwise fold to things
+    # like "Zx aaa demos" or "Xevious [28:7.1]" losing its bracket text's
+    # case).
+    if name_field and not raw_case:
         name_field = name_field[0].upper() + name_field[1:].lower()
     name_bytes = name_field.encode('ascii', errors='replace').ljust(NAME_LEN, b'\x00')
     return bytes([ft]) + name_bytes + bytes([0x00]) + struct.pack('<H', index & 0xFFFF)

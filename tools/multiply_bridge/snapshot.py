@@ -218,13 +218,33 @@ class Snapshot:
     def block(self, c):
         """The bytes for block c (1-10, see SendSNA/SendZ80's own
         numbering) -- 9 is the header itself, handled by callers via
-        self.header directly rather than through here."""
+        self.header directly rather than through here.
+
+        The real Z80-side loader always requests blocks 1-8 unconditionally,
+        regardless of whether the snapshot is 16K/48K/128K -- it only reads
+        the gametype byte (from the header, block 9) to decide where to
+        PAGE each block's data once received, not to decide how many
+        blocks to ask for. Real firmware's SendZ80() (libZ80.ino) matches
+        this: for a 48K/16K request, `page` is initialized to 8 (RAM bank
+        5) and only overridden for c==2/c==3 -- so c==4..8 fall through
+        and silently RESEND bank 5's data again, same shape (full
+        SNABLKSIZE, not the c==1 CHUNKSIZE-short truncation) a found page
+        at c==2/3 would have gotten. Previously this returned b'' for
+        c-1 >= len(self.order) (e.g. c=4 on a 48K snapshot, order has only
+        3 entries) -- a REAL, confirmed-live bug: the Z80 side's receive
+        routine blocks forever waiting for bytes that an empty reply never
+        delivers, exactly the hang class documented elsewhere in this
+        package (GETINFO/GETDIR). Falling back to order[0] (bank 5, same
+        as c==1) for any out-of-range c matches the real firmware's
+        observable behavior -- the CONTENT of these extra blocks is
+        irrelevant (the Z80 side already knows from the header's gametype
+        byte that there's nowhere meaningful to page them), only the byte
+        COUNT matters for the transfer protocol to stay in sync."""
         if c == 10:
             data = self.pages.get(self.order[0], b'\x00' * SNABLKSIZE)
             return data[SNABLKSIZE - CHUNKSIZE:SNABLKSIZE]
         if 1 <= c <= 8:
-            if c - 1 >= len(self.order):
-                return b''  # no such block at this snapshot size (e.g. c=4 on a 48K snapshot)
-            data = self.pages.get(self.order[c - 1], b'\x00' * SNABLKSIZE)
+            bank = self.order[c - 1] if c - 1 < len(self.order) else self.order[0]
+            data = self.pages.get(bank, b'\x00' * SNABLKSIZE)
             return data[:SNABLKSIZE - CHUNKSIZE] if c == 1 else data
         return b''

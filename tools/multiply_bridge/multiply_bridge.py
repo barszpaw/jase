@@ -43,10 +43,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Multiply bridge for JASE's Multiply peripheral")
     parser.add_argument('--tcp-port', type=int, default=9701)
     parser.add_argument('--basedir', required=True, help="directory to serve as the virtual SD card root")
+    parser.add_argument('--online-cache', default=None,
+                         help="enable the online ONLINE/ directory (see zxds.py; requires the "
+                              "'requests' package) -- all servers listed in servers.cfg, downloads "
+                              "cached in this directory")
     args = parser.parse_args()
 
     print(f"=== Multiply Bridge v{VERSION} ===")
     print(f"SD card root: {os.path.abspath(args.basedir)}")
+    if args.online_cache:
+        print(f"ONLINE directory: enabled, caching in {os.path.abspath(args.online_cache)}")
 
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -57,7 +63,7 @@ def main() -> None:
     while True:
         conn, addr = srv.accept()
         print(f"\n*** Client connected from {addr}.")
-        session = Session(args.basedir)
+        session = Session(args.basedir, online_cache_dir=args.online_cache)
         try:
             handle_client(conn, session)
         except ConnectionError:

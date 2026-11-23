@@ -10,33 +10,38 @@
 import struct
 
 import protocol as proto
-from virtual_sdcard import VirtualSDCard
-from snapshot import Snapshot
+from virtual_sdcard import VirtualSDCard, ONLINE_ROOT, ONLINE_FILE_PREFIX
+from snapshot import Snapshot, parse_z80, parse_sna
 from tap import TapPlayer
 
 
 class Session:
-    def __init__(self, root):
-        self.sdcard = VirtualSDCard(root)
+    def __init__(self, root, online_cache_dir=None):
+        self.sdcard = VirtualSDCard(root, online_cache_dir=online_cache_dir)
         self.hw_type = 3  # SETZXTYPE default assumption: 128K-capable
         self.open_path = None  # path opened by the most recent OFREAD/OFREAD_IX
         self.open_data = None  # that file's full contents, read once at open time
         self.snapshot = None   # Snapshot, built lazily when a SNA/Z80 command's block 9 is requested
         self.tap = None        # TapPlayer, built lazily when CMD_ZX2SD_TAP first reads open_data
+        self.scr_data = None   # 6912-byte screen preview, built lazily by SCR_FROM_Z80/SCR_FROM_SNA
 
     def open_file(self, path):
         """path=None (or unreadable) clears the open file -- callers pass
-        whatever VirtualSDCard.resolve()/an entry's .path gave them."""
+        whatever VirtualSDCard.resolve()/an entry's .path gave them, which
+        local_path_for() resolves to a real path (downloading+caching
+        first if it's an ONLINE reference -- see virtual_sdcard.py)."""
         self.open_path = None
         self.open_data = None
         self.snapshot = None
         self.tap = None
-        if not path:
+        self.scr_data = None
+        local_path = self.sdcard.local_path_for(path)
+        if not local_path:
             return
         try:
-            with open(path, 'rb') as f:
+            with open(local_path, 'rb') as f:
                 self.open_data = f.read()
-            self.open_path = path
+            self.open_path = local_path
         except OSError:
             pass
 
@@ -95,7 +100,8 @@ def _handle_ls_relative(conn, session):
     entries = session.sdcard.list_entries()
     print(f"[LS_RELATIVE] {session.sdcard.cwd}: {len(entries)} entries")
     for index, entry in enumerate(entries):
-        conn.sendall(proto.encode_entry(entry.name, entry.ft, index))
+        is_online = entry.path.startswith(ONLINE_ROOT) or entry.path.startswith(ONLINE_FILE_PREFIX)
+        conn.sendall(proto.encode_entry(entry.name, entry.ft, index, raw_case=is_online))
     conn.sendall(proto.encode_chapter_terminator(len(entries)))
 
 
@@ -128,6 +134,63 @@ def _handle_scr(conn, session):
         start = (block - 1) * proto.SCR_BLKSIZE
         conn.sendall(session.open_data[start:start + proto.SCR_BLKSIZE])
     print(f"[SCR] block={block} from {session.open_path}")
+
+
+def _handle_scr_from_z80(conn, session):
+    # CMD_ZX2SD_SCR_FROM_Z80 -- the file browser's title-screen preview for
+    # a .Z80 snapshot, requested block-by-block (nbloque=1..16, 432 bytes
+    # each -- SCR_SIZE/SCR_BLKSIZE=6912/432=16) BEFORE the user has chosen
+    # to actually load the file. Previously an unimplemented stub (payload
+    # consumed, no reply) -- a real, confirmed-live hang: the ROM's receive
+    # routine blocks forever the instant a .Z80 file is merely selected in
+    # the browser, not just on an explicit load -- this was also the
+    # "random"/inconsistent Z80-loading symptom, since whether this hang
+    # was hit first depended on exactly which keys/timing got you there.
+    #
+    # Real firmware's SendSCRZ80() (libSCR.ino) always searches the Z80
+    # file's own block table for PAGE NUMBER 8 -- "4000-7FFF page 5" is a
+    # FIXED Z80-file-format convention (not a 48K/128K hardware fact): a
+    # snapshot's screen bank is always page 8 in the file's own numbering,
+    # regardless of whether the snapshot is ultimately a 16K/48K/128K one.
+    # parse_z80()'s 48K/16K page_to_bank table already maps page 8 -> bank
+    # 5 correctly (its 128K table maps page 8 -> bank 0 instead, correct
+    # for an actual LOAD's paging but wrong for finding the screen) -- so
+    # this always calls parse_z80() with a non-128K req_type, purely to
+    # reuse that mapping, independent of what the file will eventually be
+    # loaded as.
+    nbloque = proto.recv_exact(conn, 1)[0]
+    if nbloque == 1 or session.scr_data is None:
+        try:
+            _, pages = parse_z80(session.open_data or b'', proto.CMD_ZX2SD_Z80_48K)
+            session.scr_data = pages.get(5, b'\x00' * proto.SCR_SIZE)[:proto.SCR_SIZE]
+        except (IndexError, struct.error):
+            session.scr_data = b'\x00' * proto.SCR_SIZE
+    start = (nbloque - 1) * proto.SCR_BLKSIZE
+    conn.sendall(session.scr_data[start:start + proto.SCR_BLKSIZE])
+    print(f"[SCR_FROM_Z80] block={nbloque} from {session.open_path}")
+
+
+def _handle_scr_from_sna(conn, session):
+    # CMD_ZX2SD_SCR_FROM_SNA -- same idea as SCR_FROM_Z80 above, for .SNA
+    # files. Real firmware's SendSCRSNA() has a special case for 128K
+    # "shadow screen" snapshots (hw_type bit3 set + a specific #7FFD paged
+    # bank) that reads the screen from a DIFFERENT bank than the normal
+    # bank 5 -- NOT implemented here (a documented simplification, not a
+    # hang: parse_sna()'s own pages[5] -- correct for the overwhelmingly
+    # common non-shadow case -- is used unconditionally instead). Was
+    # ALSO a stub before this fix, same hang shape as SCR_FROM_Z80.
+    nbloque = proto.recv_exact(conn, 1)[0]
+    if nbloque == 1 or session.scr_data is None:
+        try:
+            is_128k = len(session.open_data or b'') > proto.SNA_48K_SIZE
+            req_type = proto.CMD_ZX2SD_SNA_128K if is_128k else proto.CMD_ZX2SD_SNA_48K
+            _, pages = parse_sna(session.open_data or b'', req_type)
+            session.scr_data = pages.get(5, b'\x00' * proto.SCR_SIZE)[:proto.SCR_SIZE]
+        except (IndexError, struct.error):
+            session.scr_data = b'\x00' * proto.SCR_SIZE
+    start = (nbloque - 1) * proto.SCR_BLKSIZE
+    conn.sendall(session.scr_data[start:start + proto.SCR_BLKSIZE])
+    print(f"[SCR_FROM_SNA] block={nbloque} from {session.open_path}")
 
 
 def _handle_snapshot(conn, session, req_type, is_z80):
@@ -171,8 +234,12 @@ def _handle_getinfo(conn, session):
         print(f"[GETINFO] {ix} out of range or a directory -- no reply (matches real firmware)")
         return
     entry = entries[ix]
+    local_path = session.sdcard.local_path_for(entry.path)
+    if not local_path:
+        print(f"[GETINFO] {ix} ({entry.name!r}) failed to open/download -- no reply")
+        return
     try:
-        with open(entry.path, 'rb') as f:
+        with open(local_path, 'rb') as f:
             data = f.read(38)
     except OSError:
         print(f"[GETINFO] {ix} ({entry.name!r}) failed to open -- no reply")
@@ -247,6 +314,10 @@ def handle_client(conn, session):
             _handle_ls_relative(conn, session)
         elif cmd == proto.CMD_ZX2SD_SCR:
             _handle_scr(conn, session)
+        elif cmd == proto.CMD_ZX2SD_SCR_FROM_Z80:
+            _handle_scr_from_z80(conn, session)
+        elif cmd == proto.CMD_ZX2SD_SCR_FROM_SNA:
+            _handle_scr_from_sna(conn, session)
         elif cmd in (proto.CMD_ZX2SD_SNA_48K, proto.CMD_ZX2SD_SNA_128K):
             _handle_snapshot(conn, session, cmd, is_z80=False)
         elif cmd in (proto.CMD_ZX2SD_Z80_16K, proto.CMD_ZX2SD_Z80_48K, proto.CMD_ZX2SD_Z80_128K):

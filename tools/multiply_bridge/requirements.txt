@@ -1,0 +1,3 @@
+# Only needed for the optional ZXDB online directory (zxdb.py, --zxdb-cache).
+# Everything else in this package is pure stdlib.
+requests
