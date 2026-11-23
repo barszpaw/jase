@@ -112,24 +112,32 @@
 // above (`TosTimex` = this file's 170KB; `TosTimex640` = the 640KB dense
 // shape -- modulo one discrepancy, see Preset::TosTimex640's own comment).
 // The other two (`TosTimex320`/`TosTimex320Alt`, two DIFFERENT physical
-// layouts for the same 320KB nominal capacity) are NOT independently
-// verified here -- no real sample of either exists in this repo. Their
-// geometry numbers (reserved tracks, dirEntries) are taken from that
-// table as a reasonable starting point, but their SECTOR ORDERING uses
-// this file's own confirmed natural-order convention, NOT that table's
-// own `generate_xlt_table(16, skew=7)` -- that function implements the
-// exact same skew=7 FORMULA this project's CpmFs.cpp once wrongly
-// assumed for CP/M (found wrong by live memory dump, see CpmFs.h's own
-// class comment) and never independently verified for TOS either (that
+// layouts for the same 320KB nominal capacity) originally had no real
+// sample in this repo. Their geometry numbers (reserved tracks, dirEntries)
+// are taken from that table as a reasonable starting point, but their
+// SECTOR ORDERING uses this file's own confirmed natural-order convention,
+// NOT that table's own `generate_xlt_table(16, skew=7)` -- that function
+// implements the exact same skew=7 FORMULA this project's CpmFs.cpp once
+// wrongly assumed for CP/M (found wrong by live memory dump, see CpmFs.h's
+// own class comment) and never independently verified for TOS either (that
 // tool's own `main_cli()` only ever prints directory listings, which
 // -- as this project's own CP/M saga demonstrated -- can look completely
 // correct while the underlying sector mapping is wrong, since listing
 // doesn't exercise translate-table correctness the way reading real file
 // content does). Natural order is this file's OWN independently-verified
 // convention (confirmed by reading real, named, plausible file content on
-// two different real disks); used here as the more trustworthy default
-// for the two unverified presets too, rather than inheriting an
-// unverified assumption from elsewhere.
+// two different real disks).
+//
+// 2026-11-23: `TosTimex320Alt` is now ALSO independently verified, against
+// a real raw image (`~/src/TOStools/bajtek1_side_ab.img`, 327680 bytes,
+// loaded via DskImage::loadRaw() + tools/raw2dsk) -- `openWithPreset(...,
+// TosTimex320Alt)` reads a perfectly legible listing (4 real subdirectories,
+// 10 real files, sane names/sizes). `TosTimex320` (80 tracks, 1 side) was
+// tried against the SAME raw bytes first and produced garbage, which is
+// what settled the ambiguity (both presets claim the same 327680-byte total
+// size, so file size alone can't distinguish them) -- this does NOT mean
+// TosTimex320 itself is wrong, only that this particular sample isn't one;
+// it remains unverified, no real sample of that exact geometry found yet.
 class TosFs
 {
 public:
@@ -145,9 +153,9 @@ public:
 
 	// Named geometry presets, for manual override when auto-detection
 	// fails or guesses wrong (see dsk_browser.cpp's own format-choice
-	// dialog). TosTimex/TosTimex640 are independently verified (see class
-	// comment); TosTimex320/TosTimex320Alt are NOT -- best-effort from an
-	// external reference table, no real sample to check against.
+	// dialog). TosTimex/TosTimex640/TosTimex320Alt are independently
+	// verified (see class comment); TosTimex320 is NOT -- best-effort from
+	// an external reference table, no real sample to check against yet.
 	enum class Preset { TosTimex, TosTimex640, TosTimex320, TosTimex320Alt };
 	static const char* presetName(Preset p);
 	static const char* presetDescription(Preset p);

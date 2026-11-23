@@ -36,7 +36,7 @@ const char* TosFs::presetDescription(Preset p)
 		case Preset::TosTimex320:
 			return "NIEZWERYFIKOWANY -- parametry z zewnetrznego narzedzia (~/src/TOStools), brak realnej probki.";
 		case Preset::TosTimex320Alt:
-			return "NIEZWERYFIKOWANY -- parametry z zewnetrznego narzedzia (~/src/TOStools), brak realnej probki.";
+			return "Zweryfikowany na realnym obrazie raw (bajtek1_side_ab.img, 40 sciezek, 2 strony).";
 	}
 	return "";
 }
@@ -58,7 +58,8 @@ TosFs::Geometry TosFs::geometryForPreset(Preset preset)
 			break;
 		case Preset::TosTimex320Alt:
 			// 40 tracks, 2 sides -- per that same table's 'tos-timex-320-alt'
-			// entry (boottrk=4, maxdir=64). UNVERIFIED, see class comment.
+			// entry (boottrk=4, maxdir=64). VERIFIED 2026-11-23 against a
+			// real raw sample (bajtek1_side_ab.img), see class comment.
 			g.numSides = 2; g.physicalReservedTracks = 4; g.dirEntries = 64;
 			break;
 	}
