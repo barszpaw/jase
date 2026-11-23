@@ -31,10 +31,19 @@
 
 bool DskImage::load(const std::string& path)
 {
-	data_.clear();
-	tracks_.clear();
-	numTracks_ = numSides_ = 0;
-	path_.clear();
+	// Builds the new state entirely in LOCAL variables and only commits to
+	// this instance's own fields on full success (2026-11-23 -- found live:
+	// the old version cleared data_/tracks_/path_ UNCONDITIONALLY before
+	// even trying to open the new file, so a failed re-insert -- e.g. the
+	// backing file got moved out from under a running station via the OSD
+	// menu -- silently wiped out a perfectly good, already-loaded disk
+	// instead of leaving it untouched. That's indistinguishable from a real
+	// medium failure to the station's own firmware, which is exactly what
+	// produced a genuine "Hardware fault on disk ..." from TOS afterward).
+	// Any early return below leaves *this completely unchanged.
+	std::vector<uint8_t> newData;
+	std::vector<TrackInfo> newTracks;
+	int newNumTracks = 0, newNumSides = 0;
 
 	FILE* pf = fopen(path.c_str(), "rb");
 	if (!pf) {
@@ -49,95 +58,97 @@ bool DskImage::load(const std::string& path)
 		fclose(pf);
 		return false;
 	}
-	data_.resize((size_t)size);
-	size_t n = fread(data_.data(), 1, (size_t)size, pf);
+	newData.resize((size_t)size);
+	size_t n = fread(newData.data(), 1, (size_t)size, pf);
 	fclose(pf);
 	if (n != (size_t)size) {
 		fprintf(stderr, "DskImage::load: short read on %s\n", path.c_str());
-		data_.clear();
 		return false;
 	}
 
 	bool extended;
-	if (memcmp(data_.data(), "EXTENDED CPC DSK", 16) == 0) {
+	if (memcmp(newData.data(), "EXTENDED CPC DSK", 16) == 0) {
 		extended = true;
-	} else if (memcmp(data_.data(), "MV - CPC", 8) == 0) {
+	} else if (memcmp(newData.data(), "MV - CPC", 8) == 0) {
 		extended = false;
 	} else {
 		fprintf(stderr, "DskImage::load: %s is not a CPCEMU/Extended DSK image (bad signature)\n", path.c_str());
-		data_.clear();
 		return false;
 	}
 
-	numTracks_ = data_[0x30];
-	numSides_ = data_[0x31];
-	if (numTracks_ <= 0 || numSides_ <= 0 || numSides_ > 2) {
+	newNumTracks = newData[0x30];
+	newNumSides = newData[0x31];
+	if (newNumTracks <= 0 || newNumSides <= 0 || newNumSides > 2) {
 		fprintf(stderr, "DskImage::load: %s has implausible geometry (%d tracks, %d sides)\n",
-		        path.c_str(), numTracks_, numSides_);
-		data_.clear();
+		        path.c_str(), newNumTracks, newNumSides);
 		return false;
 	}
 
-	tracks_.resize((size_t)(numTracks_ * numSides_));
+	newTracks.resize((size_t)(newNumTracks * newNumSides));
 	long offset = 256;
-	for (int i = 0; i < numTracks_ * numSides_; i++) {
+	for (int i = 0; i < newNumTracks * newNumSides; i++) {
 		int trackSize;
 		if (extended) {
 			// Track-size table lives right after the fixed header fields,
 			// one byte per (track,side) in the same storage order as the
 			// track blocks themselves; actual size = byte * 256. A zero
 			// entry means that track wasn't formatted/present at all.
-			if ((size_t)(0x34 + i) >= data_.size()) break;
-			trackSize = data_[0x34 + i] * 256;
+			if ((size_t)(0x34 + i) >= newData.size()) break;
+			trackSize = newData[0x34 + i] * 256;
 		} else {
 			// Standard (non-extended) DSK: one fixed size for every track,
 			// little-endian uint16 at 0x32-0x33.
-			trackSize = data_[0x32] | (data_[0x33] << 8);
+			trackSize = newData[0x32] | (newData[0x33] << 8);
 		}
 		if (trackSize == 0) continue; // unformatted track, leave dataOffset at -1
-		if (offset + 256 > (long)data_.size()) break; // truncated file, stop here
-		if (memcmp(&data_[offset], "Track-Info", 10) != 0) {
+		if (offset + 256 > (long)newData.size()) break; // truncated file, stop here
+		if (memcmp(&newData[offset], "Track-Info", 10) != 0) {
 			fprintf(stderr, "DskImage::load: %s: missing Track-Info signature at track index %d\n",
 			        path.c_str(), i);
 			break;
 		}
-		tracks_[i].dataOffset = offset;
-		int sectorCount = data_[offset + 0x15];
-		tracks_[i].sectorLengths.resize(sectorCount);
+		newTracks[i].dataOffset = offset;
+		int sectorCount = newData[offset + 0x15];
+		newTracks[i].sectorLengths.resize(sectorCount);
 		int firstN = -1;
 		bool protection6144 = false;
 		bool protection128 = false;
 		for (int j = 0; j < sectorCount; ++j) {
 			long d = offset + 0x18 + j * 8;
-			if (d + 8 > offset + trackSize || d + 8 > (long)data_.size()) {
-				tracks_[i].sectorLengths.resize(j);
+			if (d + 8 > offset + trackSize || d + 8 > (long)newData.size()) {
+				newTracks[i].sectorLengths.resize(j);
 				break;
 			}
-			int n = data_[d + 3];
+			int n = newData[d + 3];
 			if (j == 0) firstN = n;
 			else if (n == 2 && firstN == 6) protection6144 = true;
 			else if (n == j && firstN == 0) protection128 = true;
 		}
 		long dataPos = offset + 0x100;
-		tracks_[i].sectorDataOffsets.resize(tracks_[i].sectorLengths.size());
-		for (int j = 0; j < (int)tracks_[i].sectorLengths.size(); ++j) {
+		newTracks[i].sectorDataOffsets.resize(newTracks[i].sectorLengths.size());
+		for (int j = 0; j < (int)newTracks[i].sectorLengths.size(); ++j) {
 			long d = offset + 0x18 + j * 8;
-			int length = extended ? (data_[d + 6] | (data_[d + 7] << 8)) : (128 << data_[offset + 0x14]);
+			int length = extended ? (newData[d + 6] | (newData[d + 7] << 8)) : (128 << newData[offset + 0x14]);
 			if (extended && protection6144) length = 512;
 			if (extended && protection128) length = 128;
-			int storedLength = extended ? (data_[d + 6] | (data_[d + 7] << 8)) : (128 << data_[offset + 0x14]);
-			if (length < 0 || dataPos + storedLength > offset + trackSize || dataPos + storedLength > (long)data_.size()) {
-				tracks_[i].sectorLengths.resize(j);
-				tracks_[i].sectorDataOffsets.resize(j);
+			int storedLength = extended ? (newData[d + 6] | (newData[d + 7] << 8)) : (128 << newData[offset + 0x14]);
+			if (length < 0 || dataPos + storedLength > offset + trackSize || dataPos + storedLength > (long)newData.size()) {
+				newTracks[i].sectorLengths.resize(j);
+				newTracks[i].sectorDataOffsets.resize(j);
 				break;
 			}
-			tracks_[i].sectorLengths[j] = length;
-			tracks_[i].sectorDataOffsets[j] = dataPos;
+			newTracks[i].sectorLengths[j] = length;
+			newTracks[i].sectorDataOffsets[j] = dataPos;
 			dataPos += storedLength;
 		}
 		offset += trackSize;
 	}
 
+	data_ = std::move(newData);
+	tracks_ = std::move(newTracks);
+	numTracks_ = newNumTracks;
+	numSides_ = newNumSides;
+	rawFormat_ = false;
 	path_ = path;
 	return true;
 }

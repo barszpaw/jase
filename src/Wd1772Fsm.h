@@ -196,8 +196,17 @@ public:
 	bool insertDisk(int driveIndex, const std::string& path)
 	{
 		if (driveIndex < 0 || driveIndex >= kNumDrives) return false;
-		drives_[driveIndex].hasImage = drives_[driveIndex].image.load(path);
-		return drives_[driveIndex].hasImage;
+		// Separate "did THIS call succeed" (the return value) from "is
+		// there currently a usable disk in this drive" (hasImage) -- a
+		// failed load() (2026-11-23: load() itself now leaves the object
+		// untouched on failure, see its own comment) must NOT eject an
+		// already-inserted, still-good disk just because a later re-insert
+		// attempt pointed at a bad path (e.g. the backing file got moved
+		// out from under a running station). hasImage mirrors the
+		// DskImage's own actual state, not this one call's outcome.
+		bool ok = drives_[driveIndex].image.load(path);
+		drives_[driveIndex].hasImage = drives_[driveIndex].image.loaded();
+		return ok;
 	}
 
 	// "Save As" -- see DskImage::saveAs()'s own comment.
@@ -375,8 +384,33 @@ private:
 					statusRegister |= STATUS_CRC_ERROR;
 				else
 					statusRegister &= ~STATUS_CRC_ERROR;
+				// Found live, 2026-11-24: delayCycles used to be set here
+				// and finishCommand() called in the SAME step, so this
+				// settle time never actually gated THIS command's own
+				// completion (finishCommand() clears BUSY/raises INTRQ
+				// unconditionally) -- it only left a stale delayCycles
+				// value behind that tick()'s own early-return (see its own
+				// comment) then silently swallowed up to 30000 cycles'
+				// worth of the NEXT, unrelated command instead. Harmless
+				// on disks where enough real commands/time separate the
+				// two (2-sided/dense images, which happened to never
+				// trigger this), but on 1-sided disks the very next SEEK
+				// TOS issues right after a verify-seek landed inside that
+				// stolen window often enough to stall CAT* for real,
+				// reproduced live (Hardware fault) and confirmed absent
+				// with MAME's wd1772_device, which has no such leak.
+				// Route through the previously-declared-but-unused
+				// SettleDelay substate instead, so tick()'s delay gate
+				// actually postpones THIS verify's own finishCommand().
 				delayCycles = 30000; // settle time, see class comment
+				subState = SubState::SettleDelay;
+				break;
 			}
+			updateTrack0Status();
+			finishCommand();
+			break;
+
+		case SubState::SettleDelay:
 			updateTrack0Status();
 			finishCommand();
 			break;
