@@ -5,9 +5,34 @@ jase
 *.d
 __pycache__/
 tools/virtual_esp01/virtual_esp01
+tools/virtual_esp01/*.log
 tools/fsrv/FSRV.COM
+tools/dsk_browser
+tools/raw2dsk
+tools/wd1772_write_test
+fdd3000_station/fdd3000_station
+fdd3000_station/*.tmp.*
+plugins/*.so
 bin/Win32/
 bin/x64/
+
+# roms/ and disks/ hold local, gitignored ROM/disk content (see their own
+# README.txt, which IS tracked) -- nothing else in either directory is.
+/roms/*
+!/roms/README.txt
+/disks/*
+!/disks/README.txt
+
+# Tool/IDE directories, not project content
+.RECYCLEBIN/
+.claude/
+.codex/
+.idea/
+
+# Scratch/debug output left in the repo root from ad-hoc sessions
+nohup.out
+stdout.strace
+zesarux_index_menu.idx
 
 # Windows-only vendored binaries from the original Visual Studio project —
 # dead weight, we build on Linux via system SDL2 (pkg-config)
@@ -24,7 +49,3 @@ lib/SDL2/x64/
 # generate src/OsdFont.h via tools/font/bake_mago_font.py) — not ours to
 # distribute either, keep local only
 mago1.ttf
-
-# Recall plugin's auto-generated compaction context (populated by its
-# PreCompact hook) — not meant to be committed
-.claude/recall-context.md
