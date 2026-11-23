@@ -70,8 +70,12 @@ make
 This produces a `jase` binary in the project root. `make clean` removes
 the build's `.o` files and the binary.
 
-Needs a real 48K ROM at `zx48.rom` in the working directory (not included
-— copyrighted; not ours to distribute).
+Needs real ROM images (not included — copyrighted; not ours to
+distribute): a 48K ROM at `zx48.rom` in the working directory at minimum,
+plus — for `--fdd3000` — the Timex FDD 3000 interface/station ROMs and
+real `.dsk` images. The
+[Timex Computer World archive on loadzx.com](https://loadzx.com/tcw-archive/?eeFolder=TIMEX-COMPUTER-WORLD)
+is a good source for both.
 
 The `MinZX_SDL.sln`/`.vcxproj` files are for the original Windows/Visual
 Studio project this was forked from (see top of this README) — unrelated
