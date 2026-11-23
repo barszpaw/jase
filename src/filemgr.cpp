@@ -627,6 +627,7 @@ bool FileMgr::loadZ80(const char* filename, MinZX* targetEmulator)
 	size_t dataOffset;
 	uint16_t pc;
 	bool is128k;
+	uint8_t pagingByte = 0; // last OUT to port 0x7FFD -- v2/v3 only, see below
 
 	if (pcField != 0) {
 		// v1: no extended header, PC lives in the base header, and the
@@ -644,6 +645,7 @@ bool FileMgr::loadZ80(const char* filename, MinZX* targetEmulator)
 		const uint8_t* eh = h + 32;
 		pc = (uint16_t)(eh[0] | (eh[1] << 8));
 		uint8_t machineByte = eh[2];
+		pagingByte = eh[3]; // byte 35 in the file: "last OUT to port 0x7FFD"
 		if (extraLen == 23) {
 			version = 2;
 			is128k = (machineByte == 3 || machineByte == 4); // v2: 3=128k, 4=128k+IF1
@@ -695,6 +697,19 @@ bool FileMgr::loadZ80(const char* filename, MinZX* targetEmulator)
 	z80->setIM((Z80::IntMode)(h[29] & 0x03));
 	targetEmulator->setBorderColor(border);
 	z80->setRegPC(pc);
+	if (is128k) {
+		// Real hardware OUT, not a raw field assignment -- confirmed-live
+		// bug (2026-11-17): without this, a 128K v2/v3 snapshot resumes
+		// with whatever reset()'s default paging left (ROM0, bank 0 at
+		// 0xC000), not the file's own recorded ROM/RAM-bank selection --
+		// a snapshot saved with e.g. the 48K ROM paged in (common,
+		// doesn't mean the game itself is 48K-only) then has the CPU
+		// executing the WRONG ROM's bytes at its own PC, hanging in a
+		// tight loop with a solid black screen (reproduced: PC frozen for
+		// 2 real seconds, R register still advancing -- stuck in a HALT/
+		// idle loop in whatever ROM happened to end up paged).
+		targetEmulator->poke_out(0x7FFD, pagingByte);
+	}
 
 	if (version == 1) {
 		std::vector<uint8_t> mem48k;
