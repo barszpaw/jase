@@ -1,0 +1,1 @@
+./jase --machine 48k --rom roms/zx48.rom --fdd3000 --fdd3000-rom roms/fdd3stavi.rom --fdd3000-station-rom roms/fdd3boot.rom --fdd3000-disk-a disks/TOS-Demo_Disk.dsk --fdd3000-disk-b disks/test-tos.dsk
