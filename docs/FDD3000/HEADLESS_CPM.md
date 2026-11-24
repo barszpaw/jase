@@ -58,6 +58,15 @@ to wymagane, jeśli masz normalny desktop.
 Monitor na emulowanym Spectrum (np. przez `--load-tape monitor.zxs.tap`)
 — oba mechanizmy pchają ten sam bajt linku, będą się bić.
 
+**Kody sterujące ekranu**: realny CBIOS mówi VT52 (cursor home/erase/
+pozycjonowanie), nie ANSI — współczesne `telnet`/terminale tego nie
+rozumieją, więc bez tłumaczenia widać surowe znaki sterujące zamiast
+czyszczenia ekranu/pozycjonowania kursora. `MonitorLink.h`'s
+`Vt52ToAnsiFilter` tłumaczy to na żywo (potwierdzone na realnym
+`CONFIGUR.COM`, które mocno używa `ESC Y <wiersz> <kolumna>`) — nic do
+zrobienia po Twojej stronie, po prostu `telnet`/`nc` już dostaje
+poprawny strumień ANSI.
+
 Dostępne tylko w trybie in-process (nie pod `--fdd3000-bridge`) — zobacz
 `Fdd3000::pumpMonitorSocket()`'s own comment.
 
