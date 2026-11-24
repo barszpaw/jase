@@ -279,4 +279,5 @@ private:
 	MonitorLink monitorLink_;
 	SerialListener monitorListener_;
 	int monitorPort_ = 0;
+	Vt52ToAnsiFilter monitorVt52Filter_; // see pumpMonitorSocket()
 };

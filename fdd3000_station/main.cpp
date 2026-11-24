@@ -145,6 +145,7 @@ static void pumpSerialSocket(Listener& listener, int ch, const char* label)
 // separate (pumpMonitorSocket(), once per batch), same split as
 // pumpSerialSocket() above.
 static MonitorLink g_monitorLink;
+static Vt52ToAnsiFilter g_monitorVt52Filter; // see MonitorLink.h's own comment
 static Listener g_monitorListener;
 static int g_monitorPort = 0;
 
@@ -160,12 +161,11 @@ static void pumpMonitorSocket()
 		for (ssize_t i = 0; i < n; i++) g_monitorLink.pushIncomingByte(buf[i]);
 	}
 
-	uint8_t out[256];
-	size_t outLen = 0;
+	std::vector<uint8_t> out;
 	uint8_t b;
-	while (outLen < sizeof(out) && g_monitorLink.popOutgoingByte(b)) out[outLen++] = b;
-	if (outLen > 0) {
-		if (send(g_monitorListener.clientFd, out, outLen, 0) < 0) g_monitorListener.dropClient("monitor");
+	while (g_monitorLink.popOutgoingByte(b)) g_monitorVt52Filter.feed(b, out);
+	if (!out.empty()) {
+		if (send(g_monitorListener.clientFd, out.data(), out.size(), 0) < 0) g_monitorListener.dropClient("monitor");
 	}
 }
 

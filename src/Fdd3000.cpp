@@ -418,12 +418,11 @@ void Fdd3000::pumpMonitorSocket()
 		for (ssize_t i = 0; i < n; i++) monitorLink_.pushIncomingByte(buf[i]);
 	}
 
-	uint8_t out[256];
-	size_t outLen = 0;
+	std::vector<uint8_t> out;
 	uint8_t b;
-	while (outLen < sizeof(out) && monitorLink_.popOutgoingByte(b)) out[outLen++] = b;
-	if (outLen > 0) {
-		if (send(l.clientFd, out, outLen, 0) < 0) dropMonitorClient();
+	while (monitorLink_.popOutgoingByte(b)) monitorVt52Filter_.feed(b, out);
+	if (!out.empty()) {
+		if (send(l.clientFd, out.data(), out.size(), 0) < 0) dropMonitorClient();
 	}
 }
 

@@ -1,6 +1,7 @@
 #pragma once
 #include "FddStation.h"
 #include <cstdint>
+#include <cstdio>
 #include <vector>
 
 // Native C++ reimplementation of the real CBIOS's own console link
@@ -222,4 +223,67 @@ private:
 		station.setHostByte(kErr);
 		state_ = State::Idle;
 	}
+};
+
+// Translates this CBIOS's own VT52-style terminal control codes into their
+// ANSI/VT100 equivalents, so a modern terminal (incl. a plain `telnet` or
+// `nc` client, found live 2026-11-24 not to render the raw VT52 forms at
+// all -- they show up as literal control characters instead of a screen
+// clear/cursor move) displays the real CP/M console correctly. Confirmed
+// against live CBIOS output, not guessed: `ESC H` (cursor home) and
+// `ESC J` (erase cursor-to-end-of-screen, used together for a full clear
+// at boot) from the cold-boot banner; `ESC Y <row+32> <col+32>` (direct
+// 0-based cursor addressing, the classic VT52 form) from CONFIGUR.COM's
+// interactive settings form. Any OTHER `ESC <byte>` sequence is passed
+// through byte-for-byte unchanged -- no evidence this CBIOS sends anything
+// else, and translating an unconfirmed code wrong would be worse than
+// leaving it alone.
+class Vt52ToAnsiFilter
+{
+public:
+	// Feeds one byte from the station's own console output, appending any
+	// translated byte(s) to out. Stateful across calls (not just across
+	// bytes of one call) so a sequence split across two socket reads --
+	// or two popOutgoingByte() drains -- still translates correctly.
+	void feed(uint8_t b, std::vector<uint8_t>& out)
+	{
+		switch (state_) {
+		case State::Normal:
+			if (b == 0x1B) state_ = State::Esc;
+			else out.push_back(b);
+			break;
+		case State::Esc:
+			if (b == 'H' || b == 'J' || b == 'K') {
+				out.push_back(0x1B);
+				out.push_back('[');
+				out.push_back(b); // ANSI H/J/K are byte-compatible with VT52's own cursor-home/erase-to-end/erase-eol semantics -- only the CSI '[' was missing
+				state_ = State::Normal;
+			} else if (b == 'Y') {
+				state_ = State::EscYRow;
+			} else {
+				out.push_back(0x1B);
+				out.push_back(b); // unconfirmed sequence -- pass through unchanged rather than guess
+				state_ = State::Normal;
+			}
+			break;
+		case State::EscYRow:
+			row_ = b;
+			state_ = State::EscYCol;
+			break;
+		case State::EscYCol: {
+			int row = (int)row_ - 0x20 + 1; // VT52: 0-based, byte = value+32; ANSI: 1-based
+			int col = (int)b - 0x20 + 1;
+			char buf[16];
+			int n = snprintf(buf, sizeof(buf), "\x1b[%d;%dH", row, col);
+			for (int i = 0; i < n; i++) out.push_back((uint8_t)buf[i]);
+			state_ = State::Normal;
+			break;
+		}
+		}
+	}
+
+private:
+	enum class State { Normal, Esc, EscYRow, EscYCol };
+	State state_ = State::Normal;
+	uint8_t row_ = 0;
 };
