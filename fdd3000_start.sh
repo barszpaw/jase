@@ -1,1 +1,1 @@
-./jase --machine 128k --rom roms/zx48.rom --fdd3000 --fdd3000-rom roms/fdd3stavi.rom --fdd3000-station-rom roms/fdd3boot.rom
+./jase --machine 128k --rom roms/boot.rom --fdd3000 --fdd3000-rom roms/fdd3stavi.rom --fdd3000-station-rom roms/fdd3boot.rom --fdd3000-serial1-port 10000
