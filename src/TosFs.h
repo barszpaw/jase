@@ -24,12 +24,27 @@
 //     i.e. right after the directory's own 4 units (0-3).
 //   - Directory = the entire 5th track (track index 4, 0-based) = 4096
 //     bytes = 4 allocation units = 128 directory entries (32 bytes each).
-//     Unlike CP/M on this same disk, the directory track's sectors are
-//     stored in PLAIN ASCENDING order (sector id == stored index, verified
-//     on both samples) -- no translate/skew table needed to read it
-//     correctly. Data tracks are ASSUMED to use the same natural ordering
-//     (consistent with the directory track, not independently verified
-//     sector-by-sector against a known file's exact byte content).
+//
+// CORRECTION 2026-11-27: the paragraph above USED to claim the directory
+// track's sectors are stored in plain ascending order, "verified on both
+// samples" -- that check was WORTHLESS, the exact same trap CpmFs.h's own
+// class comment documents hitting for CP/M: reading all 16 physical
+// sectors of a track in ANY order reproduces the same SET of 32-byte
+// directory entries (list() sorts by name regardless), so it can never
+// expose a wrong permutation. The real bug (reported by the user via an
+// independent reference tool, ~/src/TOStools/tos-browser.py, comparing
+// sha256 of a real extracted file) only showed up reading a real file's
+// data content byte-for-byte PAST its first sector -- any skew table
+// starting phys=0 always maps logical index 0 to physical sector 0,
+// masking the bug for single-sector files/reads. TOS actually uses the
+// SAME skew-factor mechanism as CP/M's own translate table
+// (buildSkewTable() in CpmFs.cpp/TosFs.cpp), just a DIFFERENT skew value:
+// 7 for TOS, vs. 5 for CP/M on this same physical media (see CpmFs.h's own
+// class comment) -- two independent BDOS/OS choices over the same disk,
+// confirmed directly by the user 2026-11-27. Fixed in TosFs.cpp's
+// blockSector() (applies to BOTH the directory track and data tracks,
+// since both go through the same function); verified by extracting
+// R-TYPE.SCR and matching its sha256 against tos-browser.py's own output.
 //
 // Directory entry (32 bytes), TWO shapes sharing the same first 12 bytes:
 //   File record:
@@ -114,19 +129,22 @@
 // The other two (`TosTimex320`/`TosTimex320Alt`, two DIFFERENT physical
 // layouts for the same 320KB nominal capacity) originally had no real
 // sample in this repo. Their geometry numbers (reserved tracks, dirEntries)
-// are taken from that table as a reasonable starting point, but their
-// SECTOR ORDERING uses this file's own confirmed natural-order convention,
-// NOT that table's own `generate_xlt_table(16, skew=7)` -- that function
-// implements the exact same skew=7 FORMULA this project's CpmFs.cpp once
-// wrongly assumed for CP/M (found wrong by live memory dump, see CpmFs.h's
-// own class comment) and never independently verified for TOS either (that
-// tool's own `main_cli()` only ever prints directory listings, which
-// -- as this project's own CP/M saga demonstrated -- can look completely
-// correct while the underlying sector mapping is wrong, since listing
-// doesn't exercise translate-table correctness the way reading real file
-// content does). Natural order is this file's OWN independently-verified
-// convention (confirmed by reading real, named, plausible file content on
-// two different real disks).
+// are taken from that table as a reasonable starting point.
+//
+// CORRECTION 2026-11-27: this paragraph used to argue sector ordering
+// should use "this file's own confirmed natural-order convention", NOT
+// that external table's `generate_xlt_table(16, skew=7)` -- backwards.
+// The "confirmation" of natural order was never real (see the top of this
+// comment's 2026-11-27 correction), and skew=7 turned out to be EXACTLY
+// right, for the SAME reason that external tool's author presumably used
+// it: it's the real TOS BDOS translate table, just like CP/M's own
+// skew=5 on this same media. blockSector() now applies it uniformly across
+// every preset (same shared function), so TosTimex320/TosTimex320Alt get
+// the fix too even though neither has had its OWN data content verified
+// byte-for-byte against this exact skew value yet (TosTimex320Alt's prior
+// "independent verification" below was a listing-only check, same
+// listing-is-permutation-invariant trap -- worth re-checking against real
+// file content if this preset is ever exercised for real reads).
 //
 // 2026-11-23: `TosTimex320Alt` is now ALSO independently verified, against
 // a real raw image (`~/src/TOStools/bajtek1_side_ab.img`, 327680 bytes,

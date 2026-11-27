@@ -89,8 +89,39 @@ bool TosFs::openWithPreset(DskImage& dsk, Preset preset)
 	return true;
 }
 
+namespace {
+
+// Logical (deskewed) in-track sector index -> physical sector id, same
+// skew-factor mechanism as CpmFs.cpp's own buildSkewTable(). TOS's value
+// (7) is DIFFERENT from CP/M's on this same media (5, see CpmFs.h's class
+// comment) -- two independent BDOS/OS choices over the same physical disk.
+// Confirmed 2026-11-27 by the user directly, after this file's prior
+// "directory track is plain ascending order" claim turned out to be the
+// exact same worthless permutation-invariant check CpmFs.h documents
+// hitting for CP/M: reading all 16 sectors of a track in ANY order
+// reproduces the same SET of 32-byte directory entries (list() sorts by
+// name anyway), so that check could never expose a wrong permutation. The
+// real bug only showed up reading a real file's data content byte-for-byte
+// past its first sector (which any skew table starting phys=0 always maps
+// correctly at logical index 0, masking the bug for single-sector reads).
+std::vector<int> buildSkewTable(int n, int skew)
+{
+	std::vector<int> table(n), used(n, 0);
+	int phys = 0;
+	for (int logical = 0; logical < n; logical++) {
+		while (used[phys]) phys = (phys + 1) % n;
+		table[logical] = phys;
+		used[phys] = 1;
+		phys = (phys + skew) % n;
+	}
+	return table;
+}
+
+} // namespace
+
 uint8_t* TosFs::blockSector(int blockNumber, int sectorInBlock, int& len) const
 {
+	static const std::vector<int> xlt = buildSkewTable(16, 7); // see anonymous-namespace comment -- CONFIRMED real skew value
 	int unitsPerTrack = geo_.sectorsPerTrack / geo_.sectorsPerBlock; // 4, per side
 	if (geo_.numSides == 2) {
 		// Cylinder-interleaved: side alternates every physical track, same
@@ -103,12 +134,12 @@ uint8_t* TosFs::blockSector(int blockNumber, int sectorInBlock, int& len) const
 		int unitInTrack = rem % unitsPerTrack;
 		int track = geo_.physicalReservedTracks + cylinder;
 		int sectorId = unitInTrack * geo_.sectorsPerBlock + sectorInBlock;
-		return dsk_->findSector(track, side, sectorId, len);
+		return dsk_->findSector(track, side, xlt[sectorId], len);
 	}
 	int track = geo_.physicalReservedTracks + blockNumber / unitsPerTrack;
 	int unitInTrack = blockNumber % unitsPerTrack;
-	int sectorId = unitInTrack * geo_.sectorsPerBlock + sectorInBlock; // natural order, see class comment
-	return dsk_->findSector(track, 0, sectorId, len);
+	int sectorId = unitInTrack * geo_.sectorsPerBlock + sectorInBlock; // logical in-track index, deskewed below
+	return dsk_->findSector(track, 0, xlt[sectorId], len);
 }
 
 uint8_t* TosFs::logicalSector(int logicalIndex, int& len) const
