@@ -519,6 +519,8 @@ static void printUsage(const char* argv0)
 		"                           CONT, STOP, RESET, HARDRESET, NMI,\n"
 		"                           BREAK/UNBREAK addr,\n"
 		"                           BREAKS, PRESSKEYS chord,chord,..., TYPE text,\n"
+		"                           TYPEBASIC text (K/L/E-aware BASIC line entry,\n"
+		"                           {KEYWORD} escapes SS/EXTENDED-mode words),\n"
 		"                           SAVESNA path, LOADZ80 path, SAVEZ80 path,\n"
 		"                           SCREENSHOT path\n"
 		"                         plus one per peripheral (each device owns its\n"
