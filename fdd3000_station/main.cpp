@@ -114,14 +114,29 @@ static Listener g_serial2Listener;
 static int g_serial1Port = 0;
 static int g_serial2Port = 0;
 
+// --serial-auto-xon (see src/Fdd3000.h's own comment for the full
+// rationale): off by default, mirrors the in-process side exactly.
+static bool g_serialAutoXon = false;
+static bool g_pendingAutoXon[2] = {false, false};
+
 static void pumpSerialSocket(Listener& listener, int ch, const char* label)
 {
+	bool wasConnected = listener.clientFd >= 0;
 	listener.acceptIfIdle(label);
+	if (listener.clientFd >= 0 && !wasConnected) {
+		g_station.serial().setCarrierPresent(ch, true);
+		if (g_serialAutoXon) g_pendingAutoXon[ch] = true;
+	}
 	if (listener.clientFd < 0) return;
+
+	if (g_pendingAutoXon[ch] && g_station.serial().isRxEnabled(ch)) {
+		g_station.serial().pushRxByte(ch, 0x11);
+		g_pendingAutoXon[ch] = false;
+	}
 
 	uint8_t buf[256];
 	ssize_t n = recv(listener.clientFd, buf, sizeof(buf), 0);
-	if (n == 0) { listener.dropClient(label); }
+	if (n == 0) { listener.dropClient(label); g_station.serial().setCarrierPresent(ch, false); g_pendingAutoXon[ch] = false; }
 	else if (n > 0) {
 		for (ssize_t i = 0; i < n; i++) g_station.serial().pushRxByte(ch, buf[i]);
 	}
@@ -498,6 +513,14 @@ static void printUsage(const char* argv0)
 		"                         Not bound unless given.\n"
 		"  --serial2-port PORT    same, for WD2123 CH2. Not bound unless\n"
 		"                         given.\n"
+		"  --serial-auto-xon      make a client connecting to --serial1/2-port\n"
+		"                         look like an always-ready RS232 device:\n"
+		"                         once the station actually opens the channel\n"
+		"                         for reading, inject a synthetic XON (0x11)\n"
+		"                         automatically. Off by default -- plain\n"
+		"                         telnet/nc has no XON/XOFF handling of its\n"
+		"                         own, so a real client must send XON itself\n"
+		"                         to unblock a transmit otherwise.\n"
 		"  --monitor-port PORT    src/MonitorLink.h as a local TCP listener --\n"
 		"                         a native reimplementation of the real\n"
 		"                         Monitor Emulator's host-link protocol, so\n"
@@ -590,6 +613,7 @@ int main(int argc, char** argv)
 		else if (a == "--serial1-port" && i + 1 < argc) g_serial1Port = atoi(argv[++i]);
 		else if (a == "--serial2-port" && i + 1 < argc) g_serial2Port = atoi(argv[++i]);
 		else if (a == "--monitor-port" && i + 1 < argc) g_monitorPort = atoi(argv[++i]);
+		else if (a == "--serial-auto-xon") g_serialAutoXon = true;
 		else { fprintf(stderr, "unknown arg: %s (try --help)\n", a.c_str()); return 1; }
 	}
 

@@ -140,6 +140,7 @@ static std::vector<std::string> settingsToArgs(const json& root)
 		args.push_back("--fdd3000-monitor-port");
 		args.push_back(std::to_string(fdd3000["monitorPort"].get<int>()));
 	}
+	flag(jBool(fdd3000, "serialAutoXon"), "--serial-auto-xon");
 
 	const json& dbg = jObj(root, "debugging");
 	if (dbg.contains("debugPort") && !dbg["debugPort"].is_null()) {
@@ -213,6 +214,7 @@ static const char* const kKnownFlags[] = {
 	"--fdd3000", "--fdd3000-rom", "--fdd3000-station-rom",
 	"--fdd3000-disk-a", "--fdd3000-disk-b", "--fdd3000-disk-c", "--fdd3000-disk-d",
 	"--fdd3000-bridge", "--fdd3000-serial1-port", "--fdd3000-serial2-port", "--fdd3000-monitor-port",
+	"--serial-auto-xon",
 	"--debug-port", "--poke", "--pc", "--out", "--trace-port",
 	"--debug-instrtrace", "--debug-iectrace", "--debug-iotrace", "--debug-fdd3000-linktrace",
 	"--debug-fdd3000-wdtrace",
@@ -511,6 +513,16 @@ static void printUsage(const char* argv0)
 		"                         the same time -- both drive the same\n"
 		"                         link-byte latch. In-process mode only.\n"
 		"                         Implies --fdd3000.\n"
+		"  --serial-auto-xon      make a client connecting to\n"
+		"                         --fdd3000-serial1/2-port look like an\n"
+		"                         always-ready RS232 device: once the\n"
+		"                         station actually opens the channel for\n"
+		"                         reading, inject a synthetic XON (0x11)\n"
+		"                         automatically. Off by default -- plain\n"
+		"                         telnet/nc has no XON/XOFF handling of its\n"
+		"                         own (unlike PuTTY's serial mode), so a\n"
+		"                         real client must send XON itself to\n"
+		"                         unblock a transmit otherwise.\n"
 		"\n"
 		"Debugging:\n"
 		"  --debug-port PORT      listen for the line-based debug protocol:\n"
@@ -944,6 +956,9 @@ int main(int argc, char *argv[])
 				std::cerr << "FATAL: --fdd3000-monitor-port: failed to listen on " << argv[i] << std::endl;
 				exit(1);
 			}
+		}
+		else if (0 == strcmp(argv[i], "--serial-auto-xon")) {
+			minZX.getFdd3000()->setSerialAutoXon(true);
 		}
 		else if (0 == strcmp(argv[i], "--debug-instrtrace")) {
 			minZX.setInstrTraceEnabled(true);

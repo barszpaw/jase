@@ -193,6 +193,19 @@ public:
 	bool setSerialPort(int channel, int port);
 	int getSerialPort(int channel) const { return (channel == 0 || channel == 1) ? serialPort_[channel] : 0; }
 
+	// --serial-auto-xon: makes a connecting TCP client (telnet/nc/PuTTY's
+	// raw/telnet mode, none of which have PuTTY's own serial-mode XON/XOFF
+	// handling) look like an always-ready real RS232 device, by injecting
+	// a synthetic XON (0x11) byte into the station's RX once the channel
+	// is actually opened for reading -- see Wd2123::isRxEnabled()'s own
+	// comment for why this can't just happen at connect time (dropped
+	// silently if RX isn't enabled yet). OFF by default: the real,
+	// hands-on-the-wire behavior (nothing arrives until a client
+	// genuinely sends XON) is what the 2026-11-27 WD2123 investigation
+	// actually needed to confirm this CBIOS's flow control is real.
+	void setSerialAutoXon(bool on) { serialAutoXon_ = on; }
+	bool isSerialAutoXon() const { return serialAutoXon_; }
+
 	// Call once per emulated frame (50Hz, same convention as ZiFi::pump()/
 	// Multiply::pump() -- see MinZX::update()): accepts/drops clients and
 	// drains both channels' FIFOs against their sockets.
@@ -277,6 +290,8 @@ private:
 	};
 	SerialListener serialListener_[2];
 	int serialPort_[2] = {0, 0};
+	bool serialAutoXon_ = false;
+	bool pendingAutoXon_[2] = {false, false}; // see setSerialAutoXon()'s own comment
 
 	// MonitorLink local TCP listener -- see setMonitorPort()/
 	// pumpMonitorSocket()'s own comments. Reuses the same SerialListener

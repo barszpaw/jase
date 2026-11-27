@@ -326,6 +326,8 @@ void Fdd3000::acceptSerialIfIdle(int channel)
 		int one = 1;
 		setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 		l.clientFd = fd;
+		station_.serial().setCarrierPresent(channel, true);
+		if (serialAutoXon_) pendingAutoXon_[channel] = true;
 		fprintf(stderr, "Fdd3000: serial%d client connected\n", channel + 1);
 	}
 }
@@ -336,6 +338,8 @@ void Fdd3000::dropSerialClient(int channel)
 	if (l.clientFd >= 0) {
 		close(l.clientFd);
 		l.clientFd = -1;
+		station_.serial().setCarrierPresent(channel, false);
+		pendingAutoXon_[channel] = false;
 		fprintf(stderr, "Fdd3000: serial%d client disconnected\n", channel + 1);
 	}
 }
@@ -355,6 +359,15 @@ void Fdd3000::pumpSerial()
 		acceptSerialIfIdle(ch);
 		SerialListener& l = serialListener_[ch];
 		if (l.clientFd < 0) continue;
+
+		// --serial-auto-xon: fire the synthetic XON as soon as (not
+		// before) the channel is actually open for reading -- see
+		// Wd2123::isRxEnabled()'s own comment for why this can't just
+		// happen once, right at accept time.
+		if (pendingAutoXon_[ch] && station_.serial().isRxEnabled(ch)) {
+			station_.serial().pushRxByte(ch, 0x11);
+			pendingAutoXon_[ch] = false;
+		}
 
 		uint8_t buf[256];
 		ssize_t n = recv(l.clientFd, buf, sizeof(buf), 0);

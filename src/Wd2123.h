@@ -139,6 +139,35 @@ public:
 
 	uint8_t peekStatus(int ch) const { return channels_[ch & 1].status; }
 
+	// True once firmware has written the RX-enable bit (commandReg bit 2)
+	// to this channel's status/command port -- i.e. it has actually opened
+	// the channel for reading, not just configured it. Used by the
+	// --serial-auto-xon bridge feature (Fdd3000.cpp/fdd3000_station's own
+	// pump functions) to know WHEN it's safe to inject a synthetic XON
+	// byte: sending one before this is true is silently dropped by
+	// pushRxByte() below (same gate), exactly the real-hardware-accurate
+	// behavior that caused the 2026-11-27 WD2123 investigation's first
+	// "XON didn't unblock it" false negative.
+	bool isRxEnabled(int ch) const { return (channels_[ch & 1].commandReg & 0x04) != 0; }
+
+	// Sets/clears kStatDcdDsr for a channel -- the one status bit this
+	// class never touched on its own (see class comment: byte-level
+	// shortcut, no real line electrics). The manual is explicit that TOS
+	// checks a HARDWARE handshake before transmitting ("TOS uses software
+	// and hardware protocols to ensure that the transmitter only sends
+	// data when the receiver is ready"), and Appendix D's pinout lists a
+	// real DTR/DSR pair -- so leaving this bit permanently 0 (its reset
+	// value) means firmware polling it before a PRINT *#/CLOSE #* transmit
+	// spins forever once no real line asserts it. The caller (Fdd3000's
+	// accept/drop of a real TCP client standing in for "something is
+	// plugged into this channel") is the only sensible place to flip it.
+	void setCarrierPresent(int ch, bool present)
+	{
+		Channel& c = channels_[ch & 1];
+		if (present) c.status |= kStatDcdDsr;
+		else c.status &= ~kStatDcdDsr;
+	}
+
 	// ---- The byte-level transport's own two calls -- see
 	// fdd3000_station/main.cpp's pumpSerialSocket(), the only caller of
 	// either right now. Deliberately NOT gated behind a Peripheral/SDL
