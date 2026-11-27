@@ -77,6 +77,22 @@ public:
 	int numTracks() const { return numTracks_; }
 	int numSides() const { return numSides_; }
 
+	// True if flush() has a real chance of succeeding -- checks the
+	// underlying file's actual write permission (access(2), W_OK) WITHOUT
+	// opening/truncating anything. Every mutating TosFs/CpmFs entry point
+	// (writeFile/deleteFile/createDirectory) checks this FIRST, before
+	// touching data_ at all: writes land in data_ immediately (see flush()'s
+	// own comment) with no rollback on a later flush() failure, so without
+	// this upfront check a read-only or otherwise-unwritable target (e.g. a
+	// reference disk image checked out with 444 perms) would silently leave
+	// THIS PROCESS's in-memory copy corrupted (a stray write accepted, the
+	// real file never touched) even though the operation correctly reports
+	// failure -- found live 2026-11-28 testing dsk_browser's F5 against a
+	// real read-only sample disk (ghost2a.dsk): the on-disk file stayed
+	// byte-identical (confirmed via md5sum) but the running session's own
+	// directory listing lost a pre-existing entry after the failed write.
+	bool isWritable() const;
+
 	// Finds sector `sectorId` on (track, side). Returns a pointer directly
 	// into the loaded image (writes via writable() land straight back in
 	// the in-memory copy -- see class comment on persistence below) and

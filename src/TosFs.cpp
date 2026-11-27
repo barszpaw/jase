@@ -343,6 +343,10 @@ bool TosFs::readFile(const std::string& name, int userNumber, std::vector<uint8_
 bool TosFs::writeFile(const std::string& name, int userNumber, const std::vector<uint8_t>& data)
 {
 	if (!isWritableGeometry()) return false;
+	// Checked BEFORE any mutation -- see DskImage::isWritable()'s own
+	// comment for why this must come first, not just be left to flush()'s
+	// own failure at the very end.
+	if (!dsk_->isWritable()) return false;
 	std::string normalized = normalizeName(name);
 	auto rawDir = readRawDirectory();
 
@@ -446,6 +450,7 @@ bool TosFs::writeRawDirectoryEntry(int entryIndex, const uint8_t bytes[32])
 bool TosFs::deleteFile(const std::string& name, int userNumber)
 {
 	if (!isWritableGeometry()) return false;
+	if (!dsk_->isWritable()) return false; // see DskImage::isWritable()'s own comment
 	std::string normalized = normalizeName(name);
 	auto rawDir = readRawDirectory();
 
@@ -470,6 +475,7 @@ bool TosFs::deleteFile(const std::string& name, int userNumber)
 bool TosFs::createDirectory(const std::string& name, int parentUserNumber, int& outDirNumber)
 {
 	if (!isWritableGeometry()) return false;
+	if (!dsk_->isWritable()) return false; // see DskImage::isWritable()'s own comment
 	std::string normalized = normalizeName(name);
 	auto rawDir = readRawDirectory();
 

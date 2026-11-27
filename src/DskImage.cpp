@@ -28,6 +28,7 @@
 #include "DskImage.h"
 #include <cstdio>
 #include <cstring>
+#include <unistd.h>
 
 bool DskImage::load(const std::string& path)
 {
@@ -257,6 +258,12 @@ bool DskImage::loadRaw(const std::string& path, int numTracks, int numSides, int
 	path_ = path;
 	rawFormat_ = true;
 	return true;
+}
+
+bool DskImage::isWritable() const
+{
+	if (path_.empty()) return false;
+	return access(path_.c_str(), W_OK) == 0;
 }
 
 bool DskImage::flush()

@@ -1105,7 +1105,7 @@ public:
 			}
 			fclose(f);
 			if (!dst->writeFile(dstName, data)) {
-				errors.push_back(dstName + ": zapis nieudany (nazwa juz istnieje, dysk pelny, lub nieobslugiwana gestosc)");
+				errors.push_back(dstName + ": zapis nieudany (nazwa juz istnieje, dysk pelny, nieobslugiwana gestosc, lub obraz tylko-do-odczytu)");
 				continue;
 			}
 			done++;

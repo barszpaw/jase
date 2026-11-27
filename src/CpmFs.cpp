@@ -251,6 +251,7 @@ bool CpmFs::writeFile(const std::string& name, const std::vector<uint8_t>& data)
 	// been checked against a real sample. Refuse rather than risk writing
 	// a subtly-wrong extent layout to a density we can't verify.
 	if (dpb_.blocks16bit) return false;
+	if (!dsk_->isWritable()) return false; // see DskImage::isWritable()'s own comment -- checked BEFORE any mutation
 
 	auto rawDir = readRawDirectory();
 	std::string normalized = normalizeName(name);
@@ -332,6 +333,7 @@ bool CpmFs::writeFile(const std::string& name, const std::vector<uint8_t>& data)
 
 bool CpmFs::deleteFile(const std::string& name)
 {
+	if (!dsk_->isWritable()) return false; // see DskImage::isWritable()'s own comment -- checked BEFORE any mutation
 	auto rawDir = readRawDirectory();
 	std::string normalized = normalizeName(name);
 
