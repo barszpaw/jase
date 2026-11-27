@@ -2,8 +2,19 @@
 """
 fdd3000_scp_sender.py — wysyła plik na port CH_A/CH_B FDD3000
 (src/Wd2123.h, --fdd3000-serial1-port/--fdd3000-serial2-port), symulując
-drugi komputer podłączony przez RS232C, od którego TOS robi
-`LOAD *":CH_A" ...` / `MERGE *":CH_A"` / `OPEN #*1;":CH_A";i`.
+drugi komputer podłączony przez RS232C.
+
+2026-11-27, user-confirmed na żywo: `LOAD *":CH_A" ...` nie działa
+(błąd "Wrong data type" niezależnie od opcji CODE/SCREEN$ -- przyczyna
+niepotwierdzona). Kierunek, który FAKTYCZNIE odbiera dane, to
+`MOVE *":CH_A" TO ":DISKNAME:NAZWA_PLIKU"` (SCP jako źródło, zapis na
+dysk). Uwaga: MOVE* z SCP nie zna długości pliku z góry (w przeciwieństwie
+do kopiowania dysk-dysk, gdzie długość jest w katalogu) -- jedyny sygnał
+"koniec transmisji" to prawdopodobnie zerwanie połączenia (spadek
+DCD/DSR), dlatego ten skrypt jawnie zamyka gniazdo po wysłaniu całego
+pliku. Jeśli mimo to TOS kopiuje dalej aż do zapełnienia dysku, to
+sygnał że FddStation/Wd2123 nie propaguje poprawnie zerwania łącza do
+stanu MOVE-odbioru -- warto to zdebugować przez LIVEDISASM.
 
 Samo nawiązanie połączenia TCP wystarcza za sprzętowy handshake (DCD/DSR,
 zob. Fdd3000::acceptSerialIfIdle()/setCarrierPresent()) -- w przeciwieństwie
@@ -21,7 +32,7 @@ Użycie:
     python3 fdd3000_scp_sender.py PORT PLIK [--host HOST] [--chunk BAJTY] [--delay SEKUNDY]
 
 Przykład (JASE uruchomiony z --fdd3000-serial1-port 10000, w TOS:
-`LOAD *":CH_A" CODE 16384,6912` albo `LOAD *":CH_A"` dla programu BASIC):
+`MOVE *":CH_A" TO ":EMPTY640:R-TYPE.SCR"`):
     python3 fdd3000_scp_sender.py 10000 tests/dsk_browser/R-TYPE.SCR
 """
 
@@ -65,6 +76,16 @@ def main():
         time.sleep(args.delay)
 
     print(f"done, sent {sent} bytes total", flush=True)
+
+    # Jawne "odloz sluchawke" -- MOVE* z zrodla SCP nie zna dlugosci pliku z
+    # gory (w przeciwienstwie do kopiowania dysk-dysk, gdzie dlugosc jest w
+    # katalogu), wiec jedyny sygnal "koniec transmisji" to prawdopodobnie
+    # zerwanie polaczenia (spadek DCD/DSR -- zob. Fdd3000::dropSerialClient()/
+    # Wd2123::setCarrierPresent()). Samo wyjscie z Pythona zamyka gniazdo
+    # tez, ale niedeterministycznie/z opoznieniem -- to ma byc jawne i od razu.
+    s.shutdown(socket.SHUT_RDWR)
+    s.close()
+    print("connection closed (hangup)", flush=True)
 
 
 if __name__ == "__main__":
