@@ -208,6 +208,21 @@ public:
 
 	bool readFile(const std::string& name, int userNumber, std::vector<uint8_t>& out) const;
 
+	// Writes a NEW file (fails if `name` already exists under `userNumber`)
+	// with `data` as its exact byte content -- no TOS SAVE* header is
+	// synthesized; include one in `data` yourself if you want TOS's own
+	// LOAD*/CAT* to recognize the file's type (see tools/tos_ls.py).
+	// Same extent/allocation-unit model as CpmFs::writeFile() (TOS's own
+	// K/N/E/O/L/R/A fields are a CP/M-2.2-shaped directory entry, see class
+	// comment), adapted for TOS's own allocation-unit numbering (unit 0 =
+	// directory track, real data starts at unit 4) and 256-byte-sector/
+	// 128-byte-record sizing. ONLY for the 1-sided geometry (see
+	// isWritableGeometry()'s own comment, same discipline as deleteFile()
+	// below) and only supports 8-bit allocation-unit numbers (<=16 units/
+	// extent, matching every real sample this project has seen -- same
+	// discipline as CpmFs's own blocks16bit refusal, see its class comment).
+	bool writeFile(const std::string& name, int userNumber, const std::vector<uint8_t>& data);
+
 	// Write support -- ONLY for the 1-sided geometry (see
 	// isWritableGeometry()'s own comment); returns false immediately
 	// otherwise, same discipline as CpmFs's own blocks16bit refusal.

@@ -340,6 +340,97 @@ bool TosFs::readFile(const std::string& name, int userNumber, std::vector<uint8_
 	return true;
 }
 
+bool TosFs::writeFile(const std::string& name, int userNumber, const std::vector<uint8_t>& data)
+{
+	if (!isWritableGeometry()) return false;
+	std::string normalized = normalizeName(name);
+	auto rawDir = readRawDirectory();
+
+	// Allocation units: unit 0-3 is the directory track itself (see class
+	// comment -- TOS's own unit numbering starts THERE, unlike CP/M's
+	// separate reservedTracks/dirReservedBlocks split), real data starts
+	// at unit 4. Scan every non-deleted FILE record's A[16] array (dir
+	// records occupy no allocation units) to find what's actually free.
+	int unitsPerTrack = geo_.sectorsPerTrack / geo_.sectorsPerBlock;
+	int totalUnits = (dsk_->numTracks() - geo_.physicalReservedTracks) * unitsPerTrack;
+	if (totalUnits <= 0) return false;
+	std::vector<bool> unitUsed(totalUnits, false);
+	for (int i = 0; i < 4 && i < totalUnits; i++) unitUsed[i] = true;
+
+	std::vector<int> freeEntries;
+	for (size_t i = 0; i < rawDir.size(); i++) {
+		const auto& e = rawDir[i];
+		if (e[0] == 0xE5) { freeEntries.push_back((int)i); continue; }
+		if (e[0] == 0xFF) continue;
+		if (isDirRecord(e)) continue;
+		if (((int)e[0] & 0x7F) == userNumber && matchesName(e.data(), normalized)) return false; // already exists
+		for (int k = 0; k < 16; k++) {
+			int u = e[16 + k];
+			if (u > 0 && u < totalUnits) unitUsed[u] = true;
+		}
+	}
+
+	// TOS records are 128 bytes, 2 per 256-byte sector, always allocated a
+	// full sector at a time -- L (byte13) carries the exact trailing byte
+	// count so a partially-used last sector doesn't need its own record
+	// granularity (see computeFileSize()'s own comment on the formula).
+	int numSectors = (int)((data.size() + 255) / 256);
+	int totalRecords = numSectors * 2;
+	int lastSectorBytes = (int)(data.size() % 256); // 0 if exact multiple (or empty)
+
+	int unitsNeeded = (numSectors + geo_.sectorsPerBlock - 1) / geo_.sectorsPerBlock;
+	std::vector<int> freeUnits;
+	for (int u = 0; u < totalUnits && (int)freeUnits.size() < unitsNeeded; u++)
+		if (!unitUsed[u]) freeUnits.push_back(u);
+	if ((int)freeUnits.size() < unitsNeeded) return false; // disk full
+
+	const int kRecordsPerUnit = geo_.sectorsPerBlock * 2; // 8
+	const int kUnitsPerExtent = 16; // 8-bit allocation-unit numbers, see class comment
+	const int kRecordsPerExtent = kUnitsPerExtent * kRecordsPerUnit; // 128, RC's own max
+
+	int recordsPlaced = 0;
+	int unitCursor = 0;
+	size_t entryCursor = 0;
+
+	for (int extentNumber = 0; recordsPlaced < totalRecords || (data.empty() && extentNumber == 0); extentNumber++) {
+		if (entryCursor >= freeEntries.size()) return false; // directory full
+		int entryIdx = freeEntries[entryCursor++];
+
+		int recordsThisExtent = std::min(kRecordsPerExtent, totalRecords - recordsPlaced);
+		int unitsThisExtent = (recordsThisExtent + kRecordsPerUnit - 1) / kRecordsPerUnit;
+		bool isLastExtent = (recordsPlaced + recordsThisExtent >= totalRecords);
+
+		uint8_t entry[32] = {};
+		entry[0] = (uint8_t)userNumber;
+		memcpy(entry + 1, normalized.data(), 11);
+		entry[12] = (uint8_t)(extentNumber & 0x1F);  // EX (low 5 bits, see fullExtentNo()'s own comment)
+		entry[13] = isLastExtent ? (uint8_t)lastSectorBytes : 0; // L
+		entry[14] = (uint8_t)(extentNumber >> 5);     // S2
+		entry[15] = (uint8_t)recordsThisExtent;        // RC
+
+		for (int i = 0; i < unitsThisExtent; i++, unitCursor++)
+			entry[16 + i] = (uint8_t)freeUnits[unitCursor];
+
+		int sectorsThisExtent = (recordsThisExtent + 1) / 2;
+		for (int s = 0; s < sectorsThisExtent; s++) {
+			int unit = entry[16 + s / geo_.sectorsPerBlock];
+			int sectorInUnit = s % geo_.sectorsPerBlock;
+			int len = 0;
+			uint8_t* p = blockSector(unit, sectorInUnit, len);
+			if (!p) return false;
+			size_t fileOffset = (size_t)(recordsPlaced / 2 + s) * 256;
+			size_t chunk = (fileOffset < data.size()) ? std::min((size_t)len, data.size() - fileOffset) : 0;
+			if (chunk > 0) memcpy(p, data.data() + fileOffset, chunk);
+		}
+
+		recordsPlaced += recordsThisExtent;
+		if (!writeRawDirectoryEntry(entryIdx, entry)) return false;
+		if (unitsThisExtent == 0) break; // data.empty() case: one zero-length directory entry, done
+	}
+
+	return dsk_->flush();
+}
+
 bool TosFs::writeRawDirectoryEntry(int entryIndex, const uint8_t bytes[32])
 {
 	int entriesPerSector = geo_.sectorSize / 32;

@@ -560,7 +560,8 @@ public:
 	bool writeFile(const std::string& name, const std::vector<uint8_t>& data)
 	{
 		if (format == DiskFormat::Cpm) return cpmFs.writeFile(name, data);
-		return false; // TOS: tylko odczyt
+		if (format == DiskFormat::Tos) return tosFs.writeFile(name, userStack.back(), data);
+		return false;
 	}
 
 	bool deleteFile(const std::string& name)
@@ -1054,16 +1055,12 @@ public:
 
 	void copyLocalToDsk(LocalPanel* src, DskPanel* dst)
 	{
-		// Pisanie NOWEGO pliku to inna operacja niz delete/mkdir (ponizej,
-		// isReadOnly()) -- wymagaloby budowania poprawnych pol O/L/R/A, co
-		// nie jest tu zaimplementowane dla TOS niezaleznie od geometrii
-		// (w przeciwienstwie do delete/mkdir, ktore sa teraz wspierane na
-		// zweryfikowanej 1-stronnej geometrii).
-		if (dst->format == DiskFormat::Tos) {
-			status("Zapis NOWEGO pliku na TOS nie jest wspierany (delete/mkdir tak -- F7/F8).", true);
-			return;
-		}
-
+		// TosFs::writeFile() (2026-11-27) builds proper O/L/R/A fields the
+		// same way CpmFs::writeFile() already did -- dst->writeFile() below
+		// already dispatches to either, gated by TosFs::isWritableGeometry()
+		// itself (1-sided geometry only, same discipline as CpmFs's own
+		// blocks16bit refusal), so no format-specific gate is needed here
+		// anymore.
 		std::vector<Entry> toCopy = src->getMarked();
 		if (toCopy.empty()) {
 			const Entry* e = src->selected();
