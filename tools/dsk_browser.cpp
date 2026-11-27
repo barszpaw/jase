@@ -334,6 +334,23 @@ public:
 		if (parent.empty()) parent = "/";
 		if (parent != path) { path = parent; load(); cursor = offset = 0; }
 	}
+
+	// F7/F8 on the Local panel -- real POSIX mkdir/rmdir/unlink, same MC-
+	// style uniformity DskPanel already has for CP/M/TOS (App::opMkdir()/
+	// opDelete() dispatch here via dynamic_cast, no separate code path).
+	bool createDirectory(const std::string& name)
+	{
+		std::string full = path + "/" + name;
+		return ::mkdir(full.c_str(), 0755) == 0;
+	}
+
+	// rmdir() only removes an EMPTY directory (standard POSIX semantics,
+	// same as MC itself -- no recursive delete here, out of scope).
+	bool deleteEntry(const std::string& name, bool isDir)
+	{
+		std::string full = path + "/" + name;
+		return isDir ? (::rmdir(full.c_str()) == 0) : (::unlink(full.c_str()) == 0);
+	}
 };
 
 // ── Auto-detekcja formatu .dsk (CP/M vs TOS) ─────────────────────────────
@@ -592,7 +609,7 @@ static void drawFkeys(int screenH, int screenW)
 	struct FKey { const char* key; const char* label; };
 	static const FKey keys[] = {
 		{"Ins", "Zaznacz"}, {"F2", "Odswiez"}, {"F3", "Podglad"}, {"F5", "Kopiuj"},
-		{"F7", "Mkdir(tos)"}, {"F8", "Usun(dsk)"}, {"Tab", "Panel"}, {"F10", "Wyjscie"},
+		{"F7", "Mkdir"}, {"F8", "Usun"}, {"Tab", "Panel"}, {"F10", "Wyjscie"},
 	};
 	int n = (int)(sizeof(keys) / sizeof(keys[0]));
 	int x = 0;
@@ -1138,8 +1155,22 @@ public:
 	// zawsze blokowane tam niezaleznie od isReadOnly().
 	void opMkdir()
 	{
-		auto* dp = dynamic_cast<DskPanel*>(activePanel());
-		if (!dp) { status("F7 tworzy podkatalog tylko w panelu obrazu .dsk.", true); return; }
+		Panel* p = activePanel();
+		if (auto* lp = dynamic_cast<LocalPanel*>(p)) {
+			bool ok = false;
+			std::string name = dialogInput("Nazwa nowego katalogu:", "", ok);
+			if (!ok || name.empty()) return;
+			if (!lp->createDirectory(name)) {
+				status("Nie udalo sie utworzyc katalogu \"" + name + "\": " + strerror(errno), true);
+				return;
+			}
+			status("Utworzono katalog \"" + name + "\".");
+			lp->load();
+			redraw();
+			return;
+		}
+		auto* dp = dynamic_cast<DskPanel*>(p);
+		if (!dp) { status("F7 tworzy katalog w panelu Lokalnym lub podkatalog TOS.", true); return; }
 		if (dp->format != DiskFormat::Tos) { status("Podkatalogi istnieja tylko na TOS (CP/M 2.2 ich nie ma).", true); return; }
 		if (dp->isReadOnly()) { status("TOS jest tylko do odczytu w tej przegladarce.", true); return; }
 		bool ok = false;
@@ -1155,8 +1186,33 @@ public:
 
 	void opDelete()
 	{
-		auto* dp = dynamic_cast<DskPanel*>(activePanel());
-		if (!dp) { status("F8 usuwa tylko z panelu obrazu .dsk.", true); return; }
+		Panel* p = activePanel();
+		if (auto* lp = dynamic_cast<LocalPanel*>(p)) {
+			std::vector<Entry> toDelete = lp->getMarked();
+			if (toDelete.empty()) {
+				const Entry* e = lp->selected();
+				if (!e || e->name == "..") return;
+				toDelete.push_back(*e);
+			}
+			std::string label = toDelete.size() == 1 ? toDelete[0].name
+				: std::to_string(toDelete.size()) + " zaznaczonych pozycji";
+			if (!dialogConfirm("Usunac " + label + " lokalnie?")) return;
+			int done = 0;
+			std::vector<std::string> errors;
+			for (auto& e : toDelete) {
+				if (lp->deleteEntry(e.name, e.isDir)) done++;
+				else errors.push_back(e.name + ": " + strerror(errno));
+			}
+			lp->marked.clear();
+			if (!errors.empty()) status("Usunieto " + std::to_string(done) + "/" + std::to_string(toDelete.size()) +
+				". Bledy: " + errors[0], true);
+			else status("Usunieto " + std::to_string(done) + "/" + std::to_string(toDelete.size()) + " pozycji.");
+			lp->load();
+			redraw();
+			return;
+		}
+		auto* dp = dynamic_cast<DskPanel*>(p);
+		if (!dp) { status("F8 usuwa z panelu Lokalnego lub obrazu .dsk.", true); return; }
 		if (dp->isReadOnly()) { status("TOS jest tylko do odczytu w tej przegladarce.", true); return; }
 		std::vector<Entry> toDelete = dp->getMarked();
 		if (toDelete.empty()) {
