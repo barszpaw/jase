@@ -36,6 +36,12 @@ public:
 	bool insertDisk(int driveIndex, const std::string& path);
 	const std::string& diskPath(int driveIndex) const;
 
+	// "Eject" (2026-11-25) -- clears the drive and forgets its path/temp
+	// flag, same bookkeeping insertDisk()/saveDiskAs() each update their
+	// own slice of (diskPaths_/diskIsTemporary_), just resetting instead
+	// of setting.
+	bool ejectDisk(int driveIndex);
+
 	// "Insert New" (2026-11-14, user-directed workflow): creates a blank,
 	// already-formatted disk (see DskImage::createBlank()'s own comment
 	// for the real-geometry facts) at a throwaway TEMP path and inserts

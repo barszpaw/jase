@@ -62,6 +62,16 @@ const std::string& FddStation::diskPath(int driveIndex) const
 	return (driveIndex >= 0 && driveIndex < kNumDrives) ? diskPaths_[driveIndex] : empty;
 }
 
+bool FddStation::ejectDisk(int driveIndex)
+{
+	if (!wd_.ejectDisk(driveIndex)) return false;
+	if (driveIndex >= 0 && driveIndex < kNumDrives) {
+		diskPaths_[driveIndex].clear();
+		diskIsTemporary_[driveIndex] = false;
+	}
+	return true;
+}
+
 bool FddStation::insertNewDisk(int driveIndex, int numTracks, int numSides)
 {
 	if (driveIndex < 0 || driveIndex >= kNumDrives) return false;

@@ -9,6 +9,7 @@
 #include "Multiply.h"
 #include "SDI_8255.h"
 #include "Fdd3000.h"
+#include "TosFs.h"
 #include <nlohmann/json.hpp>
 #include <filesystem>
 #include <algorithm>
@@ -291,7 +292,9 @@ void OsdMenu::activateFile()
 			default: break;
 		}
 		setStatus(ok ? (std::string("Loaded: ") + e.name) : (std::string("Load FAILED: ") + e.name), ok);
-		mode_ = Mode::PeriphDetail;
+		// LoadFdd3000Disk ("Insert Dsk") came from the per-drive submenu --
+		// see the matching Esc-handling comment in handleKey().
+		mode_ = (browseAction_ == Action::LoadFdd3000Disk) ? Mode::Fdd3000DriveMenu : Mode::PeriphDetail;
 		return;
 	}
 
@@ -385,7 +388,7 @@ void OsdMenu::periphDetailRows(PeriphId id, std::vector<std::string>& rows) cons
 			rows.push_back("STATION ROM: " + pathOrNone(p->getStationRomPath()));
 			static const char* kDriveLetter[4] = { "A", "B", "C", "D" };
 			for (int i = 0; i < 4; i++)
-				rows.push_back(std::string("DISK ") + kDriveLetter[i] + ": " + pathOrNone(p->getDiskPath(i)));
+				rows.push_back(std::string("DISK ") + kDriveLetter[i] + " >: " + pathOrNone(p->getDiskPath(i)));
 			// FDD3000's OWN physical reset button, separate from F11/
 			// MinZX::reset() -- see Fdd3000::stationReset()'s own
 			// comment: the real workflow is "swap which disk image is in
@@ -410,6 +413,98 @@ void OsdMenu::openPeriphFileBrowser(Action action, int driveSlot)
 {
 	fdd3000DriveSlot_ = driveSlot;
 	openBrowser(action);
+}
+
+void OsdMenu::openFdd3000DriveMenu(int driveSlot)
+{
+	fdd3000DriveSlot_ = driveSlot;
+	fdd3000DriveMenuSel_ = 0;
+	fdd3000PendingConfirm_ = false;
+	mode_ = Mode::Fdd3000DriveMenu;
+}
+
+void OsdMenu::activateFdd3000DriveMenuRow(int row)
+{
+	Fdd3000* p = minZX_->getFdd3000();
+	bool hasDisk = !p->getDiskPath(fdd3000DriveSlot_).empty();
+	// Guard only the three actions that can actually discard something
+	// (Eject/Insert New/Insert Dsk all REPLACE or REMOVE whatever's
+	// currently in the drive) -- Save Disk never destroys anything, no
+	// guard needed there. See the class comment on fdd3000PendingConfirm_.
+	bool destructive = (row == 0 || row == 1 || row == 2);
+	if (destructive && hasDisk && p->isDiskTemporary(fdd3000DriveSlot_) && !fdd3000PendingConfirm_)
+	{
+		fdd3000PendingConfirm_ = true;
+		setStatus("Unsaved disk! Press again to confirm.", false);
+		return;
+	}
+	fdd3000PendingConfirm_ = false;
+
+	switch (row)
+	{
+		case 0: // EJECT
+			if (!hasDisk) { setStatus("Drive is already empty", false); break; }
+			{
+				bool ok = p->ejectDisk(fdd3000DriveSlot_);
+				setStatus(ok ? "Ejected" : "Eject FAILED", ok);
+			}
+			break;
+		case 1: // INSERT NEW
+			openNewDiskFormatPicker(fdd3000DriveSlot_);
+			break;
+		case 2: // INSERT DSK
+			openPeriphFileBrowser(Action::LoadFdd3000Disk, fdd3000DriveSlot_);
+			break;
+		case 3: // SAVE DISK
+			if (!hasDisk) { setStatus("Drive is empty", false); break; }
+			textPurpose_ = TextPurpose::Fdd3000SaveAs;
+			textLabel_ = "SAVE DISK AS";
+			// Pre-fill with the current real path (lets Enter alone
+			// re-save/overwrite in place) -- but NOT when it's still the
+			// throwaway temp path (isDiskTemporary()), which isn't a
+			// sensible save target to suggest; that case stays empty so
+			// the user has to actually pick a real name, same as the
+			// prompt insertNewDisk() itself triggers.
+			textBuf_ = p->isDiskTemporary(fdd3000DriveSlot_) ? "" : p->getDiskPath(fdd3000DriveSlot_);
+			mode_ = Mode::TextInput;
+			break;
+	}
+}
+
+void OsdMenu::openNewDiskFormatPicker(int driveSlot)
+{
+	fdd3000DriveSlot_ = driveSlot;
+	newDiskFormatSel_ = 0;
+	mode_ = Mode::Fdd3000NewDiskFormat;
+}
+
+void OsdMenu::activateNewDiskFormat()
+{
+	static const TosFs::Preset kPresets[4] = {
+		TosFs::Preset::TosTimex, TosFs::Preset::TosTimex640,
+		TosFs::Preset::TosTimex320, TosFs::Preset::TosTimex320Alt,
+	};
+	TosFs::Preset preset = kPresets[newDiskFormatSel_];
+	int tracks, sides;
+	TosFs::presetGeometry(preset, tracks, sides);
+
+	Fdd3000* p = minZX_->getFdd3000();
+	bool ok = p->insertNewDisk(fdd3000DriveSlot_, tracks, sides);
+	if (!ok)
+	{
+		setStatus("New disk FAILED", false);
+		mode_ = Mode::Fdd3000DriveMenu;
+		return;
+	}
+	// Same throwaway-temp-path convention every "Insert New" disk has
+	// always used (FddStation::insertNewDisk()'s own comment) -- prompt
+	// for a real destination right away instead of leaving the user to
+	// discover saveDiskAs() only exists via the exit-time unsaved-disk
+	// guard.
+	textPurpose_ = TextPurpose::Fdd3000SaveAs;
+	textLabel_ = "SAVE NEW DISK AS";
+	textBuf_.clear();
+	mode_ = Mode::TextInput;
 }
 
 void OsdMenu::activatePeriphDetailRow(PeriphId id, int row)
@@ -455,7 +550,7 @@ void OsdMenu::activatePeriphDetailRow(PeriphId id, int row)
 			if (row == 0) p->setEnabled(!p->isEnabled());
 			else if (row == 1) openPeriphFileBrowser(Action::LoadFdd3000Rom);
 			else if (row == 2) openPeriphFileBrowser(Action::LoadFdd3000StationRom);
-			else if (row >= 3 && row <= 6) openPeriphFileBrowser(Action::LoadFdd3000Disk, row - 3);
+			else if (row >= 3 && row <= 6) openFdd3000DriveMenu(row - 3);
 			else if (row == 7) { p->stationReset(); setStatus("FDD3000 station reset", true); }
 			break;
 		}
@@ -822,6 +917,19 @@ void OsdMenu::startTextField(TextField f)
 
 void OsdMenu::advanceTextField()
 {
+	if (textPurpose_ == TextPurpose::Fdd3000SaveAs)
+	{
+		if (textBuf_.empty())
+		{
+			setStatus("Expected a filename", false);
+			return;
+		}
+		bool ok = minZX_->getFdd3000()->saveDiskAs(fdd3000DriveSlot_, textBuf_.c_str());
+		setStatus(ok ? "Disk saved" : "Save FAILED", ok);
+		mode_ = Mode::Fdd3000DriveMenu;
+		return;
+	}
+
 	if (textPurpose_ == TextPurpose::PeriphHostPort)
 	{
 		size_t colon = textBuf_.rfind(':');
@@ -897,18 +1005,30 @@ void OsdMenu::handleKey(SDL_Scancode sc)
 				// own detail screen, same as a successful load does (see
 				// activateFile()) -- everything else (Snapshot/Tape) goes
 				// back to StorageMenu as before.
-				mode_ = (browseAction_ == Action::LoadSnapshot || browseAction_ == Action::LoadTape)
-				      ? Mode::StorageMenu : Mode::PeriphDetail;
+				// LoadFdd3000Disk ("Insert Dsk") came from the per-drive
+				// submenu, not straight from PeriphDetail -- see
+				// openFdd3000DriveMenu()/activateFdd3000DriveMenuRow().
+				mode_ = (browseAction_ == Action::LoadSnapshot || browseAction_ == Action::LoadTape) ? Mode::StorageMenu
+				      : (browseAction_ == Action::LoadFdd3000Disk) ? Mode::Fdd3000DriveMenu
+				      : Mode::PeriphDetail;
 				break;
 			case Mode::NetworkMenu:   mode_ = Mode::TopMenu; break;
 			case Mode::RemoteList:    mode_ = Mode::NetworkMenu; break;
 			case Mode::ProtoPicker:   mode_ = Mode::RemoteList; break;
 			case Mode::TextInput:
-				// AddRemote abandons the whole wizard back to RemoteList;
-				// a peripheral HOST:PORT field just goes back to that
-				// peripheral's own detail screen (see startHostPortField()).
-				mode_ = (textPurpose_ == TextPurpose::PeriphHostPort) ? Mode::PeriphDetail : Mode::RemoteList;
+				// AddRemote abandons the whole wizard back to RemoteList; a
+				// peripheral HOST:PORT field goes back to that peripheral's
+				// own detail screen; an FDD3000 Save-As (direct "Save Disk"
+				// or the one that follows "Insert New") goes back to the
+				// per-drive submenu it came from. Esc-ing out of Save-As
+				// leaves the disk unsaved -- the exit-guard still catches a
+				// still-temporary one later.
+				mode_ = (textPurpose_ == TextPurpose::PeriphHostPort) ? Mode::PeriphDetail
+				      : (textPurpose_ == TextPurpose::Fdd3000SaveAs) ? Mode::Fdd3000DriveMenu
+				      : Mode::RemoteList;
 				break;
+			case Mode::Fdd3000NewDiskFormat: mode_ = Mode::Fdd3000DriveMenu; break;
+			case Mode::Fdd3000DriveMenu:     mode_ = Mode::PeriphDetail; break;
 			case Mode::RemoteBrowser: remoteDisconnect(); mode_ = Mode::RemoteList; break;
 			case Mode::ZxKeyboard:    mode_ = Mode::TopMenu; break;
 			case Mode::OptionsMenu:   mode_ = Mode::TopMenu; break;
@@ -1003,6 +1123,32 @@ void OsdMenu::handleKey(SDL_Scancode sc)
 			periphDetailSel_ = (periphDetailSel_ + 1) % n;
 		else if (sc == SDL_SCANCODE_RETURN || sc == SDL_SCANCODE_KP_ENTER)
 			activatePeriphDetailRow(detailPeriphId_, periphDetailSel_);
+	}
+	else if (mode_ == Mode::Fdd3000DriveMenu)
+	{
+		const int n = 4; // EJECT, INSERT NEW, INSERT DSK, SAVE DISK
+		if (sc == SDL_SCANCODE_UP)
+		{
+			fdd3000DriveMenuSel_ = (fdd3000DriveMenuSel_ - 1 + n) % n;
+			fdd3000PendingConfirm_ = false; // moved off the armed row -- see class comment
+		}
+		else if (sc == SDL_SCANCODE_DOWN)
+		{
+			fdd3000DriveMenuSel_ = (fdd3000DriveMenuSel_ + 1) % n;
+			fdd3000PendingConfirm_ = false;
+		}
+		else if (sc == SDL_SCANCODE_RETURN || sc == SDL_SCANCODE_KP_ENTER)
+			activateFdd3000DriveMenuRow(fdd3000DriveMenuSel_);
+	}
+	else if (mode_ == Mode::Fdd3000NewDiskFormat)
+	{
+		const int n = 4; // CP/M shares TosFs::Preset::TosTimex's own 40/1 geometry, no separate entry needed
+		if (sc == SDL_SCANCODE_UP)
+			newDiskFormatSel_ = (newDiskFormatSel_ - 1 + n) % n;
+		else if (sc == SDL_SCANCODE_DOWN)
+			newDiskFormatSel_ = (newDiskFormatSel_ + 1) % n;
+		else if (sc == SDL_SCANCODE_RETURN || sc == SDL_SCANCODE_KP_ENTER)
+			activateNewDiskFormat();
 	}
 	else if (mode_ == Mode::RemoteList)
 	{
@@ -1275,8 +1421,34 @@ void OsdMenu::render(uint8_t* pixels, int texW, int texH)
 	if (mode_ == Mode::TextInput)
 	{
 		std::string line = textLabel_ + ": " + textBuf_ + "_";
-		const char* title = (textPurpose_ == TextPurpose::PeriphHostPort) ? "CONNECT" : "ADD REMOTE";
+		const char* title = (textPurpose_ == TextPurpose::PeriphHostPort) ? "CONNECT"
+		                   : (textPurpose_ == TextPurpose::Fdd3000SaveAs) ? "FDD3000"
+		                   : "ADD REMOTE";
 		renderSimpleList(pixels, texW, texH, title, { line }, -1);
+		return;
+	}
+	if (mode_ == Mode::Fdd3000DriveMenu)
+	{
+		Fdd3000* p = minZX_->getFdd3000();
+		static const char* kDriveLetter[4] = { "A", "B", "C", "D" };
+		std::string title = std::string("FDD3000 DISK ") + kDriveLetter[fdd3000DriveSlot_] + ": "
+		                   + pathOrNone(p->getDiskPath(fdd3000DriveSlot_));
+		renderSimpleList(pixels, texW, texH, title.c_str(),
+			{ "EJECT", "INSERT NEW", "INSERT DSK", "SAVE DISK" }, fdd3000DriveMenuSel_,
+			statusFramesLeft_ > 0 ? status_ : "", statusOk_);
+		return;
+	}
+	if (mode_ == Mode::Fdd3000NewDiskFormat)
+	{
+		static const TosFs::Preset kPresets[4] = {
+			TosFs::Preset::TosTimex, TosFs::Preset::TosTimex640,
+			TosFs::Preset::TosTimex320, TosFs::Preset::TosTimex320Alt,
+		};
+		std::vector<std::string> items;
+		for (TosFs::Preset p : kPresets) items.push_back(TosFs::presetName(p));
+		static const char* kDriveLetter[4] = { "A", "B", "C", "D" };
+		std::string title = std::string("NEW DISK ") + kDriveLetter[fdd3000DriveSlot_];
+		renderSimpleList(pixels, texW, texH, title.c_str(), items, newDiskFormatSel_);
 		return;
 	}
 	if (mode_ == Mode::TopMenu)

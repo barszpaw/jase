@@ -130,6 +130,11 @@ public:
 	bool insertDisk(int driveIndex, const char* path);
 	const std::string& getDiskPath(int driveIndex) const { return diskPath_[driveIndex]; }
 
+	// "Eject" -- clears the drive. In bridge mode sends a real EJECT
+	// command over the command channel instead of touching a local
+	// FddStation, same split as insertDisk()/insertNewDisk().
+	bool ejectDisk(int driveIndex);
+
 	// Disk-activity LED signal (2026-11-14, user-directed): true for a
 	// short, human-visible window after the HOST's own last IN/OUT on
 	// port 0xEF (in()/out() below) -- works identically in-process or

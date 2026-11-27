@@ -197,6 +197,21 @@ bool Fdd3000::insertDisk(int driveIndex, const char* path)
 	return ok;
 }
 
+bool Fdd3000::ejectDisk(int driveIndex)
+{
+	if (driveIndex < 0 || driveIndex >= FddStation::kNumDrives) return false;
+	bool ok;
+	if (bridgeMode_) {
+		std::ostringstream cmd;
+		cmd << "EJECT " << driveIndex;
+		ok = debugRequest(cmd.str()).rfind("OK", 0) == 0;
+	} else {
+		ok = station_.ejectDisk(driveIndex);
+	}
+	if (ok) diskPath_[driveIndex].clear();
+	return ok;
+}
+
 bool Fdd3000::insertNewDisk(int driveIndex, int numTracks, int numSides)
 {
 	if (driveIndex < 0 || driveIndex >= FddStation::kNumDrives) return false;

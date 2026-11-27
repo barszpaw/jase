@@ -349,6 +349,12 @@ static std::string handleDebugCommand(const std::string& line)
 		return ok ? "OK" : "ERR failed to load disk";
 	}
 
+	if (cmd == "EJECT" && toks.size() >= 2) {
+		int drive = atoi(toks[1].c_str());
+		bool ok = g_station.ejectDisk(drive);
+		return ok ? "OK" : "ERR failed to eject disk";
+	}
+
 	if (cmd == "NEWDISK" && toks.size() >= 4) {
 		// "Insert New" (2026-11-14) -- toks: NEWDISK <drive> <tracks>
 		// <sides>. No path -- the station generates its own throwaway
@@ -530,6 +536,7 @@ static void printUsage(const char* argv0)
 		"                         workflow is to do this THEN RESET, since\n"
 		"                         the boot ROM only reads drive A at\n"
 		"                         reset time.\n"
+		"  EJECT <drive>          clears a drive back to empty (no disk).\n"
 		"  NEWDISK <drive> <tracks> <sides>  \"Insert New\" -- creates a\n"
 		"                         blank, already-formatted disk at a\n"
 		"                         throwaway temp path (tracks=40/sides=1\n"

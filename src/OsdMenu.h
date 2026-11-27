@@ -89,7 +89,7 @@ public:
 
 private:
 	enum class Mode { Closed, TopMenu, StorageMenu, FileBrowser, NetworkMenu, RemoteList, ProtoPicker, TextInput, RemoteBrowser, ZxKeyboard,
-	                   OptionsMenu, MachinePicker, ResetMenu, PeriphDetail };
+	                   OptionsMenu, MachinePicker, ResetMenu, PeriphDetail, Fdd3000NewDiskFormat, Fdd3000DriveMenu };
 	enum class Action { None, LoadSnapshot, LoadTape,
 	                     LoadMultiface1Rom, LoadDivideRom, LoadDivideDisk, LoadDandanatorRom, LoadSdi8255Rom,
 	                     LoadFdd3000Rom, LoadFdd3000StationRom, LoadFdd3000Disk };
@@ -180,13 +180,47 @@ private:
 	enum class PeriphId { Multiface1, DivIde, Dandanator, Sdi8255, Fdd3000, ZiFi };
 	PeriphId detailPeriphId_ = PeriphId::Multiface1;
 	int periphDetailSel_ = 0;
-	int fdd3000DriveSlot_ = 0; // which of A-D the file browser is currently targeting, see openPeriphFileBrowser()
+	int fdd3000DriveSlot_ = 0; // which of A-D the file browser/new-disk picker/save-as is currently targeting
 
 	void openPeriphDetail(PeriphId id);
 	int periphDetailRowCount(PeriphId id) const;
 	void periphDetailRows(PeriphId id, std::vector<std::string>& rows) const;
 	void activatePeriphDetailRow(PeriphId id, int row);
 	void openPeriphFileBrowser(Action action, int driveSlot = 0);
+
+	// Per-drive FDD3000 submenu (2026-11-25, user-directed redesign --
+	// replaces the old "Enter on DISK X: = load a file" flat row with a
+	// drill-down, same ">" convention every other multi-action peripheral
+	// row already uses): EJECT / INSERT NEW / INSERT DSK / SAVE DISK.
+	// fdd3000DriveSlot_ (above) says which drive; fdd3000PendingConfirm_
+	// guards the three destructive actions (Eject/Insert New/Insert Dsk)
+	// against silently discarding an unsaved "New Disk" still at its
+	// throwaway temp path (Fdd3000::isDiskTemporary()) -- same real risk
+	// the exit-time guard already catches, just checked earlier, per
+	// drive, before the disk is actually replaced/removed instead of only
+	// at whole-program quit. First press on an at-risk drive arms the
+	// guard and shows a warning instead of acting; a second press (same
+	// row) goes through. Any navigation away from the row, or leaving the
+	// submenu, disarms it -- a stale "confirmed" state must never silently
+	// apply to a LATER, different action.
+	int fdd3000DriveMenuSel_ = 0;
+	bool fdd3000PendingConfirm_ = false;
+	void openFdd3000DriveMenu(int driveSlot);
+	void activateFdd3000DriveMenuRow(int row); // Enter in Fdd3000DriveMenu
+
+	// "New Disk" -- Mode::Fdd3000NewDiskFormat picks a geometry (same 4
+	// TosFs presets dsk_browser's own format-choice dialog offers; no
+	// RAW/CP-M-specific entry needed here since createBlank() only cares
+	// about geometry, not filesystem -- see tools/dsk_browser.cpp's own
+	// FormatOption for the read-side equivalent), then Fdd3000::
+	// insertNewDisk() creates it at its usual throwaway temp path (same
+	// flow real "Insert New" always used, see FddStation::insertNewDisk()'s
+	// own comment) and a Fdd3000SaveAs TextInput prompt immediately
+	// follows so the result is actually keepable instead of a dead end
+	// only the exit-guard notices.
+	int newDiskFormatSel_ = 0;
+	void openNewDiskFormatPicker(int driveSlot);
+	void activateNewDiskFormat(); // Enter in Fdd3000NewDiskFormat
 
 	void activateOptions();   // Enter in OptionsMenu
 	void activateMachinePicker(); // Enter in MachinePicker
@@ -312,7 +346,10 @@ private:
 	// via startHostPortField() and completed by the SAME advanceTextField()
 	// Enter handler, branching on textPurpose_ at the top. Esc from this
 	// purpose returns to PeriphDetail, not RemoteList (see handleKey()).
-	enum class TextPurpose { AddRemote, PeriphHostPort };
+	// Fdd3000SaveAs is a third one-shot-field purpose, same shape again --
+	// entered right after activateNewDiskFormat() creates a temp disk,
+	// confirmed by calling Fdd3000::saveDiskAs(fdd3000DriveSlot_, path).
+	enum class TextPurpose { AddRemote, PeriphHostPort, Fdd3000SaveAs };
 	TextPurpose textPurpose_ = TextPurpose::AddRemote;
 	void startHostPortField(const std::string& label, const std::string& initial);
 

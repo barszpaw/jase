@@ -209,6 +209,18 @@ public:
 		return ok;
 	}
 
+	// "Eject" (2026-11-25) -- clears the drive back to empty (no disk).
+	// Deliberately a real functional reset of Drive, not just hasImage=
+	// false, so a leftover in-memory image can't be found by some later
+	// code path that only checks hasImage (same discipline insertDisk()'s
+	// own comment argues for in the other direction).
+	bool ejectDisk(int driveIndex)
+	{
+		if (driveIndex < 0 || driveIndex >= kNumDrives) return false;
+		drives_[driveIndex] = Drive();
+		return true;
+	}
+
 	// "Save As" -- see DskImage::saveAs()'s own comment.
 	bool saveDiskAs(int driveIndex, const std::string& newPath)
 	{
