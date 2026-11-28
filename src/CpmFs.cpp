@@ -350,3 +350,29 @@ bool CpmFs::deleteFile(const std::string& name)
 	if (!any) return false;
 	return dsk_->flush();
 }
+
+bool CpmFs::renameFile(const std::string& oldName, const std::string& newName)
+{
+	if (!dsk_->isWritable()) return false;
+	std::string oldNorm = normalizeName(oldName);
+	std::string newNorm = normalizeName(newName);
+	auto rawDir = readRawDirectory();
+
+	for (const auto& e : rawDir) {
+		if (e[0] == 0xE5) continue;
+		if (matchesName(e.data(), newNorm)) return false; // already exists
+	}
+
+	bool any = false;
+	for (size_t i = 0; i < rawDir.size(); i++) {
+		if (rawDir[i][0] == 0xE5) continue;
+		if (!matchesName(rawDir[i].data(), oldNorm)) continue;
+		uint8_t entry[32];
+		memcpy(entry, rawDir[i].data(), 32);
+		memcpy(entry + 1, newNorm.data(), 11);
+		if (!writeRawDirectoryEntry((int)i, entry)) return false;
+		any = true;
+	}
+	if (!any) return false;
+	return dsk_->flush();
+}

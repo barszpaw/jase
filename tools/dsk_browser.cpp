@@ -351,6 +351,16 @@ public:
 		std::string full = path + "/" + name;
 		return isDir ? (::rmdir(full.c_str()) == 0) : (::unlink(full.c_str()) == 0);
 	}
+
+	// F6: same-directory rename (real POSIX rename(), works for both
+	// files and directories identically -- unlike CP/M/TOS, no name/ext
+	// split or extent bookkeeping to worry about here).
+	bool renameEntry(const std::string& oldName, const std::string& newName)
+	{
+		std::string oldFull = path + "/" + oldName;
+		std::string newFull = path + "/" + newName;
+		return ::rename(oldFull.c_str(), newFull.c_str()) == 0;
+	}
 };
 
 // ── Auto-detekcja formatu .dsk (CP/M vs TOS) ─────────────────────────────
@@ -588,6 +598,16 @@ public:
 		return false;
 	}
 
+	// F6: rename w tym samym katalogu/poziomie uzytkownika. Plik wieloekstentowy
+	// aktualizuje wszystkie ekstenty; podkatalog TOS zachowuje literalny
+	// znacznik "DIR" w rozszerzeniu (patrz TosFs::renameFile()'s own comment).
+	bool renameFile(const std::string& oldName, bool isDir, const std::string& newName)
+	{
+		if (format == DiskFormat::Cpm) return !isDir && cpmFs.renameFile(oldName, newName); // CP/M 2.2 has no subdirectories
+		if (format == DiskFormat::Tos) return tosFs.renameFile(oldName, isDir, userStack.back(), newName);
+		return false;
+	}
+
 	// F7: mkdir. Tylko TOS ma podkatalogi -- CP/M 2.2 nie, wiec wywolujacy
 	// (App::opMkdir()) musi sam sprawdzic format przed pokazaniem dialogu.
 	bool createDirectory(const std::string& name)
@@ -609,7 +629,7 @@ static void drawFkeys(int screenH, int screenW)
 	struct FKey { const char* key; const char* label; };
 	static const FKey keys[] = {
 		{"Ins", "Zaznacz"}, {"F2", "Odswiez"}, {"F3", "Podglad"}, {"F5", "Kopiuj"},
-		{"F7", "Mkdir"}, {"F8", "Usun"}, {"Tab", "Panel"}, {"F10", "Wyjscie"},
+		{"F6", "ZmienNazwe"}, {"F7", "Mkdir"}, {"F8", "Usun"}, {"Tab", "Panel"}, {"F10", "Wyjscie"},
 	};
 	int n = (int)(sizeof(keys) / sizeof(keys[0]));
 	int x = 0;
@@ -1153,6 +1173,36 @@ public:
 
 	// F7: mkdir -- tylko TOS ma podkatalogi w ogole; CP/M 2.2 nie, wiec
 	// zawsze blokowane tam niezaleznie od isReadOnly().
+	// F6: zmiana nazwy w miejscu (ten sam katalog/panel) -- dziala jednolicie
+	// na Lokalnym/CP-M/TOS. Tylko pojedynczy element (bez multi-zaznaczenia,
+	// tak jak prawdziwe MC traktuje F6 inaczej niz F5).
+	void opRename()
+	{
+		Panel* p = activePanel();
+		const Entry* e = p->selected();
+		if (!e || e->name == "..") return;
+		bool ok = false;
+		std::string newName = dialogInput("Nowa nazwa dla \"" + e->name + "\":", e->name, ok);
+		if (!ok || newName.empty() || newName == e->name) return;
+
+		bool done = false;
+		bool isLocal = false;
+		if (auto* lp = dynamic_cast<LocalPanel*>(p)) { isLocal = true; done = lp->renameEntry(e->name, newName); }
+		else if (auto* dp = dynamic_cast<DskPanel*>(p)) {
+			if (dp->isReadOnly()) { status("TOS jest tylko do odczytu w tej przegladarce.", true); return; }
+			done = dp->renameFile(e->name, e->isDir, newName);
+		}
+
+		if (!done) {
+			std::string reason = isLocal ? strerror(errno) : "nazwa docelowa juz istnieje";
+			status("Nie udalo sie zmienic nazwy \"" + e->name + "\": " + reason + ".", true);
+			return;
+		}
+		status("Zmieniono nazwe \"" + e->name + "\" na \"" + newName + "\".");
+		p->load();
+		redraw();
+	}
+
 	void opMkdir()
 	{
 		Panel* p = activePanel();
@@ -1273,6 +1323,7 @@ public:
 			else if (ch == 'r' || ch == KEY_F(2)) loadActive();
 			else if (ch == KEY_F(3)) opView();
 			else if (ch == KEY_F(5)) opCopy();
+			else if (ch == KEY_F(6)) opRename();
 			else if (ch == KEY_F(7)) opMkdir();
 			else if (ch == KEY_F(8)) opDelete();
 			else if (ch == 27) {

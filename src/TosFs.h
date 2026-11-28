@@ -229,6 +229,19 @@ public:
 	// Deletes a FILE (not a subdirectory -- rmdir isn't implemented, no
 	// real sample to confirm an emptiness-check convention against).
 	bool deleteFile(const std::string& name, int userNumber);
+	// Renames a file or subdirectory (K must stay the same -- this is a
+	// same-directory rename, matching real TOS's own `LET *old TO new`:
+	// "Renames a file, directory, or SCP in the SAME directory", see the
+	// timex-fdd-tos skill). A file's name+ext both change; a subdirectory's
+	// ext stays the literal "DIR" marker untouched (see createDirectory()'s
+	// own comment -- never derived from the caller's own name string). A
+	// multi-extent file has one directory entry per extent, all sharing
+	// the same name -- all of them get updated. Fails if `oldName` doesn't
+	// exist under `userNumber`, or `newName` already does (among the same
+	// kind -- files and subdirectories are independent namespaces here,
+	// same convention list()/writeFile() already use).
+	bool renameFile(const std::string& oldName, bool isDir, int userNumber, const std::string& newName);
+
 	// Creates a new, empty subdirectory named `name` inside `parentUserNumber`
 	// (0 = root). Picks the lowest D number not already used anywhere on the
 	// disk (matching how every real sample's D values are small and appear

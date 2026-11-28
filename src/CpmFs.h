@@ -118,6 +118,13 @@ public:
 	// CP/M, which only ever marks directory entries, never scrubs data.
 	bool deleteFile(const std::string& name);
 
+	// Rewrites the name+ext bytes of every extent matching `oldName` to
+	// `newName` (a multi-extent file has one directory entry per extent,
+	// all sharing the same name -- all of them need updating, same as a
+	// real REN would). Fails if `oldName` doesn't exist or `newName`
+	// already does (no partial rename left behind either way).
+	bool renameFile(const std::string& oldName, const std::string& newName);
+
 private:
 	struct Dpb {
 		int reservedTracks = 2;

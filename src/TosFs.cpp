@@ -472,6 +472,74 @@ bool TosFs::deleteFile(const std::string& name, int userNumber)
 	return dsk_->flush();
 }
 
+bool TosFs::renameFile(const std::string& oldName, bool isDir, int userNumber, const std::string& newName)
+{
+	if (!isWritableGeometry()) return false;
+	if (!dsk_->isWritable()) return false;
+	std::string oldNorm = normalizeName(oldName);
+	std::string newNorm = normalizeName(newName);
+	auto rawDir = readRawDirectory();
+
+	// A subdirectory's own ext bytes are always the literal "DIR" marker
+	// (see createDirectory()'s own comment), never derived from the
+	// caller's name string -- normalizeName("OLDDIR") pads the ext with
+	// blanks, which would never matchesName() against a real "DIR" ext, so
+	// directory lookups compare ONLY the 8-byte base name. `isDir` comes
+	// from the caller's own already-loaded Entry (dsk_browser's UI already
+	// knows this -- no need to guess/discover it here, which would be
+	// ambiguous anyway since a file and a directory CAN coincidentally
+	// share a base name, see list()/writeFile()'s own "independent
+	// namespaces" comment).
+	auto matches = [&](const uint8_t entry[32], const std::string& normalized11) {
+		if (isDir) {
+			for (int i = 0; i < 8; i++)
+				if ((entry[1 + i] & 0x7F) != (uint8_t)normalized11[i]) return false;
+			return true;
+		}
+		return matchesName(entry, normalized11);
+	};
+
+	bool anyMatch = false;
+	for (const auto& e : rawDir) {
+		if (e[0] == 0xE5 || e[0] == 0xFF) continue;
+		if (((int)e[0] & 0x7F) != userNumber) continue;
+		if (isDirRecord(e) != isDir) continue;
+		if (matches(e.data(), oldNorm)) { anyMatch = true; break; }
+	}
+	if (!anyMatch) return false;
+
+	for (const auto& e : rawDir) {
+		if (e[0] == 0xE5 || e[0] == 0xFF) continue;
+		if (((int)e[0] & 0x7F) != userNumber) continue;
+		if (isDirRecord(e) != isDir) continue; // files/dirs are independent namespaces, see list()/writeFile()
+		if (matches(e.data(), newNorm)) return false; // already exists
+	}
+
+	bool any = false;
+	for (size_t i = 0; i < rawDir.size(); i++) {
+		const auto& e = rawDir[i];
+		if (e[0] == 0xE5 || e[0] == 0xFF) continue;
+		if (((int)e[0] & 0x7F) != userNumber) continue;
+		if (isDirRecord(e) != isDir) continue;
+		if (!matches(e.data(), oldNorm)) continue;
+		uint8_t entry[32];
+		memcpy(entry, e.data(), 32);
+		// A subdirectory's ext stays the literal "DIR" marker -- only its
+		// 8-byte base name changes; a file's full 11-byte name+ext
+		// changes. Preserve whatever hidden/protected flag bits (bit7)
+		// were already there.
+		int nameLen = isDir ? 8 : 11;
+		for (int k = 0; k < nameLen; k++) {
+			uint8_t highBit = entry[1 + k] & 0x80;
+			entry[1 + k] = (uint8_t)(newNorm[k] | highBit);
+		}
+		if (!writeRawDirectoryEntry((int)i, entry)) return false;
+		any = true;
+	}
+	if (!any) return false;
+	return dsk_->flush();
+}
+
 bool TosFs::createDirectory(const std::string& name, int parentUserNumber, int& outDirNumber)
 {
 	if (!isWritableGeometry()) return false;
